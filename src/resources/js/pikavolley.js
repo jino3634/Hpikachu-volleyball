@@ -41,7 +41,7 @@ export class PikachuVolleyball {
     this.physics = new PikaPhysics(true, true);
     this.keyboardArray = [
       new PikaKeyboard('KeyD', 'KeyG', 'KeyR', 'KeyV', 'KeyZ', 'KeyF'), // for player1
-      new PikaKeyboard( // for player2
+      new PikaKeyboard(
         'ArrowLeft',
         'ArrowRight',
         'ArrowUp',
@@ -111,37 +111,165 @@ export class PikachuVolleyball {
      * @type {GameState}
      */
     this.state = this.intro;
+
+    // ------------------------------------------------------------
+    // ✅ 컨트롤 관련 (여기부터가 "다음 단계" 핵심)
+    // ------------------------------------------------------------
+
+    this.controlMode = 'builtin'; // 'builtin' | 'external'
+    this.decisionInterval = 2;
+    this._decisionPhase = 0;
+    this._heldActionP1 = 0;
+    this._heldActionP2 = 0;
+
+    this._prevExternalRoundLike = false;
+
+    // external agent hooks
+    this.agent1 = null;
+    this.agent2 = null;
+
+    // ✅ 플레이어별 external on/off (혼합 모드 핵심)
+    // - externalEnabled=true면: agent -> keyboard override 적용
+    // - false면: override 제거만 하고(=입력 개입 X), 내장AI/사람 입력이 동작
+    this.externalEnabledP1 = true;
+    this.externalEnabledP2 = true;
+
+    // 학습/관측용: 마지막 step에서 나온 round events 저장
+    this._lastRoundEvents = null;
+
+    this.headless = false; // 로직 전용(나중에 렌더 스킵 등에 쓸 수 있음)
+  }
+
+  _isRoundLikeState() {
+    return (
+      this.state === this.round ||
+      this.state === this.afterEndOfRound ||
+      this.state === this.beforeStartOfNextRound
+    );
+  }
+
+  _applyActionToKeyboard(kb, actionId, phaseInDecisionInterval, playerIndex) {
+    let x = 0, y = 0, p = 0;
+
+    switch (actionId) {
+      case 0: break;                 // IDLE
+      case 1: x = -1; break;         // LEFT
+      case 2: x = 1; break;          // RIGHT
+      case 3: y = -1; break;         // JUMP
+      case 4: x = -1; y = -1; break; // JUMP_LEFT
+      case 5: x = 1; y = -1; break;  // JUMP_RIGHT
+
+      // POWER 계열 (powerHit는 1프레임 트리거)
+      case 6: p = 1; break;                  // POWER_NEUTRAL
+      case 7: x = -1; p = 1; break;          // POWER_LEFT
+      case 8: x = 1; p = 1; break;           // POWER_RIGHT
+      case 9: y = 1; p = 1; break;           // POWER_DOWN (공중에서만 의미)
+      default: break;
+    }
+
+    // ✅ powerHit는 decision 구간의 "첫 프레임(phase=0)"에만 발생시키기
+    if (p === 1 && phaseInDecisionInterval !== 0) {
+      p = 0;
+    }
+
+    // ✅ POWER_DOWN은 공중에서만 의미: 지상이면 DOWN 제거
+    if (actionId === 9) {
+      const player = this.physics[`player${playerIndex}`];
+      const isAir = player.y < 244; // physics.js의 PLAYER_TOUCHING_GROUND_Y_COORD = 244
+      if (!isAir) y = 0;
+    }
+
+    kb.setOverrideInput(x, y, p);
   }
 
   /**
    * Game loop
-   * This function should be called at regular intervals ( interval = (1 / FPS) second )
    */
   gameLoop() {
+    this.stepLogic();
+  }
+
+  /**
+   * Advance exactly "one logical frame"
+   * @returns {boolean} true if processed, false if skipped/paused
+   */
+  stepLogic() {
     if (this.paused === true) {
-      return;
+      return false;
     }
+
+    // Slow motion frame skipping (keeps original behavior)
     if (this.slowMotionFramesLeft > 0) {
       this.slowMotionNumOfSkippedFrames++;
-      if (
-        this.slowMotionNumOfSkippedFrames %
-          Math.round(this.normalFPS / this.slowMotionFPS) !==
-        0
-      ) {
-        return;
+
+      const skipMod = Math.round(this.normalFPS / this.slowMotionFPS);
+      if (this.slowMotionNumOfSkippedFrames % skipMod !== 0) {
+        return false;
       }
+
       this.slowMotionFramesLeft--;
       this.slowMotionNumOfSkippedFrames = 0;
     }
-    // catch keyboard input and freeze it
+
+    const roundLike = this._isRoundLikeState();
+    const externalRoundLike = (this.controlMode === 'external' && roundLike);
+
+    // externalRoundLike 모드 진입 시 phase 정렬
+    if (externalRoundLike && this._decisionPhase !== 0 && this._prevExternalRoundLike !== true) {
+      this._decisionPhase = 0;
+    }
+    this._prevExternalRoundLike = externalRoundLike;
+
+    if (externalRoundLike) {
+      const phase = this._decisionPhase;
+
+      if (phase === 0) {
+        // ✅ externalEnabled인 쪽만 chooseAction 수행
+        if (this.externalEnabledP1 && this.agent1 && typeof this.agent1.chooseAction === 'function') {
+          const obs1 = this.getObservation(1);
+          this._heldActionP1 = (this.agent1.chooseAction(obs1, 1, this) | 0);
+        }
+        if (this.externalEnabledP2 && this.agent2 && typeof this.agent2.chooseAction === 'function') {
+          const obs2 = this.getObservation(2);
+          this._heldActionP2 = (this.agent2.chooseAction(obs2, 2, this) | 0);
+        }
+      }
+
+      // ✅ externalEnabled인 쪽만 override 주입
+      if (this.externalEnabledP1) {
+        this._applyActionToKeyboard(this.keyboardArray[0], this._heldActionP1, phase, 1);
+      } else {
+        // builtin/사람 입력이 쓰도록 override만 제거
+        this.keyboardArray[0].clearOverrideInput();
+      }
+
+      if (this.externalEnabledP2) {
+        this._applyActionToKeyboard(this.keyboardArray[1], this._heldActionP2, phase, 2);
+      } else {
+        this.keyboardArray[1].clearOverrideInput();
+      }
+
+      this._decisionPhase = (this._decisionPhase + 1) % this.decisionInterval;
+    } else {
+      // builtin 모드거나 round가 아니면 override 끔
+      this.keyboardArray[0].clearOverrideInput();
+      this.keyboardArray[1].clearOverrideInput();
+      this._decisionPhase = 0;
+    }
+
+    // ✅ 사람 입력/override를 실제 x/y/powerHit로 확정
+    // (override가 있으면 keyboard.js에서 override 우선 적용됨)
     this.keyboardArray[0].getInput();
     this.keyboardArray[1].getInput();
+
+    // 상태 실행
     this.state();
+
+    return true;
   }
 
   /**
    * Intro: a man with a brief case
-   * @type {GameState}
    */
   intro() {
     if (this.frameCounter === 0) {
@@ -170,7 +298,6 @@ export class PikachuVolleyball {
 
   /**
    * Menu: select who do you want to play. With computer? With friend?
-   * @type {GameState}
    */
   menu() {
     if (this.frameCounter === 0) {
@@ -256,7 +383,6 @@ export class PikachuVolleyball {
 
   /**
    * Fade out after menu selection
-   * @type {GameState}
    */
   afterMenuSelection() {
     this.view.fadeInOut.changeBlackAlphaBy(1 / 16);
@@ -268,8 +394,7 @@ export class PikachuVolleyball {
   }
 
   /**
-   * Delay before start of new game (This is for the delay that exist in the original game)
-   * @type {GameState}
+   * Delay before start of new game
    */
   beforeStartOfNewGame() {
     this.frameCounter++;
@@ -281,53 +406,88 @@ export class PikachuVolleyball {
   }
 
   /**
-   * Start of new game: Initialize ball and players and print game start message
-   * @type {GameState}
+   * Start of new game
    */
   startOfNewGame() {
-    if (this.frameCounter === 0) {
-      this.view.game.visible = true;
+    const events = this.startOfNewGameLogic();
+    this.startOfNewGameView(events);
+  }
+
+  startOfNewGameLogic() {
+    const isFirstFrame = this.frameCounter === 0;
+
+    if (isFirstFrame) {
+      // Flags
       this.gameEnded = false;
       this.roundEnded = false;
       this.isPlayer2Serve = false;
+
+      // Physics flags
       this.physics.player1.gameEnded = false;
       this.physics.player1.isWinner = false;
       this.physics.player2.gameEnded = false;
       this.physics.player2.isWinner = false;
 
+      // Scores
       this.scores[0] = 0;
       this.scores[1] = 0;
-      this.view.game.drawScoresToScoreBoards(this.scores);
 
+      // Init physics state
       this.physics.player1.initializeForNewRound();
       this.physics.player2.initializeForNewRound();
       this.physics.ball.initializeForNewRound(this.isPlayer2Serve);
-      this.view.game.drawPlayersAndBall(this.physics);
+    }
 
-      this.view.fadeInOut.setBlackAlphaTo(1); // set black screen
+    this.frameCounter++;
+
+    const viewFrame = this.frameCounter;
+    const shouldTransitionToRound =
+      this.frameCounter >= this.frameTotal.startOfNewGame;
+
+    if (shouldTransitionToRound) {
+      this.frameCounter = 0;
+      this.state = this.round;
+    }
+
+    return {
+      isFirstFrame,
+      shouldTransitionToRound,
+      viewFrame,
+    };
+  }
+
+  startOfNewGameView(events) {
+    if (events.isFirstFrame) {
+      this.view.game.visible = true;
+      this.view.game.drawScoresToScoreBoards(this.scores);
+      this.view.game.drawPlayersAndBall(this.physics);
+      this.view.fadeInOut.setBlackAlphaTo(1);
       this.audio.sounds.bgm.play();
     }
 
     this.view.game.drawGameStartMessage(
-      this.frameCounter,
+      events.viewFrame,
       this.frameTotal.startOfNewGame
     );
-    this.view.game.drawCloudsAndWave();
-    this.view.fadeInOut.changeBlackAlphaBy(-(1 / 17)); // fade in
-    this.frameCounter++;
 
-    if (this.frameCounter >= this.frameTotal.startOfNewGame) {
-      this.frameCounter = 0;
+    this.view.game.drawCloudsAndWave();
+    this.view.fadeInOut.changeBlackAlphaBy(-(1 / 17));
+
+    if (events.shouldTransitionToRound) {
       this.view.fadeInOut.setBlackAlphaTo(0);
-      this.state = this.round;
     }
   }
 
   /**
-   * Round: the players play volleyball in this game state
-   * @type {GameState}
+   * Round
    */
   round() {
+    const events = this.roundLogic();
+    this._lastRoundEvents = events;
+    this.roundView(events);
+  }
+
+  roundLogic() {
     const pressedPowerHit =
       this.keyboardArray[0].powerHit === 1 ||
       this.keyboardArray[1].powerHit === 1;
@@ -338,32 +498,68 @@ export class PikachuVolleyball {
       pressedPowerHit
     ) {
       this.frameCounter = 0;
-      this.view.game.visible = false;
       this.state = this.intro;
-      return;
+      return {
+        pressedPowerHit,
+        isBallTouchingGround: false,
+        exitToIntro: true,
+        becameGameEnded: false,
+        gameEnded: this.gameEnded,
+        roundEnded: this.roundEnded,
+        scored: 0,
+        scorerPunchX: null,
+        shouldDrawGameEndMessage: false,
+        shouldFadeOutToAfterEndOfRound: false,
+        shouldHideGameView: true,
+      };
     }
 
     const isBallTouchingGround = this.physics.runEngineForNextFrame(
       this.keyboardArray
     );
 
-    this.playSoundEffect();
-    this.view.game.drawPlayersAndBall(this.physics);
-    this.view.game.drawCloudsAndWave();
-
     if (this.gameEnded === true) {
-      this.view.game.drawGameEndMessage(this.frameCounter);
       this.frameCounter++;
       if (
         this.frameCounter >= this.frameTotal.gameEnd ||
         (this.frameCounter >= 70 && pressedPowerHit)
       ) {
         this.frameCounter = 0;
-        this.view.game.visible = false;
         this.state = this.intro;
+        return {
+          pressedPowerHit,
+          isBallTouchingGround,
+          exitToIntro: true,
+          becameGameEnded: false,
+          gameEnded: true,
+          roundEnded: this.roundEnded,
+          scored: 0,
+          scorerPunchX: null,
+          shouldDrawGameEndMessage: true,
+          shouldFadeOutToAfterEndOfRound: false,
+          shouldHideGameView: true,
+        };
       }
-      return;
+
+      return {
+        pressedPowerHit,
+        isBallTouchingGround,
+        exitToIntro: false,
+        becameGameEnded: false,
+        gameEnded: true,
+        roundEnded: this.roundEnded,
+        scored: 0,
+        scorerPunchX: null,
+        shouldDrawGameEndMessage: true,
+        shouldFadeOutToAfterEndOfRound: false,
+        shouldHideGameView: false,
+      };
     }
+
+    /** @type {0|1|2} */
+    let scored = 0;
+    /** @type {boolean} */
+    let becameGameEnded = false;
 
     if (
       isBallTouchingGround &&
@@ -371,11 +567,16 @@ export class PikachuVolleyball {
       this.roundEnded === false &&
       this.gameEnded === false
     ) {
-      if (this.physics.ball.punchEffectX < GROUND_HALF_WIDTH) {
+      const punchX = this.physics.ball.punchEffectX;
+
+      if (punchX < GROUND_HALF_WIDTH) {
         this.isPlayer2Serve = true;
         this.scores[1] += 1;
+        scored = 2;
+
         if (this.scores[1] >= this.winningScore) {
           this.gameEnded = true;
+          becameGameEnded = true;
           this.physics.player1.isWinner = false;
           this.physics.player2.isWinner = true;
           this.physics.player1.gameEnded = true;
@@ -384,34 +585,96 @@ export class PikachuVolleyball {
       } else {
         this.isPlayer2Serve = false;
         this.scores[0] += 1;
+        scored = 1;
+
         if (this.scores[0] >= this.winningScore) {
           this.gameEnded = true;
+          becameGameEnded = true;
           this.physics.player1.isWinner = true;
           this.physics.player2.isWinner = false;
           this.physics.player1.gameEnded = true;
           this.physics.player2.gameEnded = true;
         }
       }
-      this.view.game.drawScoresToScoreBoards(this.scores);
+
       if (this.roundEnded === false && this.gameEnded === false) {
         this.slowMotionFramesLeft = this.SLOW_MOTION_FRAMES_NUM;
       }
+
       this.roundEnded = true;
+
+      return {
+        pressedPowerHit,
+        isBallTouchingGround,
+        exitToIntro: false,
+        becameGameEnded,
+        gameEnded: this.gameEnded,
+        roundEnded: this.roundEnded,
+        scored,
+        scorerPunchX: this.physics.ball.punchEffectX,
+        shouldDrawGameEndMessage: false,
+        shouldFadeOutToAfterEndOfRound: false,
+        shouldHideGameView: false,
+      };
     }
 
-    if (this.roundEnded === true && this.gameEnded === false) {
-      // if this is the last frame of this round, begin fade out
-      if (this.slowMotionFramesLeft === 0) {
-        this.view.fadeInOut.changeBlackAlphaBy(1 / 16); // fade out
-        this.state = this.afterEndOfRound;
-      }
+    if (this.roundEnded && !this.gameEnded && this.slowMotionFramesLeft === 0) {
+      this.frameCounter = 0;
+      this.state = this.afterEndOfRound;
+      return {
+        pressedPowerHit,
+        isBallTouchingGround,
+        exitToIntro: false,
+        becameGameEnded: false,
+        gameEnded: false,
+        roundEnded: true,
+        scored: 0,
+        scorerPunchX: null,
+        shouldDrawGameEndMessage: false,
+        shouldFadeOutToAfterEndOfRound: true,
+        shouldHideGameView: false,
+      };
+    }
+
+    this.frameCounter++;
+
+    return {
+      pressedPowerHit,
+      isBallTouchingGround,
+      exitToIntro: false,
+      becameGameEnded: false,
+      gameEnded: this.gameEnded,
+      roundEnded: this.roundEnded,
+      scored: 0,
+      scorerPunchX: null,
+      shouldDrawGameEndMessage: false,
+      shouldFadeOutToAfterEndOfRound: false,
+      shouldHideGameView: false,
+    };
+  }
+
+  roundView(events) {
+    this.playSoundEffect();
+    this.view.game.drawPlayersAndBall(this.physics);
+    this.view.game.drawCloudsAndWave();
+
+    if (events.shouldDrawGameEndMessage === true) {
+      this.view.game.drawGameEndMessage(this.frameCounter);
+    }
+
+    if (events.scored !== 0) {
+      this.view.game.drawScoresToScoreBoards(this.scores);
+    }
+
+    if (events.shouldFadeOutToAfterEndOfRound === true) {
+      this.view.fadeInOut.changeBlackAlphaBy(1 / 16);
+    }
+
+    if (events.shouldHideGameView === true) {
+      this.view.game.visible = false;
     }
   }
 
-  /**
-   * Fade out after end of round
-   * @type {GameState}
-   */
   afterEndOfRound() {
     this.view.fadeInOut.changeBlackAlphaBy(1 / 16);
     this.frameCounter++;
@@ -421,41 +684,60 @@ export class PikachuVolleyball {
     }
   }
 
-  /**
-   * Before start of next round, initialize ball and players, and print ready message
-   * @type {GameState}
-   */
   beforeStartOfNextRound() {
-    if (this.frameCounter === 0) {
-      this.view.fadeInOut.setBlackAlphaTo(1);
-      this.view.game.drawReadyMessage(false);
+    const events = this.beforeStartOfNextRoundLogic();
+    this.beforeStartOfNextRoundView(events);
+  }
 
+  beforeStartOfNextRoundLogic() {
+    const isFirstFrame = this.frameCounter === 0;
+
+    if (isFirstFrame) {
       this.physics.player1.initializeForNewRound();
       this.physics.player2.initializeForNewRound();
       this.physics.ball.initializeForNewRound(this.isPlayer2Serve);
+    }
+
+    this.frameCounter++;
+
+    const shouldToggleReady = this.frameCounter % 5 === 0;
+
+    const shouldTransitionToRound =
+      this.frameCounter >= this.frameTotal.beforeStartOfNextRound;
+
+    if (shouldTransitionToRound) {
+      this.frameCounter = 0;
+      this.roundEnded = false;
+      this.state = this.round;
+    }
+
+    return {
+      isFirstFrame,
+      shouldToggleReady,
+      shouldTransitionToRound,
+    };
+  }
+
+  beforeStartOfNextRoundView(events) {
+    if (events.isFirstFrame) {
+      this.view.fadeInOut.setBlackAlphaTo(1);
+      this.view.game.drawReadyMessage(false);
       this.view.game.drawPlayersAndBall(this.physics);
     }
 
     this.view.game.drawCloudsAndWave();
     this.view.fadeInOut.changeBlackAlphaBy(-(1 / 16));
 
-    this.frameCounter++;
-    if (this.frameCounter % 5 === 0) {
+    if (events.shouldToggleReady) {
       this.view.game.toggleReadyMessage();
     }
 
-    if (this.frameCounter >= this.frameTotal.beforeStartOfNextRound) {
-      this.frameCounter = 0;
+    if (events.shouldTransitionToRound) {
       this.view.game.drawReadyMessage(false);
       this.view.fadeInOut.setBlackAlphaTo(0);
-      this.roundEnded = false;
-      this.state = this.round;
     }
   }
 
-  /**
-   * Play sound effect on {@link round}
-   */
   playSoundEffect() {
     const audio = this.audio;
     for (let i = 0; i < 2; i++) {
@@ -489,18 +771,111 @@ export class PikachuVolleyball {
       }
     }
     if (sound.powerHit === true) {
-      audio.sounds.powerHit.play(leftOrCenterOrRight);
+      this.audio.sounds.powerHit.play(leftOrCenterOrRight);
       sound.powerHit = false;
     }
     if (sound.ballTouchesGround === true) {
-      audio.sounds.ballTouchesGround.play(leftOrCenterOrRight);
+      this.audio.sounds.ballTouchesGround.play(leftOrCenterOrRight);
       sound.ballTouchesGround = false;
     }
   }
 
+  // ------------------------------------------------------------
+  // ✅ 외부/내장 혼합 제어용 API (여기가 다음 단계 핵심)
+  // ------------------------------------------------------------
+
   /**
-   * Called if restart button clicked
+   * external/builtin 모드 전환
+   * @param {'builtin'|'external'} mode
    */
+  setControlMode(mode) {
+    this.controlMode = mode;
+  }
+
+  /**
+   * 플레이어별 external on/off
+   * @param {boolean} p1Enabled
+   * @param {boolean} p2Enabled
+   */
+  setExternalEnabled(p1Enabled, p2Enabled) {
+    this.externalEnabledP1 = !!p1Enabled;
+    this.externalEnabledP2 = !!p2Enabled;
+
+    // 꺼진 쪽은 override 즉시 제거
+    if (!this.externalEnabledP1) this.keyboardArray[0].clearOverrideInput();
+    if (!this.externalEnabledP2) this.keyboardArray[1].clearOverrideInput();
+  }
+
+  /**
+   * 내장 AI(physics의 isComputer)와 externalEnabled를 같이 맞추는 헬퍼
+   * - 예: P1 external vs P2 builtin
+   */
+  setExternalVsBuiltin(p1External, p2External) {
+    this.setControlMode('external');
+    this.setExternalEnabled(!!p1External, !!p2External);
+
+    // external이면 내장AI는 확실히 끔
+    this.physics.player1.isComputer = p1External ? false : true;
+    this.physics.player2.isComputer = p2External ? false : true;
+  }
+
+
+  /**
+   * 외부에서 actionId를 직접 주입(에이전트 없이도 가능)
+   */
+  setExternalActions(p1ActionId, p2ActionId) {
+    this._heldActionP1 = (p1ActionId | 0);
+    this._heldActionP2 = (p2ActionId | 0);
+  }
+
+  /**
+   * 외부 에이전트 연결
+   * agent는 chooseAction(obs, playerIndex, game) 메서드만 있으면 됨.
+   */
+  setAgents(agent1, agent2) {
+    this.agent1 = agent1;
+    this.agent2 = agent2;
+  }
+
+  /**
+   * 학습용 관측(최소)
+   */
+  getObservation(playerIndex) {
+    const me = this.physics[`player${playerIndex}`];
+    const opp = this.physics[`player${playerIndex === 1 ? 2 : 1}`];
+    const b = this.physics.ball;
+
+    return {
+      me: {
+        x: me.x, y: me.y,
+        yV: me.yVelocity,
+        state: me.state,
+        divingDir: me.divingDirection,
+        lying: me.lyingDownDurationLeft,
+        isP2: me.isPlayer2 ? 1 : 0,
+        bold: me.computerBoldness,
+      },
+      opp: {
+        x: opp.x, y: opp.y,
+        yV: opp.yVelocity,
+        state: opp.state,
+        divingDir: opp.divingDirection,
+        lying: opp.lyingDownDurationLeft,
+        isP2: opp.isPlayer2 ? 1 : 0,
+      },
+      ball: {
+        x: b.x, y: b.y,
+        xV: b.xVelocity, yV: b.yVelocity,
+        expectedX: b.expectedLandingPointX,
+        isPowerHit: b.isPowerHit ? 1 : 0,
+      },
+      scores: [this.scores[0], this.scores[1]],
+      isPlayer2Serve: this.isPlayer2Serve ? 1 : 0,
+      roundEnded: this.roundEnded ? 1 : 0,
+      gameEnded: this.gameEnded ? 1 : 0,
+    };
+  }
+
   restart() {
     this.frameCounter = 0;
     this.noInputFrameCounter = 0;
@@ -511,14 +886,10 @@ export class PikachuVolleyball {
     this.state = this.intro;
   }
 
-  /** @return {boolean} */
   get isPracticeMode() {
     return this._isPracticeMode;
   }
 
-  /**
-   * @param {boolean} bool true: turn on practice mode, false: turn off practice mode
-   */
   set isPracticeMode(bool) {
     this._isPracticeMode = bool;
     this.view.game.scoreBoards[0].visible = !bool;
