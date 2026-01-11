@@ -1,7 +1,7 @@
 {
   "name": "pikachu-volleyball",
   "version": "1.0.10",
- 
+  "type": "module",
   "description": "Pikachu Volleyball implemented into JavaScript by reverse engineering the original game",
   "private": true,
   "scripts": {

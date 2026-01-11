@@ -1,5 +1,5 @@
 'use strict';
-import { localStorageWrapper } from './local_storage_wrapper';
+import { localStorageWrapper } from './local_storage_wrapper.js';
 const THEME_COLOR_LIGHT = '#FFFFFF';
 const THEME_COLOR_DARK = '#202124';
 
