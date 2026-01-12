@@ -12,24 +12,20 @@ import { EpisodeBuilder } from './rl_episode_builder.js';
 // import { TraceBuffer } from '../replay/TraceBuffer.js';
 
 export class OnePointEpisodeRunner {
-  /**
-   * @param {{
-   *   game: any,                 // pikaVolley instance
-   *   learningPlayer: 1|2,
-   *   maxTraceFrames?: number,
-   *   hardSafetyFrames?: number
-   * }} args
-   */
-  constructor({ game, learningPlayer, maxTraceFrames = 2400, hardSafetyFrames = 36000 }) {
+/**
+ * @param {any} game
+ * @param {{
+ *   learningPlayer?: 1|2,
+ *   maxTraceFrames?: number,
+ *   hardSafetyFrames?: number
+ * }} [opts]
+ */
+  constructor(game, opts = {}) {
     this.game = game;
-    this.learningPlayer = learningPlayer;
+    this.learningPlayer = (opts.learningPlayer ?? 1);
 
-    // 리플레이(trace) 길이 제한(너무 길면 메모리/저장 부담)
-    this.maxTraceFrames = maxTraceFrames;
-
-    // "진짜 무한 랠리/스테이트 꼬임" 감지용 비상장치
-    // - round 프레임만 카운트
-    this.hardSafetyFrames = hardSafetyFrames;
+    this.maxTraceFrames = opts.maxTraceFrames ?? 2400;
+    this.hardSafetyFrames = opts.hardSafetyFrames ?? 36000;
   }
 
   // ─────────────────────────────────────────────────────────────
@@ -151,141 +147,133 @@ export class OnePointEpisodeRunner {
   // Public API: 포인트 1개 수행
   // ─────────────────────────────────────────────────────────────
 
-  /**
-   * @param {{
-   *   agentStep: (obs:any) => number,  // learning player action id
-   *   opponentStep?: (obs:any) => number, // (선택) 상대도 외부제어면 사용
-   * }} args
-   */
-  async runOnePoint({ agentStep, opponentStep = null }) {
-    // 0) 시작 시 바로 round로 진입(메뉴 자동 입력 없음)
+/**
+ * Run a single point episode.
+ * @returns {{
+ *   ok: boolean,
+ *   scoredBy: number,
+ *   loser: number,
+ *   loseReason: string,
+ *   frames: number,
+ *   trace: any[],
+ *   episode: any
+ * }}
+ */
+  runOnePoint() {
+    // 0) round 진입 강제(메뉴/intro 스킵) — 너가 이미 추가한 로직 사용
     if (this.game.state !== this.game.round) {
       const ok = this._forceEnterRoundNoMenu();
-      if (!ok) {
-        throw new Error('Failed to enter round without menu (no powerHit automation)');
-      }
+      if (!ok) throw new Error('Failed to enter round without menu');
     }
 
     const builder = new EpisodeBuilder({ learningPlayer: this.learningPlayer });
 
-    // trace는 배열로 관리 (프로젝트에 TraceBuffer가 있으면 그걸 써도 됨)
     const trace = [];
+    let frames = 0;
 
-    let frames = 0; // ✅ round 프레임만 카운트
-    let last = null;
-    let lastEv = null;
+    // agent는 trainer.init()에서 game.setAgents(this.agent, null)로 이미 붙어있음
+    const agent = (this.learningPlayer === 1) ? this.game.agent1 : this.game.agent2;
+    if (!agent || typeof agent.chooseAction !== 'function') {
+      throw new Error(`Missing agent for learningPlayer=${this.learningPlayer}`);
+    }
 
     while (true) {
-      // ✅ round가 아니면: 입력 0으로 상태만 진행, 학습/trace/frames 누적 금지
+      // round가 아니면 학습 프레임 카운트/trace 누적 안 하고 진행만
       if (this.game.state !== this.game.round) {
         this._setNeutralInput();
         this.game.stepLogic();
         continue;
       }
 
-      // 1) 관측 만들기(너 프로젝트 관측 포맷에 맞춰 수정 가능)
-      const obs = this.game.getObservation
-        ? this.game.getObservation()
-        : {}; // 없으면 최소로
+      this.game._lastRoundEvents = null;
 
-      // 2) 행동 결정
-      const aLearn = agentStep(obs) | 0;
+      // obs(learningPlayer 기준)
+      const obs1 = this.game.getObservation(1);
+      const obs2 = this.game.getObservation(2);
+      const obs = (this.learningPlayer === 1) ? obs1 : obs2;
 
-      let a1 = 0;
-      let a2 = 0;
+      // action
+      const aLearn = (agent.chooseAction(obs, this.learningPlayer, this.game) | 0);
 
-      if (this.learningPlayer === 1) {
-        a1 = aLearn;
-        a2 = opponentStep ? (opponentStep(obs) | 0) : 0; // 상대가 CPU면 0 유지(엔진이 내부 처리)
-      } else {
-        a2 = aLearn;
-        a1 = opponentStep ? (opponentStep(obs) | 0) : 0;
-      }
+      // opponent는 builtin이면 0 (trainer가 externalEnabledP2=false로 해둠)
+      const a1 = (this.learningPlayer === 1) ? aLearn : 0;
+      const a2 = (this.learningPlayer === 2) ? aLearn : 0;
 
-      // 3) 입력 적용
       this._applyActions(a1, a2);
 
-      // 4) 한 프레임 진행
-      const ev = this.game.stepLogic(); // roundLogic 이벤트 객체를 기대
-      lastEv = ev;
+      // 한 프레임 진행
+      // 한 프레임 진행: 반환 이벤트를 우선 신뢰
+      const ev = this.game.stepLogic() ?? null;
 
-      // 5) trace 저장(길이 제한)
+      // nextObs
+      const nextObs1 = this.game.getObservation(1);
+      const nextObs2 = this.game.getObservation(2);
+      const nextObs = (this.learningPlayer === 1) ? nextObs1 : nextObs2;
+
+      // trace 포맷: trainer._buildPointReplay가 기대하는 형태(t.obs.p1/p2)
       if (trace.length < this.maxTraceFrames) {
-        trace.push(this._captureFrame());
-      }
-
-      // 6) 학습 프레임 카운트(여기서만 증가)
-      frames++;
-
-      // 7) builder에 step 추가 (보상/terminal은 너 프로젝트 기존 로직을 유지해야 함)
-      //    아래는 "틀"만 제공. 실제 reward 계산/terminal 처리 방식에 맞춰 고쳐 써.
-      if (builder && typeof builder.addStep === 'function') {
-        const obs = this.game.getObservation();
-        const action = aLearn;
-
-        this._applyActions(a1, a2);
-        const ev = this.game.stepLogic();
-
-        const nextObs = this.game.getObservation();
-        builder.addStep({
+        trace.push({
           t: frames,
-          obs,
-          action: aLearn,
-          nextObs,
-          done: false,
-          info: { reward: 0 },     // ✅ 타입 OK
+          obs: { p1: obs1, p2: obs2, ball: obs1?.ball ?? obs2?.ball ?? null },
+          action: { p1: a1, p2: a2 },
+          roundEvents: ev,
         });
       }
 
-      // 8) 포인트 종료 감지
-      if (this._isPointEnded(ev)) {
-        // builder finalize (프로젝트 형식에 맞게)
-        if (builder && typeof builder.finalize === 'function') {
-          builder.finalize({
-            scoredBy: ev.scoredBy || 0,
-            loser: ev.loser || 0,
-            loseReason: ev.loseReason || '',
-          });
-        }
+      // builder step (reward는 builder가 roundEvents로 내부 계산)
+      builder.addStep({
+        t: frames,
+        obs,
+        action: aLearn,
+        nextObs,
+        done: false,
+        roundEvents: ev,
+      });
 
+      frames++;
+
+      // 포인트 종료 감지: roundEvents.scored (pikavolley roundLogic 기준)
+      const scoredBy = (ev && typeof ev.scored === 'number') ? ev.scored : 0;
+      if (scoredBy === 1 || scoredBy === 2) {
+        const loser = (scoredBy === 1) ? 2 : 1;
+
+        builder.finalize({
+          scoredBy,
+          loser,
+          loseReason: 'SCORE',
+        });
+
+        const episode = builder.toEpisode();
         return {
           ok: true,
-          scoredBy: ev.scoredBy || 0,
-          loser: ev.loser || 0,
-          loseReason: ev.loseReason || '',
+          scoredBy,
+          loser,
+          loseReason: 'SCORE',
           frames,
           trace,
-          last: lastEv,
-          episode: builder && typeof builder.toEpisode === 'function' ? builder.toEpisode() : null,
+          episode,
         };
       }
 
-      // 9) 비상장치(throw 대신 “강제 실패 반환” 권장)
+      // hard safety (round 프레임 기준)
       if (frames >= this.hardSafetyFrames) {
-        console.warn('[EpisodeRunner] Hard safety hit (round did not end).', {
-          frames,
-          state: this._getStateName(),
+        builder.finalize({
+          scoredBy: 0,
+          loser: 0,
+          loseReason: 'HARD_SAFETY',
         });
-
-        if (builder && typeof builder.finalize === 'function') {
-          builder.finalize({
-            scoredBy: 0,
-            loser: 0,
-            loseReason: 'UNKNOWN_END',
-          });
-        }
-
+        const episode = builder.toEpisode();
         return {
           ok: false,
           scoredBy: 0,
           loser: 0,
-          loseReason: 'UNKNOWN_END',
+          loseReason: 'HARD_SAFETY',
           frames,
           trace,
-          last: lastEv,
-          episode: builder && typeof builder.toEpisode === 'function' ? builder.toEpisode() : null,
+          episode,
         };
       }
     }
   }
+
 }

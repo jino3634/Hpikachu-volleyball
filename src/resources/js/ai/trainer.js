@@ -239,6 +239,13 @@ export class Trainer {
         if (res.ok && res.scoredBy === this.learningPlayer) this.totalWins++;
         else if (res.ok) this.totalLosses++;
 
+        // 🔍 학습 진행 확인용 단일 로그
+        console.log(
+        `[TRAIN] ep=${this.totalEpisodes} W=${this.totalWins} L=${this.totalLosses} ` +
+        `WR=${(this.totalWins / Math.max(1, this.totalEpisodes)).toFixed(3)} ` +
+        `last={scoredBy:${res.scoredBy}, loser:${res.loser}, frames:${res.frames}}`
+        );
+
         // set score 업데이트
         if (res.ok && (res.scoredBy === 1 || res.scoredBy === 2)) {
           if (res.scoredBy === 1) this.currentSet.p1++;
@@ -339,7 +346,6 @@ export class Trainer {
     await this.storage.setCheckpoint('model_state', this.policy.saveState());
     await this._saveStats();
   }
-
     _buildPointReplay(res) {
     const now = Date.now();
     const id = `rp_${now}_${Math.random().toString(16).slice(2)}`;
@@ -383,5 +389,4 @@ export class Trainer {
       trace,
     };
   }
-
 }

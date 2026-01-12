@@ -40,9 +40,9 @@ export class MatchRunner {
     this.pointTraceLen = (opts.pointTraceLen ?? 180) | 0;
 
     this._pointRunner = new OnePointEpisodeRunner(this.game, {
-      maxFrames: this.pointMaxFrames,
-      warmupFrames: this.pointWarmupFrames,
-      traceLen: this.pointTraceLen,
+    learningPlayer: 1,
+    hardSafetyFrames: this.pointMaxFrames,
+    maxTraceFrames: this.pointTraceLen,
     });
 
     // stats
