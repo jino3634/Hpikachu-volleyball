@@ -16,6 +16,7 @@ declare global {
       // ✅ 추가: 디버깅/리플레이 접근용
       trainer?: any;
       storage?: any;
+      replay?: any;
     };
   }
 }
