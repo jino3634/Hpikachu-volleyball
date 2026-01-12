@@ -16,12 +16,13 @@ export class ReplayController {
     }
 
     this.overlay = new ReplayOverlay2D({
-    baseWidth: 432,
-    baseHeight: 304,
-    mountEl: this.container,      // 또는 생성자 param으로 받은 값이면 그걸 써도 됨
+    baseWidth: width,
+    baseHeight: height,
+    mountEl: this.container,
     targetCanvas: targetCanvasEl,
     resolution: 2,
     });
+
 
 
     this._selectedId = null;
@@ -61,41 +62,37 @@ export class ReplayController {
     this.pikaVolley.gameLoop = this._originalGameLoop;
   }
 
-  async playSelected() {
-    const id = this._selectedId || this.panel.getSelectedId();
-    const it = this._cached.find((x) => x.id === id);
-    if (!it) return;
+async playSelected() {
+  const id = this._selectedId || this.panel.getSelectedId();
+  const it = this._cached.find((x) => x.id === id);
+  if (!it) return;
 
-    // 리플레이는 시각화 전용: 학습은 멈추는 쪽이 안전(필요하면 main에서 trainer.stop 호출)
-    // mute 플래그는 프로젝트 기존 관례 유지
-    window.__PV_TRAINING_MUTE__ = false;
+  window.__PV_TRAINING_MUTE__ = false;
 
-    // 캔버스 표시
-    const canvasEl = document.getElementById('game-canvas');
-    if (canvasEl) canvasEl.style.display = 'block';
+  const canvasEl = document.getElementById('game-canvas');
+  if (canvasEl) canvasEl.style.display = 'block';
 
-    this._freezeGameLoop();
-    this.overlay.setSpeed(this.panel.getSpeed());
+  this._freezeGameLoop();
+  this.overlay.setSpeed(this.panel.getSpeed());
 
-    const targetCanvas =
-    /** @type {HTMLCanvasElement} */ (
-        document.getElementById('game-canvas')
-    );
+  // ✅ listReplays()가 trace 포함 replay 객체를 이미 줌 (trainer._buildPointReplay 참고)
+  this.overlay.play({
+    trace: it.trace,
+    scoredBy: it.scoredBy,
+    loser: it.loser,
+    loseReason: it.loseReason,
+  });
+}
 
-
-    this.overlay = new ReplayOverlay2D({
-    baseWidth: 432,
-    baseHeight: 304,
-    mountEl: this.container,
-    targetCanvas,
-    resolution: 2, // settings.RESOLUTION과 맞추기
-    });
-
-  }
 
   stop() {
     this.overlay.stop();
     this._restoreGameLoop();
     window.__PV_TRAINING_MUTE__ = false;
   }
+  // ✅ 페이지 이동/핫리로드/패널 재생성 등 대비용
+destroy() {
+    try { this.overlay.destroy?.(); } catch {}
+    try { this.panel.panel?.remove(); } catch {} // panel DOM 제거(구조에 따라 조정)
+    }
 }

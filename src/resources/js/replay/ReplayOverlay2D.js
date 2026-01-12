@@ -48,13 +48,6 @@ export class ReplayOverlay2D {
     window.addEventListener('resize', this._syncLayout, { passive: true });
   }
 
-  destroy() {
-    this.stop();
-    try { this._ro?.disconnect(); } catch {}
-    window.removeEventListener('resize', this._syncLayout);
-    this.canvas.remove();
-  }
-
   _applyTransform() {
     const ctx = this.ctx;
     if (!ctx) return;
@@ -100,7 +93,7 @@ export class ReplayOverlay2D {
     this._loop();
   }
 
-  stop() {
+    stop() {
     this.running = false;
     if (this._raf) cancelAnimationFrame(this._raf);
     this._raf = 0;
@@ -108,7 +101,20 @@ export class ReplayOverlay2D {
     this._meta = null;
     this._framePos = 0;
     this._clear();
-  }
+    }
+
+    destroy() {
+    // 재생 중지
+    this.stop();
+
+    // 리스너/옵저버 해제
+    try { this._ro?.disconnect(); } catch {}
+    try { window.removeEventListener('resize', this._syncLayout); } catch {}
+
+    // DOM 제거
+    try { this.canvas?.remove(); } catch {}
+    }
+
 
   _clear() {
     const ctx = this.ctx;
