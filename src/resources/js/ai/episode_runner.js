@@ -152,8 +152,10 @@ export class OnePointEpisodeRunner {
     let frames = 0;
     /** @type {0|1|2} */
     let scoredBy = 0;
+    const hardSafety = 36000; // 10분
 
-    while (frames < this.maxFrames) {
+    // while (frames < this.maxFrames) {
+    while (true) {
       const obs1 = this.game.getObservation ? this.game.getObservation(1) : null;
       const obs2 = this.game.getObservation ? this.game.getObservation(2) : null;
 
@@ -213,27 +215,39 @@ export class OnePointEpisodeRunner {
         }
         break;
       }
+      if (frames > hardSafety) {
+        throw new Error(`Hard safety triggered: point did not end after ${hardSafety} frames`);
+      }
     }
 
     const traceArr = this.trace.toArray();
     const last = this.trace.last();
 
-    if (scoredBy === 0) {
-      builder.finalize({ scoredBy: 0, loser: 0, loseReason: 'TIMEOUT' });
-      return {
-        ok: false,
-        scoredBy: 0,
-        loser: 0,
-        loseReason: 'TIMEOUT',
-        frames,
-        trace: traceArr,
-        last,
-        episode: builder.toEpisode(),
-      };
-    }
+  if (scoredBy === 0) {
+    // 여기로 오면 “정상적으로 point 종료를 못 잡은 버그” 가능성이 큼
+    // 타임아웃을 만들지 말고, 디버그용으로만 경고
+    console.warn('[EpisodeRunner] scoredBy=0 at end (unexpected). Investigate round end detection.', { frames, last });
 
-    const { loser, loseReason } = classifyLoseReason(traceArr, scoredBy);
-    builder.finalize({ scoredBy, loser, loseReason, frames });
+    // 그래도 학습 파이프라인이 죽지 않게 "unknown"으로 마무리할 수는 있음.
+    builder.finalize({ scoredBy: 0, loser: 0, loseReason: 'UNKNOWN_END' });
+    return {
+      ok: false,
+      scoredBy: 0,
+      loser: 0,
+      loseReason: 'UNKNOWN_END',
+      frames,
+      trace: traceArr,
+      last,
+      episode: builder.toEpisode(),
+    };
+  }
+
+
+    const tmp = classifyLoseReason(traceArr, scoredBy);
+    const loser = /** @type {0|1|2} */ (tmp.loser);
+    const loseReason = tmp.loseReason;
+    builder.finalize({ scoredBy, loser, loseReason });
+
 
     return {
       ok: true,

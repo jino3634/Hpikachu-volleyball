@@ -157,7 +157,8 @@ export class MatchRunner {
     let points = 0;
 
     // 안전장치: 세트당 너무 오래 걸리면 중단 (원하면 늘려)
-    const maxPointsSafety = this.winningScore * 5;
+    //const maxPointsSafety = this.winningScore * 5;
+    const maxPointsSafety = 1e9; // 사실상 무제한
 
     while (points < maxPointsSafety) {
       points++;

@@ -17,6 +17,7 @@ import { localStorageWrapper } from './utils/local_storage_wrapper.js';
  * @enum {number}
  */
 const PauseResumePrecedence = {
+  replay: 4,      // ✅ 추가(최우선)
   pauseBtn: 3,
   messageBox: 2,
   dropdown: 1,
@@ -197,6 +198,15 @@ export function setUpUI(pikaVolley, ticker) {
       pikaVolley.audio.muteAll();
     }
   });
+}
+
+// ✅ Replay 등 외부 모듈이 "정식 pause 시스템"을 쓰도록 공개 API 제공
+export function pauseGameForReplay(pikaVolley) {
+  pauseResumeManager.pause(pikaVolley, PauseResumePrecedence.replay);
+}
+
+export function resumeGameForReplay(pikaVolley) {
+  pauseResumeManager.resume(pikaVolley, PauseResumePrecedence.replay);
 }
 
 /**
