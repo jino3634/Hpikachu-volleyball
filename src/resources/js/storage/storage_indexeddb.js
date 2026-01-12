@@ -4,12 +4,14 @@
 import { StorageIface } from './storage_iface.js';
 
 const DB_NAME = 'pika_rl_db';
-const DB_VERSION = 2;
+// DB_VERSION: bump when adding new object stores
+const DB_VERSION = 3;
 
 const STORE_META = 'meta';
 const STORE_EPISODES = 'episodes';
 const STORE_CHECKPOINTS = 'checkpoints';
 const STORE_REPLAYS = 'replays';
+const STORE_IMIT_SAMPLES = 'imit_samples';
 
 function reqToPromise(req) {
   return new Promise((resolve, reject) => {
@@ -46,6 +48,12 @@ async function openDB() {
     const os = db.createObjectStore(STORE_REPLAYS, { keyPath: 'id' });
     os.createIndex('createdAt', 'createdAt', { unique: false });
     }
+
+    // imitation learning samples (frame-level)
+    if (!db.objectStoreNames.contains(STORE_IMIT_SAMPLES)) {
+      const os = db.createObjectStore(STORE_IMIT_SAMPLES, { keyPath: 'k', autoIncrement: true });
+      os.createIndex('createdAt', 'createdAt', { unique: false });
+    }
   };
 
   const db = await reqToPromise(req);
@@ -56,6 +64,9 @@ export class IndexedDBStorage extends StorageIface {
   constructor() {
     super();
     this.db = null;
+
+    // imitation sample counters (best-effort, not authoritative)
+    this._imitSincePrune = 0;
   }
 
   async init() {
@@ -190,6 +201,111 @@ export class IndexedDBStorage extends StorageIface {
     await txDone(tx);
   }
 
+  /**
+   * Append ONE imitation sample.
+   * @param {{ obs:any, label:{xDirection:number,yDirection:number,powerHit:number}, createdAt?:number }} sample
+   */
+  async appendImitationSample(sample) {
+    this._assert();
+    if (!sample || typeof sample !== 'object') return;
+    if (!sample.label) return;
+
+    const createdAt = sample.createdAt ?? Date.now();
+
+    const tx = this.db.transaction([STORE_IMIT_SAMPLES], 'readwrite');
+    const os = tx.objectStore(STORE_IMIT_SAMPLES);
+    os.add({
+      createdAt,
+      obs: sample.obs ?? null,
+      label: {
+        xDirection: (sample.label.xDirection ?? 0) | 0,
+        yDirection: (sample.label.yDirection ?? 0) | 0,
+        powerHit: (sample.label.powerHit ?? 0) | 0,
+      },
+    });
+    await txDone(tx);
+  }
+
+  /**
+   * Append multiple imitation samples in ONE transaction (much faster).
+   * @param {Array<{ obs:any, label:{xDirection:number,yDirection:number,powerHit:number}, createdAt?:number }>} samples
+   */
+  async appendImitationSamples(samples) {
+    this._assert();
+    if (!Array.isArray(samples) || samples.length === 0) return;
+
+    const tx = this.db.transaction([STORE_IMIT_SAMPLES], 'readwrite');
+    const os = tx.objectStore(STORE_IMIT_SAMPLES);
+
+    for (const sample of samples) {
+      if (!sample || typeof sample !== 'object' || !sample.label) continue;
+      const createdAt = sample.createdAt ?? Date.now();
+      os.add({
+        createdAt,
+        obs: sample.obs ?? null,
+        label: {
+          xDirection: (sample.label.xDirection ?? 0) | 0,
+          yDirection: (sample.label.yDirection ?? 0) | 0,
+          powerHit: (sample.label.powerHit ?? 0) | 0,
+        },
+      });
+    }
+
+    await txDone(tx);
+  }
+
+  async countImitationSamples() {
+    this._assert();
+    const tx = this.db.transaction([STORE_IMIT_SAMPLES], 'readonly');
+    const os = tx.objectStore(STORE_IMIT_SAMPLES);
+    const n = await reqToPromise(os.count());
+    await txDone(tx);
+    return n | 0;
+  }
+
+
+  /**
+   * List imitation samples (newest first by createdAt).
+   * @param {{limit?:number, offset?:number}} opts
+   * @returns {Promise<Array<{k:number, obs:any, label:{xDirection:number,yDirection:number,powerHit:number}, createdAt:number}>>}
+   */
+  async listImitationSamples(opts = {}) {
+    this._assert();
+    const limit = Math.max(0, (opts.limit ?? 1000) | 0);
+    const offset = Math.max(0, (opts.offset ?? 0) | 0);
+
+    const tx = this.db.transaction([STORE_IMIT_SAMPLES], 'readonly');
+    const os = tx.objectStore(STORE_IMIT_SAMPLES);
+    const idx = os.index('createdAt');
+
+    /** @type {any[]} */
+    const out = [];
+    let skipped = 0;
+
+    await new Promise((resolve, reject) => {
+      const req = idx.openCursor(null, 'prev'); // newest first
+      req.onerror = () => reject(req.error);
+      req.onsuccess = () => {
+        const cursor = req.result;
+        if (!cursor) return resolve();
+
+        if (skipped < offset) {
+          skipped++;
+          cursor.continue();
+          return;
+        }
+
+        out.push(cursor.value);
+        if (limit > 0 && out.length >= limit) return resolve();
+
+        cursor.continue();
+      };
+    });
+
+    await txDone(tx);
+    return out;
+  }
+
   async listReplays(opts = {}) {
     this._assert();
     const limit = Math.max(0, (opts.limit ?? 10) | 0);
@@ -281,10 +397,11 @@ export class IndexedDBStorage extends StorageIface {
 
   async clearAll() {
     this._assert();
-    const tx = this.db.transaction([STORE_META, STORE_EPISODES, STORE_CHECKPOINTS], 'readwrite');
+    const tx = this.db.transaction([STORE_META, STORE_EPISODES, STORE_CHECKPOINTS, STORE_IMIT_SAMPLES], 'readwrite');
     tx.objectStore(STORE_META).clear();
     tx.objectStore(STORE_EPISODES).clear();
     tx.objectStore(STORE_CHECKPOINTS).clear();
+    tx.objectStore(STORE_IMIT_SAMPLES).clear();
     await txDone(tx);
   }
 

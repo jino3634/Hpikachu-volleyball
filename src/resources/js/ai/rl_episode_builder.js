@@ -49,7 +49,7 @@ export class EpisodeBuilder {
    * @param {{
    *   t: number,
    *   obs: any,
-   *   action: number,
+  *   action: any,
    *   nextObs: any,
    *   done: boolean,
    *   info?: any,
@@ -74,10 +74,13 @@ export class EpisodeBuilder {
 
     const reward = computeSparseReward(roundEvents, this.learningPlayer);
 
+    // action can be a number (legacy actionId) or an input tuple object
+    const storedAction = (typeof action === 'number') ? (action | 0) : action;
+
     this.transitions.push({
       t,
       obs: obs ?? null,
-      action: action | 0,
+      action: storedAction,
       reward,
       nextObs: nextObs ?? null,
       done: !!done,

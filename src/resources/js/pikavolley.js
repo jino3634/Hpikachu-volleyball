@@ -79,6 +79,13 @@ export class PikachuVolleyball {
 
     /** @type {number} frame counter */
     this.frameCounter = 0;
+
+    /**
+     * Optional hook for external tools (trainer, recorder, etc.).
+     * Called after each physics step if set.
+     * @type {null | ((info: any) => void)}
+     */
+    this.onAfterPhysicsFrame = null;
     /** @type {Object.<string,number>} total number of frames for each game state */
     this.frameTotal = {
       intro: 165,
@@ -119,8 +126,12 @@ export class PikachuVolleyball {
     this.controlMode = 'builtin'; // 'builtin' | 'external'
     this.decisionInterval = 2;
     this._decisionPhase = 0;
+    // legacy: actionId(0..9)
     this._heldActionP1 = 0;
     this._heldActionP2 = 0;
+    // preferred: input tuple { xDirection, yDirection, powerHit }
+    this._heldInputP1 = { xDirection: 0, yDirection: 0, powerHit: 0 };
+    this._heldInputP2 = { xDirection: 0, yDirection: 0, powerHit: 0 };
 
     this._prevExternalRoundLike = false;
 
@@ -148,38 +159,51 @@ export class PikachuVolleyball {
     );
   }
 
-  _applyActionToKeyboard(kb, actionId, phaseInDecisionInterval, playerIndex) {
+  _actionIdToInputTuple(actionId) {
+    // NOTE: This mapping is kept for backward compatibility only.
+    // New agents should output {xDirection, yDirection, powerHit} directly.
     let x = 0, y = 0, p = 0;
-
-    switch (actionId) {
+    switch (actionId | 0) {
       case 0: break;                 // IDLE
       case 1: x = -1; break;         // LEFT
       case 2: x = 1; break;          // RIGHT
       case 3: y = -1; break;         // JUMP
       case 4: x = -1; y = -1; break; // JUMP_LEFT
       case 5: x = 1; y = -1; break;  // JUMP_RIGHT
-
-      // POWER 계열 (powerHit는 1프레임 트리거)
       case 6: p = 1; break;                  // POWER_NEUTRAL
       case 7: x = -1; p = 1; break;          // POWER_LEFT
       case 8: x = 1; p = 1; break;           // POWER_RIGHT
-      case 9: y = 1; p = 1; break;           // POWER_DOWN (공중에서만 의미)
+      case 9: y = 1; p = 1; break;           // POWER_DOWN (air only)
       default: break;
     }
+    return { xDirection: x, yDirection: y, powerHit: p };
+  }
 
-    // ✅ powerHit는 decision 구간의 "첫 프레임(phase=0)"에만 발생시키기
+  _applyInputToKeyboard(kb, inputTuple, phaseInDecisionInterval, playerIndex) {
+    // Normalize
+    let x = (inputTuple && typeof inputTuple.xDirection === 'number') ? (inputTuple.xDirection | 0) : 0;
+    let y = (inputTuple && typeof inputTuple.yDirection === 'number') ? (inputTuple.yDirection | 0) : 0;
+    let p = (inputTuple && typeof inputTuple.powerHit === 'number') ? (inputTuple.powerHit | 0) : 0;
+
+    // powerHit is a 1-frame trigger at the beginning of each decision interval
     if (p === 1 && phaseInDecisionInterval !== 0) {
       p = 0;
     }
 
-    // ✅ POWER_DOWN은 공중에서만 의미: 지상이면 DOWN 제거
-    if (actionId === 9) {
+    // POWER_DOWN style (y=+1) is only meaningful in air
+    if (y === 1) {
       const player = this.physics[`player${playerIndex}`];
-      const isAir = player.y < 244; // physics.js의 PLAYER_TOUCHING_GROUND_Y_COORD = 244
+      const isAir = player.y < 244; // physics.js: PLAYER_TOUCHING_GROUND_Y_COORD = 244
       if (!isAir) y = 0;
     }
 
     kb.setOverrideInput(x, y, p);
+  }
+
+  // Backward-compatible wrapper
+  _applyActionToKeyboard(kb, actionId, phaseInDecisionInterval, playerIndex) {
+    const tup = this._actionIdToInputTuple(actionId);
+    this._applyInputToKeyboard(kb, tup, phaseInDecisionInterval, playerIndex);
   }
 
   /**
@@ -225,26 +249,37 @@ export class PikachuVolleyball {
 
       if (phase === 0) {
         // ✅ externalEnabled인 쪽만 chooseAction 수행
-        if (this.externalEnabledP1 && this.agent1 && typeof this.agent1.chooseAction === 'function') {
+        if (this.externalEnabledP1 && this.agent1 && (typeof this.agent1.chooseInput === 'function' || typeof this.agent1.chooseAction === 'function')) {
           const obs1 = this.getObservation(1);
-          this._heldActionP1 = (this.agent1.chooseAction(obs1, 1, this) | 0);
+          // Prefer tuple-based agent API when available
+          if (typeof this.agent1.chooseInput === 'function') {
+            this._heldInputP1 = this.agent1.chooseInput(obs1, 1, this) || { xDirection: 0, yDirection: 0, powerHit: 0 };
+          } else {
+            this._heldActionP1 = (this.agent1.chooseAction(obs1, 1, this) | 0);
+            this._heldInputP1 = this._actionIdToInputTuple(this._heldActionP1);
+          }
         }
-        if (this.externalEnabledP2 && this.agent2 && typeof this.agent2.chooseAction === 'function') {
+        if (this.externalEnabledP2 && this.agent2 && (typeof this.agent2.chooseInput === 'function' || typeof this.agent2.chooseAction === 'function')) {
           const obs2 = this.getObservation(2);
-          this._heldActionP2 = (this.agent2.chooseAction(obs2, 2, this) | 0);
+          if (typeof this.agent2.chooseInput === 'function') {
+            this._heldInputP2 = this.agent2.chooseInput(obs2, 2, this) || { xDirection: 0, yDirection: 0, powerHit: 0 };
+          } else {
+            this._heldActionP2 = (this.agent2.chooseAction(obs2, 2, this) | 0);
+            this._heldInputP2 = this._actionIdToInputTuple(this._heldActionP2);
+          }
         }
       }
 
       // ✅ externalEnabled인 쪽만 override 주입
       if (this.externalEnabledP1) {
-        this._applyActionToKeyboard(this.keyboardArray[0], this._heldActionP1, phase, 1);
+        this._applyInputToKeyboard(this.keyboardArray[0], this._heldInputP1, phase, 1);
       } else {
         // builtin/사람 입력이 쓰도록 override만 제거
         this.keyboardArray[0].clearOverrideInput();
       }
 
       if (this.externalEnabledP2) {
-        this._applyActionToKeyboard(this.keyboardArray[1], this._heldActionP2, phase, 2);
+        this._applyInputToKeyboard(this.keyboardArray[1], this._heldInputP2, phase, 2);
       } else {
         this.keyboardArray[1].clearOverrideInput();
       }
@@ -517,6 +552,32 @@ export class PikachuVolleyball {
     const isBallTouchingGround = this.physics.runEngineForNextFrame(
       this.keyboardArray
     );
+
+    // Optional frame hook: used for imitation dataset collection.
+    // NOTE: keyboardArray may be mutated by physics (builtin AI path).
+    if (typeof this.onAfterPhysicsFrame === 'function') {
+      try {
+        this.onAfterPhysicsFrame({
+          frame: this.totalFrame ?? this.frameCounter ?? 0,
+          scores: [this.scores?.[0] ?? 0, this.scores?.[1] ?? 0],
+          inputP1: {
+            xDirection: this.keyboardArray?.[0]?.xDirection ?? 0,
+            yDirection: this.keyboardArray?.[0]?.yDirection ?? 0,
+            powerHit: this.keyboardArray?.[0]?.powerHit ?? 0,
+          },
+          inputP2: {
+            xDirection: this.keyboardArray?.[1]?.xDirection ?? 0,
+            yDirection: this.keyboardArray?.[1]?.yDirection ?? 0,
+            powerHit: this.keyboardArray?.[1]?.powerHit ?? 0,
+          },
+          obsP1: this.getObservation ? this.getObservation(1) : null,
+          obsP2: this.getObservation ? this.getObservation(2) : null,
+          stateName: (this.state === this.round) ? 'round' : 'non_round',
+        });
+      } catch (e) {
+        // ignore hook errors
+      }
+    }
 
     if (this.gameEnded === true) {
       this.frameCounter++;
@@ -826,6 +887,18 @@ export class PikachuVolleyball {
   setExternalActions(p1ActionId, p2ActionId) {
     this._heldActionP1 = (p1ActionId | 0);
     this._heldActionP2 = (p2ActionId | 0);
+    this._heldInputP1 = this._actionIdToInputTuple(this._heldActionP1);
+    this._heldInputP2 = this._actionIdToInputTuple(this._heldActionP2);
+  }
+
+  /**
+   * 외부에서 입력 튜플을 직접 주입(추천)
+   * @param {{xDirection:number,yDirection:number,powerHit:number}} p1Input
+   * @param {{xDirection:number,yDirection:number,powerHit:number}} p2Input
+   */
+  setExternalInputs(p1Input, p2Input) {
+    this._heldInputP1 = p1Input || { xDirection: 0, yDirection: 0, powerHit: 0 };
+    this._heldInputP2 = p2Input || { xDirection: 0, yDirection: 0, powerHit: 0 };
   }
 
   /**

@@ -3,7 +3,8 @@
 
 import { OnePointEpisodeRunner } from './episode_runner.js';
 import { IndexedDBStorage } from '../storage/storage_indexeddb.js';
-import { PolicyV1, PolicyAgentV1 } from './policy_v1.js';
+import { TuplePolicyV1 } from './tuple_policy_v1.js';
+import { TuplePolicyAgentV1 } from './tuple_agent_v1.js';
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
@@ -71,6 +72,15 @@ export class Trainer {
 
     this.storage = new IndexedDBStorage();
 
+    // warmup (imitation) dataset collection
+    this.warmup = {
+      done: false,
+      trained: false,
+      targetSamples: 100000,
+      trainEpochs: 2,
+      trainBatch: 256,
+    };
+
     this.running = false;
     this.graduated = false;
     // training mode: PHASE1 (builtin) -> PHASE2 (self-play)
@@ -95,18 +105,46 @@ export class Trainer {
 
     this._runner = null;
 
-    // policy
-    this.policy = new PolicyV1({
-      numActions: 10,
-      learningRate: 0.0005,
+    // policy (tuple outputs)
+    this.policy = new TuplePolicyV1({
+      featureLen: 14,
+      learningRate: 0.001,
       epsilon: 0.08,
       initStd: 0.01,
     });
-    this.agent = new PolicyAgentV1(this.policy, { playerIndex: this.learningPlayer });
+    this.agent = new TuplePolicyAgentV1(this.policy, { playerIndex: this.learningPlayer, deterministic: false });
   }
 
   async init() {
     await this.storage.init();
+
+    // warmup checkpoint
+    const warmup = await this.storage.getCheckpoint('warmup');
+    if (warmup) {
+      this.warmup.done = !!warmup.done;
+      if (warmup.targetSamples) this.warmup.targetSamples = warmup.targetSamples | 0;
+    } else {
+      await this.storage.setCheckpoint('warmup', {
+        done: false,
+        targetSamples: this.warmup.targetSamples,
+        createdAt: Date.now(),
+      });
+    }
+
+    // warmup training checkpoint
+    const warmupTrain = await this.storage.getCheckpoint('warmup_train');
+    if (warmupTrain) {
+      this.warmup.trained = !!warmupTrain.trained;
+      if (warmupTrain.trainEpochs) this.warmup.trainEpochs = warmupTrain.trainEpochs | 0;
+      if (warmupTrain.trainBatch) this.warmup.trainBatch = warmupTrain.trainBatch | 0;
+    } else {
+      await this.storage.setCheckpoint('warmup_train', {
+        trained: false,
+        trainEpochs: this.warmup.trainEpochs,
+        trainBatch: this.warmup.trainBatch,
+        createdAt: Date.now(),
+      });
+    }
 
     // stats checkpoint
     const stats = await this.storage.getCheckpoint('train_stats');
@@ -134,7 +172,7 @@ export class Trainer {
 
     // model_state
     const model = await this.storage.getCheckpoint('model_state');
-    if (model && model.kind === 'policy_v1') {
+    if (model && model.kind === 'tuple_policy_v1') {
       this.policy.loadState(model);
     } else {
       // 최초 생성
@@ -216,8 +254,212 @@ export class Trainer {
     return this.currentSet.p1 >= this.setWinTarget;
   }
 
+  /**
+   * Phase0: collect imitation samples from builtin AI (frame-level).
+   * We run builtin vs builtin and store (obsP1, inputP1) pairs.
+   */
+  async _collectWarmupSamples() {
+    const target = Math.max(1000, this.warmup.targetSamples | 0);
+    const already = await this.storage.countImitationSamples();
+    if (already >= target) {
+      this.warmup.done = true;
+      await this.storage.setCheckpoint('warmup', { done: true, targetSamples: target, updatedAt: Date.now() });
+      console.log(`[WARMUP] dataset already ready: samples=${already}`);
+      return;
+    }
+
+    console.log(`[WARMUP] collecting imitation samples... target=${target}, current=${already}`);
+
+    const gameAny = /** @type {any} */ (this.game);
+    // Save previous control config
+    const prev = {
+      externalEnabledP1: !!this.game.externalEnabledP1,
+      externalEnabledP2: !!this.game.externalEnabledP2,
+      isComp1: !!this.game.physics?.player1?.isComputer,
+      isComp2: !!this.game.physics?.player2?.isComputer,
+      onAfterPhysicsFrame: gameAny.onAfterPhysicsFrame,
+    };
+
+    // builtin vs builtin
+    if (typeof this.game.setExternalVsBuiltin === 'function') {
+      this.game.setExternalVsBuiltin(false, false);
+    } else {
+      this.game.externalEnabledP1 = false;
+      this.game.externalEnabledP2 = false;
+      if (this.game.physics?.player1) this.game.physics.player1.isComputer = true;
+      if (this.game.physics?.player2) this.game.physics.player2.isComputer = true;
+    }
+
+    // Detach agents if possible
+    if (typeof this.game.setAgents === 'function') {
+      this.game.setAgents(null, null);
+    } else {
+      this.game.agent1 = null;
+      this.game.agent2 = null;
+    }
+
+    let collected = already;
+    let frames = 0;
+    const buffer = [];
+
+    gameAny.onAfterPhysicsFrame = (info) => {
+      // collect only during round-like state to avoid menu noise
+      if (!info || info.stateName !== 'round') return;
+      if (!info.obsP1) return;
+
+      buffer.push({
+        obs: info.obsP1,
+        label: info.inputP1,
+        createdAt: Date.now(),
+      });
+      collected++;
+    };
+
+    // Run frames until we have enough samples
+    while (collected < target) {
+      this.game.stepLogic();
+      frames++;
+
+      if (buffer.length >= 512) {
+        const chunk = buffer.splice(0, buffer.length);
+        await this.storage.appendImitationSamples(chunk);
+      }
+
+      if (frames % 2000 === 0) {
+        if (buffer.length > 0) {
+          const chunk = buffer.splice(0, buffer.length);
+          await this.storage.appendImitationSamples(chunk);
+        }
+        const dbCount = await this.storage.countImitationSamples();
+        console.log(`[WARMUP] frames=${frames} samples=${dbCount}/${target}`);
+        await sleep(0);
+      }
+    }
+
+    if (buffer.length > 0) {
+      await this.storage.appendImitationSamples(buffer);
+      buffer.length = 0;
+    }
+
+    const finalCount = await this.storage.countImitationSamples();
+    console.log(`[WARMUP] done. frames=${frames} samples=${finalCount}`);
+
+    this.warmup.done = true;
+    await this.storage.setCheckpoint('warmup', { done: true, targetSamples: target, updatedAt: Date.now() });
+
+    // Restore previous control config
+    gameAny.onAfterPhysicsFrame = prev.onAfterPhysicsFrame;
+    this.game.externalEnabledP1 = prev.externalEnabledP1;
+    this.game.externalEnabledP2 = prev.externalEnabledP2;
+    if (this.game.physics?.player1) this.game.physics.player1.isComputer = prev.isComp1;
+    if (this.game.physics?.player2) this.game.physics.player2.isComputer = prev.isComp2;
+  }
+
+  /**
+   * Phase0: train policy to imitate builtin inputs (supervised).
+   * Uses samples stored in IndexedDB (imit_samples).
+   */
+  async _trainWarmupImitation() {
+    if (this.warmup.trained) return;
+
+    const total = await this.storage.countImitationSamples();
+    if (total <= 0) {
+      console.warn('[WARMUP-TRAIN] no imitation samples; skip');
+      this.warmup.trained = true;
+      await this.storage.setCheckpoint('warmup_train', { trained: true, updatedAt: Date.now() });
+      return;
+    }
+
+    const epochs = Math.max(1, this.warmup.trainEpochs | 0);
+    const batchSize = Math.max(8, this.warmup.trainBatch | 0);
+
+    // Load all samples (newest-first) then shuffle indices
+    const samples = await this.storage.listImitationSamples({ limit: 0, offset: 0 });
+    // samples are newest-first; reverse to get chronological (not required, but stable)
+    samples.reverse();
+
+    const N = samples.length;
+    console.log(`[WARMUP-TRAIN] start. samples=${N}, epochs=${epochs}, batch=${batchSize}`);
+
+    let globalStep = 0;
+
+    for (let ep = 0; ep < epochs; ep++) {
+      // shuffle indices
+      const idx = new Array(N);
+      for (let i = 0; i < N; i++) idx[i] = i;
+      for (let i = N - 1; i > 0; i--) {
+        const j = (Math.random() * (i + 1)) | 0;
+        const tmp = idx[i]; idx[i] = idx[j]; idx[j] = tmp;
+      }
+
+      let lossSum = 0;
+      let nSeen = 0;
+      let accX = 0, accY = 0, accP = 0;
+
+      for (let i = 0; i < N; i += batchSize) {
+        const end = Math.min(N, i + batchSize);
+
+        for (let k = i; k < end; k++) {
+          const s = samples[idx[k]];
+          const feat = this.policy.buildFeatures(s.obs, this.learningPlayer);
+          const r = this.policy.updateImitation(feat, s.label);
+
+          lossSum += r.loss;
+          nSeen++;
+
+          // label classes
+          const lx = (s.label.xDirection ?? 0) | 0;
+          const ly = (s.label.yDirection ?? 0) | 0;
+          const lp = (s.label.powerHit ?? 0) ? 1 : 0;
+
+          // map predicted classes -> tuple for quick acc
+          const px = (r.ax === 0 ? -1 : (r.ax === 2 ? 1 : 0));
+          const py = (r.ay === 0 ? -1 : (r.ay === 2 ? 1 : 0));
+          accX += (px === (lx < 0 ? -1 : (lx > 0 ? 1 : 0))) ? 1 : 0;
+          accY += (py === (ly < 0 ? -1 : (ly > 0 ? 1 : 0))) ? 1 : 0;
+          accP += (r.ap === lp) ? 1 : 0;
+        }
+
+        globalStep++;
+        if (globalStep % 50 === 0) {
+          const meanLoss = lossSum / Math.max(1, nSeen);
+          const ax = accX / Math.max(1, nSeen);
+          const ay = accY / Math.max(1, nSeen);
+          const ap = accP / Math.max(1, nSeen);
+          console.log(`[WARMUP-TRAIN] ep=${ep + 1}/${epochs} step=${globalStep} loss=${meanLoss.toFixed(3)} acc(x,y,p)=${ax.toFixed(3)},${ay.toFixed(3)},${ap.toFixed(3)}`);
+        }
+      }
+
+      const meanLoss = lossSum / Math.max(1, nSeen);
+      const ax = accX / Math.max(1, nSeen);
+      const ay = accY / Math.max(1, nSeen);
+      const ap = accP / Math.max(1, nSeen);
+      console.log(`[WARMUP-TRAIN] epoch done ${ep + 1}/${epochs}. loss=${meanLoss.toFixed(3)} acc(x,y,p)=${ax.toFixed(3)},${ay.toFixed(3)},${ap.toFixed(3)}`);
+    }
+
+    // Save updated model state
+    await this.storage.setCheckpoint('model_state', this.policy.saveState());
+
+    this.warmup.trained = true;
+    await this.storage.setCheckpoint('warmup_train', { trained: true, trainEpochs: epochs, trainBatch: batchSize, updatedAt: Date.now() });
+
+    console.log('[WARMUP-TRAIN] done. model_state saved.');
+  }
+
+
+
   async start() {
     if (this.running) return;
+
+    // Phase0: imitation dataset collection (builtin vs builtin)
+    if (!this.warmup.done) {
+      await this._collectWarmupSamples();
+    }
+    // Phase0.5: imitation training (supervised)
+    if (this.warmup.done && !this.warmup.trained) {
+      await this._trainWarmupImitation();
+    }
+
     if (this.graduated) return;
 
     this.running = true;
@@ -242,7 +484,7 @@ export class Trainer {
         if (res.episode) {
           await this.storage.appendEpisode(res.episode);
         } else {
-          console.warn('[TRAIN] missing episode; skip save/learn', { loseReason: res.loseReason, error: res.error });
+          console.warn('[TRAIN] missing episode; skip save/learn', { loseReason: res.loseReason });
         }
 
         // point replay 저장(최근 10개 유지)
@@ -360,7 +602,7 @@ export class Trainer {
 
     // reload model
     const model = await this.storage.getCheckpoint('model_state');
-    if (model && model.kind === 'policy_v1') {
+    if (model && model.kind === 'tuple_policy_v1') {
       this.policy.loadState(model);
     } else {
       await this.storage.setCheckpoint('model_state', this.policy.saveState());

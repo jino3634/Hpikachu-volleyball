@@ -25,7 +25,7 @@ export class OnePointEpisodeRunner {
     this.learningPlayer = (opts.learningPlayer ?? 1);
 
     this.maxTraceFrames = opts.maxTraceFrames ?? 2400;
-    this.hardSafetyFrames = opts.hardSafetyFrames ?? Number.MAX_SAFE_INTEGER;
+    this.hardSafetyFrames = opts.hardSafetyFrames ?? 36000;
   }
 
   // ─────────────────────────────────────────────────────────────
@@ -38,21 +38,38 @@ export class OnePointEpisodeRunner {
   }
 
   _setNeutralInput() {
+    // Prefer tuple input API if available
+    if (typeof this.game.setExternalInputs === 'function') {
+      this.game.setExternalInputs(
+        { xDirection: 0, yDirection: 0, powerHit: 0 },
+        { xDirection: 0, yDirection: 0, powerHit: 0 },
+      );
+      return;
+    }
     if (typeof this.game.setExternalActions === 'function') {
       this.game.setExternalActions(0, 0);
-    } else {
-      this.game._heldActionP1 = 0;
-      this.game._heldActionP2 = 0;
+      return;
     }
+    this.game._heldActionP1 = 0;
+    this.game._heldActionP2 = 0;
   }
 
-  _applyActions(p1Action, p2Action) {
-    if (typeof this.game.setExternalActions === 'function') {
-      this.game.setExternalActions(p1Action, p2Action);
-    } else {
-      this.game._heldActionP1 = p1Action;
-      this.game._heldActionP2 = p2Action;
+  _applyInputs(p1Input, p2Input) {
+    // Prefer tuple input API if available
+    if (typeof this.game.setExternalInputs === 'function') {
+      this.game.setExternalInputs(p1Input, p2Input);
+      return;
     }
+    // Fallback to actionId injection if tuple API is missing
+    // (Older versions may only support actionId.)
+    if (typeof this.game.setExternalActions === 'function') {
+      const p1Action = p1Input?.actionId ?? 0;
+      const p2Action = p2Input?.actionId ?? 0;
+      this.game.setExternalActions(p1Action, p2Action);
+      return;
+    }
+    this.game._heldActionP1 = p1Input?.actionId ?? 0;
+    this.game._heldActionP2 = p2Input?.actionId ?? 0;
   }
 
   _getStateName() {
@@ -176,38 +193,17 @@ export class OnePointEpisodeRunner {
             loseReason: 'ENTER_ROUND_FAILED',
             frames,
             trace,
-            error: null,
-      episode: null,
+            episode: null,
           };
         }
-
-      // DEBUG: point start snapshot (to diagnose ultra-short points like frames=22)
-      try {
-        const lp = this.learningPlayer;
-        const op = (lp === 1) ? 2 : 1;
-        const obsL = (typeof this.game.getObservation === 'function') ? this.game.getObservation(lp) : null;
-        const obsO = (typeof this.game.getObservation === 'function') ? this.game.getObservation(op) : null;
-        const mode = this.game.controlMode ?? null;
-        console.debug('[POINT_START]', {
-          lp,
-          state: this.game.state ?? null,
-          controlMode: mode,
-          ext1: this.game.isPlayer1ExternalEnabled ?? this.game.externalEnabledP1 ?? null,
-          ext2: this.game.isPlayer2ExternalEnabled ?? this.game.externalEnabledP2 ?? null,
-          isP2Serve: this.game.isPlayer2Serve ?? (obsL?.isPlayer2Serve ?? obsO?.isPlayer2Serve ?? null),
-          ballPower: (this.game.ball?.isPowerHit ?? obsL?.ball?.isPowerHit ?? obsO?.ball?.isPowerHit ?? null),
-          obsL: obsL ? { me: obsL.me, opp: obsL.opp, ball: obsL.ball } : null,
-          obsO: obsO ? { me: obsO.me, opp: obsO.opp, ball: obsO.ball } : null,
-        });
-      } catch (e) {
-        console.debug('[POINT_START] snapshot failed', String(e));
-      }
 
       const builder = new EpisodeBuilder({ learningPlayer: this.learningPlayer });
 
       // agent는 trainer.init()에서 game.setAgents(...)로 이미 붙어있음
       const agent = (this.learningPlayer === 1) ? this.game.agent1 : this.game.agent2;
-      if (!agent || typeof agent.chooseAction !== 'function') {
+      const hasChooseInput = !!(agent && typeof agent.chooseInput === 'function');
+      const hasChooseAction = !!(agent && typeof agent.chooseAction === 'function');
+      if (!agent || (!hasChooseInput && !hasChooseAction)) {
         return {
           ok: false,
           scoredBy: 0,
@@ -215,12 +211,23 @@ export class OnePointEpisodeRunner {
           loseReason: `MISSING_AGENT_P${this.learningPlayer}`,
           frames,
           trace,
-          error: null,
-      episode: null,
+          episode: null,
         };
       }
 
-      while (true) {
+      // IMPORTANT:
+      // In external mode, pikavolley may also call agent.chooseInput/chooseAction at phase=0.
+      // To make (obs -> action) pairing deterministic and avoid double-decisions,
+      // runner temporarily disables game agents and injects the chosen input itself.
+      const prevAgent1 = this.game.agent1;
+      const prevAgent2 = this.game.agent2;
+      this.game.setAgents?.(null, null);
+      this.game.agent1 = null;
+      this.game.agent2 = null;
+
+      let result = null;
+      try {
+        while (true) {
       // round가 아니면 학습 프레임 카운트/trace 누적 안 하고 진행만
       if (this.game.state !== this.game.round) {
         this._setNeutralInput();
@@ -235,14 +242,27 @@ export class OnePointEpisodeRunner {
       const obs2 = this.game.getObservation(2);
       const obs = (this.learningPlayer === 1) ? obs1 : obs2;
 
-      // action
-      const aLearn = (agent.chooseAction(obs, this.learningPlayer, this.game) | 0);
+      // action: prefer tuple-based API
+      let aLearn = 0;
+      let inputTuple = { xDirection: 0, yDirection: 0, powerHit: 0 };
+      try {
+        if (hasChooseInput) {
+          inputTuple = agent.chooseInput(obs, this.learningPlayer, this.game) || inputTuple;
+        } else {
+          aLearn = agent.chooseAction(obs, this.learningPlayer, this.game);
+          // map actionId -> tuple if helper exists
+          if (typeof this.game._actionIdToInputTuple === 'function') {
+            inputTuple = this.game._actionIdToInputTuple(aLearn | 0);
+          }
+        }
+      } catch (_) {
+        // keep defaults
+      }
 
-      // opponent는 builtin이면 0 (trainer가 externalEnabledP2=false로 해둠)
-      const a1 = (this.learningPlayer === 1) ? aLearn : 0;
-      const a2 = (this.learningPlayer === 2) ? aLearn : 0;
-
-      this._applyActions(a1, a2);
+      // opponent is builtin (externalEnabled=false) so we only inject learning side
+      const p1Input = (this.learningPlayer === 1) ? inputTuple : { xDirection: 0, yDirection: 0, powerHit: 0 };
+      const p2Input = (this.learningPlayer === 2) ? inputTuple : { xDirection: 0, yDirection: 0, powerHit: 0 };
+      this._applyInputs(p1Input, p2Input);
 
       // 한 프레임 진행
       // stepLogic()가 이벤트를 반환하지 않는 구현도 있어서,
@@ -264,7 +284,7 @@ export class OnePointEpisodeRunner {
         trace.push({
           t: frames,
           obs: { p1: obs1, p2: obs2, ball: obs1?.ball ?? obs2?.ball ?? null },
-          action: { p1: a1, p2: a2 },
+          action: { p1: p1Input, p2: p2Input },
           roundEvents: ev,
         });
       }
@@ -273,7 +293,7 @@ export class OnePointEpisodeRunner {
       builder.addStep({
         t: frames,
         obs,
-        action: aLearn,
+        action: hasChooseInput ? inputTuple : (aLearn | 0),
         nextObs,
         done: false,
         roundEvents: ev,
@@ -297,25 +317,20 @@ export class OnePointEpisodeRunner {
         });
 
         const episode = builder.toEpisode();
-        return {
+        result = {
           ok: true,
           scoredBy,
           loser,
           loseReason: 'SCORE',
           frames,
           trace,
-          error: null,
-      episode,
+          episode,
         };
+        break;
       }
 
       // hard safety (round 프레임 기준)
       if (frames >= this.hardSafetyFrames) {
-        console.warn('[HARD_SAFETY] point exceeded frame cap; forcing reset', {
-          frames, hardSafetyFrames: this.hardSafetyFrames,
-          state: this.game.state ?? null,
-          lastEv: this.game._lastRoundEvents ?? null,
-        });
         
         // HARD_SAFETY로 끊길 때는 다음 포인트를 위해 게임 상태를 한 번 리셋해준다.
         // (roundEnded=true인데 state가 round에 머무는 등, 후속 포인트가 영원히 점수 안 나는 상태를 방지)
@@ -332,18 +347,27 @@ builder.finalize({
           loseReason: 'HARD_SAFETY',
         });
         const episode = builder.toEpisode();
-        return {
+        result = {
           ok: false,
           scoredBy: 0,
           loser: 0,
           loseReason: 'HARD_SAFETY',
           frames,
           trace,
-          error: null,
-      episode,
+          episode,
         };
+        break;
       }
-    }
+        }
+      } finally {
+        // restore agents
+        this.game.setAgents?.(prevAgent1, prevAgent2);
+        this.game.agent1 = prevAgent1;
+        this.game.agent2 = prevAgent2;
+      }
+
+      return result;
+
     } catch (err) {
       console.error('[EpisodeRunner] runOnePoint failed', err);
       return {
@@ -353,9 +377,7 @@ builder.finalize({
         loseReason: 'EXCEPTION',
         frames,
         trace,
-        error: null,
-      episode: null,
-        error: String(err?.message ?? err),
+        episode: null,
       };
     }
   }
