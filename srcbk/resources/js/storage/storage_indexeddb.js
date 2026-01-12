@@ -95,27 +95,15 @@ export class IndexedDBStorage extends StorageIface {
 
   async appendEpisode(episode) {
     this._assert();
-
-    // 학습 루프에서 예외가 나도 전체가 멈추지 않도록 방어
-    if (!episode || typeof episode !== 'object') {
-      console.warn('[IndexedDBStorage] appendEpisode: invalid episode', episode);
-      return;
-    }
     const tx = this.db.transaction([STORE_EPISODES, STORE_META], 'readwrite');
     const epOS = tx.objectStore(STORE_EPISODES);
     const metaOS = tx.objectStore(STORE_META);
 
     // episode 저장 (keyPath: 'id' 요구사항 충족)
-    const id = episode.id ?? episode.episodeId ?? null;
-    if (!id) {
-      console.warn('[IndexedDBStorage] appendEpisode: missing id/episodeId', episode);
-      return;
-    }
-
     const ep = {
       ...episode,
-      id,
-      createdAt: episode.createdAt ?? episode.endedAt ?? episode.startedAt ?? Date.now(),
+      id: episode.id ?? episode.episodeId, // ✅ 핵심
+      createdAt: episode.createdAt ?? episode.endedAt ?? episode.startedAt ?? Date.now(), // ✅ 정렬/메타용
     };
 
     epOS.put(ep);
@@ -130,6 +118,8 @@ export class IndexedDBStorage extends StorageIface {
 
     meta.totalEpisodes = (meta.totalEpisodes | 0) + 1;
     meta.lastEpisodeAt = ep.createdAt;   // ✅ createdAt을 확실히 사용
+    metaOS.put(meta, 'meta');
+
     metaOS.put(meta, 'meta');
 
     await txDone(tx);

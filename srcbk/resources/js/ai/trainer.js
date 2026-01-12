@@ -73,10 +73,6 @@ export class Trainer {
 
     this.running = false;
     this.graduated = false;
-    // training mode: PHASE1 (builtin) -> PHASE2 (self-play)
-    this.mode = 'PHASE1';
-    // Phase1: track best margin (p1Score - p2Score) for current snapshot
-    this.phase1BestMargin = -999;
 
     // global stats
     this.totalEpisodes = 0;
@@ -117,8 +113,6 @@ export class Trainer {
       this.graduated = !!stats.graduated;
       this.consecutiveSetWins = stats.consecutiveSetWins | 0;
       this.currentSet = stats.currentSet ?? this.currentSet;
-      this.mode = stats.mode ?? (this.graduated ? 'PHASE2' : 'PHASE1');
-      this.phase1BestMargin = (stats.phase1BestMargin ?? this.phase1BestMargin) | 0;
     } else {
       await this.storage.setCheckpoint('train_stats', {
         totalEpisodes: 0,
@@ -126,8 +120,6 @@ export class Trainer {
         totalLosses: 0,
         graduated: false,
         consecutiveSetWins: 0,
-        mode: 'PHASE1',
-        phase1BestMargin: this.phase1BestMargin,
         currentSet: this.currentSet,
       });
     }
@@ -198,8 +190,6 @@ export class Trainer {
       graduated: this.graduated,
       consecutiveSetWins: this.consecutiveSetWins,
       currentSet: this.currentSet,
-      mode: this.mode,
-      phase1BestMargin: this.phase1BestMargin,
       updatedAt: Date.now(),
     });
   }
@@ -233,27 +223,16 @@ export class Trainer {
         const res = this._runner.runOnePoint();
         this.lastResult = res;
 
-        if (!res) {
-          console.warn('[TRAIN] runOnePoint returned null/undefined');
-          continue;
-        }
-
-        // episode 저장(가능한 경우만)
-        if (res.episode) {
-          await this.storage.appendEpisode(res.episode);
-        } else {
-          console.warn('[TRAIN] missing episode; skip save/learn', { loseReason: res.loseReason, error: res.error });
-        }
+        // episode 저장(무조건)
+        await this.storage.appendEpisode(res.episode);
 
         // point replay 저장(최근 10개 유지)
         const replay = this._buildPointReplay(res);
         await this.storage.appendReplay(replay);
         await this.storage.pruneReplays(10);
 
-        // policy 업데이트(episode가 있을 때만)
-        if (res.episode) {
-          this.policy.learnFromEpisode(res.episode);
-        }
+        // policy 업데이트(승/패만)
+        this.policy.learnFromEpisode(res.episode);
 
         // global stats
         this.totalEpisodes++;
@@ -276,27 +255,13 @@ export class Trainer {
         // 세트 종료 처리
         if (this._isSetFinished()) {
           const p1Won = this._didP1WinSet();
-
-          // Phase1: margin-based "current" snapshot rule
-          const margin = (this.currentSet.p1 | 0) - (this.currentSet.p2 | 0);
-          if (margin > (this.phase1BestMargin | 0)) {
-            this.phase1BestMargin = margin;
-            // save immediately so the best margin snapshot is persisted
-            await this.storage.setCheckpoint('model_state', this.policy.saveState());
-            await this._saveStats();
-            console.log(`[P1] new bestMargin=${this.phase1BestMargin} (score ${this.currentSet.p1}-${this.currentSet.p2}) -> saved current`);
-          }
-
           if (p1Won) this.consecutiveSetWins++;
           else this.consecutiveSetWins = 0;
 
-          // 졸업 조건: 3세트 연속 승리 -> Phase2 준비 완료(아직 Phase2는 미구현)
+          // 졸업 조건
           if (this.consecutiveSetWins >= this.consecutiveSetWinsToGraduate) {
             this.graduated = true;
-            this.mode = 'PHASE2';
             this.running = false;
-            await this._saveStats();
-            console.log('[P1->P2] graduated via 3 consecutive set wins; mode set to PHASE2');
           }
 
           // 다음 세트로
@@ -354,8 +319,6 @@ export class Trainer {
       this.graduated = !!stats.graduated;
       this.consecutiveSetWins = stats.consecutiveSetWins | 0;
       this.currentSet = stats.currentSet ?? this.currentSet;
-      this.mode = stats.mode ?? (this.graduated ? 'PHASE2' : 'PHASE1');
-      this.phase1BestMargin = (stats.phase1BestMargin ?? this.phase1BestMargin) | 0;
     }
 
     // reload model
@@ -377,10 +340,6 @@ export class Trainer {
     this.totalLosses = 0;
 
     this.graduated = false;
-    // training mode: PHASE1 (builtin) -> PHASE2 (self-play)
-    this.mode = 'PHASE1';
-    // Phase1: track best margin (p1Score - p2Score) for current snapshot
-    this.phase1BestMargin = -999;
     this.consecutiveSetWins = 0;
     this.currentSet = { p1: 0, p2: 0, index: 1 };
 

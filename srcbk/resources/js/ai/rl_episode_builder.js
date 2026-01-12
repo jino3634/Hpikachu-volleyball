@@ -54,24 +54,9 @@ export class EpisodeBuilder {
    *   done: boolean,
    *   info?: any,
    *   roundEvents?: any
-   * }} step
+   * }} param0
    */
-  addStep(step) {
-    // step is required; silently ignore null/undefined to keep training loop robust
-    if (!step) return;
-    // NOTE:
-    // 런타임에서 addStep(undefined)가 들어오면 번들 에러로 학습이 전부 중단될 수 있다.
-    // 파라미터를 안전하게 디폴트 처리해서 학습 루프를 계속 진행하게 한다.
-    const {
-      t = 0,
-      obs = null,
-      action = 0,
-      nextObs = null,
-      done = false,
-      info = null,
-      roundEvents = null,
-    } = step;
-
+  addStep({ t, obs, action, nextObs, done, info = null, roundEvents = null }) {
     const reward = computeSparseReward(roundEvents, this.learningPlayer);
 
     this.transitions.push({

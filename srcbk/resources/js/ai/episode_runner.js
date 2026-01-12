@@ -25,7 +25,7 @@ export class OnePointEpisodeRunner {
     this.learningPlayer = (opts.learningPlayer ?? 1);
 
     this.maxTraceFrames = opts.maxTraceFrames ?? 2400;
-    this.hardSafetyFrames = opts.hardSafetyFrames ?? Number.MAX_SAFE_INTEGER;
+    this.hardSafetyFrames = opts.hardSafetyFrames ?? 36000;
   }
 
   // ─────────────────────────────────────────────────────────────
@@ -160,67 +160,24 @@ export class OnePointEpisodeRunner {
  * }}
  */
   runOnePoint() {
-    // 학습 루프가 끊기지 않도록: runOnePoint는 "항상" 구조화된 결과를 반환한다.
-    // (예외는 trainer에서 unhandled promise rejection로 이어져 전체 중단될 수 있음)
+    // 0) round 진입 강제(메뉴/intro 스킵) — 너가 이미 추가한 로직 사용
+    if (this.game.state !== this.game.round) {
+      const ok = this._forceEnterRoundNoMenu();
+      if (!ok) throw new Error('Failed to enter round without menu');
+    }
+
+    const builder = new EpisodeBuilder({ learningPlayer: this.learningPlayer });
+
     const trace = [];
     let frames = 0;
 
-    try {
-      // 0) round 진입 강제(메뉴/intro 스킵)
-      const ok = this._forceEnterRoundNoMenu();
-      if (!ok) {
-          return {
-            ok: false,
-            scoredBy: 0,
-            loser: 0,
-            loseReason: 'ENTER_ROUND_FAILED',
-            frames,
-            trace,
-            error: null,
-      episode: null,
-          };
-        }
+    // agent는 trainer.init()에서 game.setAgents(this.agent, null)로 이미 붙어있음
+    const agent = (this.learningPlayer === 1) ? this.game.agent1 : this.game.agent2;
+    if (!agent || typeof agent.chooseAction !== 'function') {
+      throw new Error(`Missing agent for learningPlayer=${this.learningPlayer}`);
+    }
 
-      // DEBUG: point start snapshot (to diagnose ultra-short points like frames=22)
-      try {
-        const lp = this.learningPlayer;
-        const op = (lp === 1) ? 2 : 1;
-        const obsL = (typeof this.game.getObservation === 'function') ? this.game.getObservation(lp) : null;
-        const obsO = (typeof this.game.getObservation === 'function') ? this.game.getObservation(op) : null;
-        const mode = this.game.controlMode ?? null;
-        console.debug('[POINT_START]', {
-          lp,
-          state: this.game.state ?? null,
-          controlMode: mode,
-          ext1: this.game.isPlayer1ExternalEnabled ?? this.game.externalEnabledP1 ?? null,
-          ext2: this.game.isPlayer2ExternalEnabled ?? this.game.externalEnabledP2 ?? null,
-          isP2Serve: this.game.isPlayer2Serve ?? (obsL?.isPlayer2Serve ?? obsO?.isPlayer2Serve ?? null),
-          ballPower: (this.game.ball?.isPowerHit ?? obsL?.ball?.isPowerHit ?? obsO?.ball?.isPowerHit ?? null),
-          obsL: obsL ? { me: obsL.me, opp: obsL.opp, ball: obsL.ball } : null,
-          obsO: obsO ? { me: obsO.me, opp: obsO.opp, ball: obsO.ball } : null,
-        });
-      } catch (e) {
-        console.debug('[POINT_START] snapshot failed', String(e));
-      }
-
-      const builder = new EpisodeBuilder({ learningPlayer: this.learningPlayer });
-
-      // agent는 trainer.init()에서 game.setAgents(...)로 이미 붙어있음
-      const agent = (this.learningPlayer === 1) ? this.game.agent1 : this.game.agent2;
-      if (!agent || typeof agent.chooseAction !== 'function') {
-        return {
-          ok: false,
-          scoredBy: 0,
-          loser: 0,
-          loseReason: `MISSING_AGENT_P${this.learningPlayer}`,
-          frames,
-          trace,
-          error: null,
-      episode: null,
-        };
-      }
-
-      while (true) {
+    while (true) {
       // round가 아니면 학습 프레임 카운트/trace 누적 안 하고 진행만
       if (this.game.state !== this.game.round) {
         this._setNeutralInput();
@@ -245,14 +202,8 @@ export class OnePointEpisodeRunner {
       this._applyActions(a1, a2);
 
       // 한 프레임 진행
-      // stepLogic()가 이벤트를 반환하지 않는 구현도 있어서,
-      // 반환값과 game._lastRoundEvents 둘 다를 확인한다.
-      const stepRet = this.game.stepLogic();
-      // stepLogic()는 보통 boolean을 반환하지만, 일부 구현은 이벤트 객체를 반환할 수 있다.
-      // pikavolley.js에서는 round()에서 this._lastRoundEvents에 이벤트를 저장한다.
-      const ev = (stepRet && typeof stepRet === 'object')
-        ? stepRet
-        : (this.game._lastRoundEvents ?? null);
+      // 한 프레임 진행: 반환 이벤트를 우선 신뢰
+      const ev = this.game.stepLogic() ?? null;
 
       // nextObs
       const nextObs1 = this.game.getObservation(1);
@@ -281,12 +232,8 @@ export class OnePointEpisodeRunner {
 
       frames++;
 
-      // 포인트 종료 감지: 프로젝트에 따라 필드명이 다를 수 있어 둘 다 지원
-      // - scoredBy: 1|2
-      // - scored: 1|2
-      const scoredBy = (ev && typeof ev.scoredBy === 'number')
-        ? ev.scoredBy
-        : ((ev && typeof ev.scored === 'number') ? ev.scored : 0);
+      // 포인트 종료 감지: roundEvents.scored (pikavolley roundLogic 기준)
+      const scoredBy = (ev && typeof ev.scored === 'number') ? ev.scored : 0;
       if (scoredBy === 1 || scoredBy === 2) {
         const loser = (scoredBy === 1) ? 2 : 1;
 
@@ -304,29 +251,13 @@ export class OnePointEpisodeRunner {
           loseReason: 'SCORE',
           frames,
           trace,
-          error: null,
-      episode,
+          episode,
         };
       }
 
       // hard safety (round 프레임 기준)
       if (frames >= this.hardSafetyFrames) {
-        console.warn('[HARD_SAFETY] point exceeded frame cap; forcing reset', {
-          frames, hardSafetyFrames: this.hardSafetyFrames,
-          state: this.game.state ?? null,
-          lastEv: this.game._lastRoundEvents ?? null,
-        });
-        
-        // HARD_SAFETY로 끊길 때는 다음 포인트를 위해 게임 상태를 한 번 리셋해준다.
-        // (roundEnded=true인데 state가 round에 머무는 등, 후속 포인트가 영원히 점수 안 나는 상태를 방지)
-        try {
-          if (this.game.beforeStartOfNewGame) this.game.state = this.game.beforeStartOfNewGame;
-          else if (this.game.startOfNewGame) this.game.state = this.game.startOfNewGame;
-          this.game.frameCounter = 0;
-          if (typeof this.game.roundEnded === 'boolean') this.game.roundEnded = false;
-          if (typeof this.game.gameEnded === 'boolean') this.game.gameEnded = false;
-        } catch (_) {}
-builder.finalize({
+        builder.finalize({
           scoredBy: 0,
           loser: 0,
           loseReason: 'HARD_SAFETY',
@@ -339,24 +270,9 @@ builder.finalize({
           loseReason: 'HARD_SAFETY',
           frames,
           trace,
-          error: null,
-      episode,
+          episode,
         };
       }
-    }
-    } catch (err) {
-      console.error('[EpisodeRunner] runOnePoint failed', err);
-      return {
-        ok: false,
-        scoredBy: 0,
-        loser: 0,
-        loseReason: 'EXCEPTION',
-        frames,
-        trace,
-        error: null,
-      episode: null,
-        error: String(err?.message ?? err),
-      };
     }
   }
 
