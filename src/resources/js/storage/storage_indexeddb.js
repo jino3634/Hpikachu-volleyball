@@ -99,8 +99,14 @@ export class IndexedDBStorage extends StorageIface {
     const epOS = tx.objectStore(STORE_EPISODES);
     const metaOS = tx.objectStore(STORE_META);
 
-    // episode 저장
-    epOS.put(episode);
+    // episode 저장 (keyPath: 'id' 요구사항 충족)
+    const ep = {
+      ...episode,
+      id: episode.id ?? episode.episodeId, // ✅ 핵심
+      createdAt: episode.createdAt ?? episode.endedAt ?? episode.startedAt ?? Date.now(), // ✅ 정렬/메타용
+    };
+
+    epOS.put(ep);
 
     // meta 갱신(대략 카운터)
     const meta = (await reqToPromise(metaOS.get('meta'))) ?? {
@@ -109,8 +115,11 @@ export class IndexedDBStorage extends StorageIface {
       totalEpisodes: 0,
       notes: '',
     };
+
     meta.totalEpisodes = (meta.totalEpisodes | 0) + 1;
-    meta.lastEpisodeAt = episode.createdAt;
+    meta.lastEpisodeAt = ep.createdAt;   // ✅ createdAt을 확실히 사용
+    metaOS.put(meta, 'meta');
+
     metaOS.put(meta, 'meta');
 
     await txDone(tx);

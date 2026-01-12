@@ -146,6 +146,7 @@ async function setup() {
   });
   await trainer.init();
   createTrainingControlPanel({ trainer, ticker });
+  createReplayPanel({ trainer, ticker });
 
   /**
  * Minimal in-page UI for training.
@@ -251,6 +252,7 @@ function createTrainingControlPanel({ trainer, ticker }) {
 
     // Prevent double stepping: stop the visual loop
     ticker.stop();
+    window.__PV_TRAINING_MUTE__ = true;
     if (hideChk.checked) setCanvasVisible(false);
 
     trainingPromise = trainer.start().finally(() => {
@@ -262,6 +264,7 @@ function createTrainingControlPanel({ trainer, ticker }) {
 
   const stopTraining = () => {
     trainer.stop();
+    window.__PV_TRAINING_MUTE__ = false;
     // Resume visuals
     setCanvasVisible(true);
     ticker.start();
@@ -300,6 +303,139 @@ function createTrainingControlPanel({ trainer, ticker }) {
   return { refresh };
 }
 
+function createReplayPanel({ trainer, ticker }) {
+  const mount = document.getElementById('game-canvas-container') ?? document.body;
+
+  const panel = document.createElement('div');
+  panel.id = 'replay-panel';
+  panel.style.position = 'absolute';
+  panel.style.left = '12px';
+  panel.style.bottom = '12px';
+  panel.style.zIndex = '9999';
+  panel.style.padding = '10px 12px';
+  panel.style.background = 'rgba(0,0,0,0.75)';
+  panel.style.border = '1px solid rgba(255,255,255,0.2)';
+  panel.style.borderRadius = '10px';
+  panel.style.fontFamily = 'system-ui, -apple-system, Segoe UI, Roboto, Arial';
+  panel.style.fontSize = '12px';
+  panel.style.color = '#fff';
+  panel.style.minWidth = '320px';
+  panel.style.maxWidth = '420px';
+  panel.style.userSelect = 'none';
+
+  const title = document.createElement('div');
+  title.textContent = 'REPLAYS (last 10 points)';
+  title.style.fontWeight = '700';
+  title.style.letterSpacing = '0.04em';
+  title.style.marginBottom = '6px';
+  panel.appendChild(title);
+
+  const row = document.createElement('div');
+  row.style.display = 'flex';
+  row.style.gap = '8px';
+  row.style.marginBottom = '8px';
+
+  const btnRefresh = document.createElement('button');
+  btnRefresh.textContent = 'Refresh';
+  btnRefresh.style.flex = '1';
+
+  const btnPlay = document.createElement('button');
+  btnPlay.textContent = 'Play Selected';
+  btnPlay.style.flex = '1';
+
+  for (const b of [btnRefresh, btnPlay]) {
+    b.style.padding = '6px 8px';
+    b.style.borderRadius = '8px';
+    b.style.border = '1px solid rgba(255,255,255,0.25)';
+    b.style.background = 'rgba(255,255,255,0.08)';
+    b.style.color = '#fff';
+    b.style.cursor = 'pointer';
+  }
+
+  row.appendChild(btnRefresh);
+  row.appendChild(btnPlay);
+  panel.appendChild(row);
+
+  const list = document.createElement('div');
+  list.style.maxHeight = '220px';
+  list.style.overflow = 'auto';
+  list.style.borderTop = '1px solid rgba(255,255,255,0.12)';
+  list.style.paddingTop = '6px';
+  panel.appendChild(list);
+
+  mount.style.position = mount.style.position || 'relative';
+  mount.appendChild(panel);
+
+  let selectedId = null;
+
+  const renderList = (items) => {
+    list.innerHTML = '';
+    if (!items.length) {
+      const empty = document.createElement('div');
+      empty.style.opacity = '0.8';
+      empty.textContent = 'No replays saved yet.';
+      list.appendChild(empty);
+      return;
+    }
+
+    for (const it of items) {
+      const row = document.createElement('div');
+      row.style.display = 'grid';
+      row.style.gridTemplateColumns = '18px 1fr';
+      row.style.gap = '8px';
+      row.style.padding = '6px 4px';
+      row.style.borderRadius = '8px';
+      row.style.cursor = 'pointer';
+      row.style.background = (it.id === selectedId) ? 'rgba(255,255,255,0.12)' : 'transparent';
+
+      const bullet = document.createElement('div');
+      bullet.textContent = (it.id === selectedId) ? '▶' : '•';
+      bullet.style.opacity = '0.9';
+
+      const text = document.createElement('div');
+      const t = new Date(it.createdAt).toLocaleString();
+      const who = (it.scoredBy === 1) ? 'P1 scored' : (it.scoredBy === 2) ? 'P2 scored' : 'unknown';
+      text.textContent = `[${t}] ${who} | ${it.loseReason} | frames=${it.frames}`;
+
+      row.onclick = () => {
+        selectedId = it.id;
+        renderList(items);
+      };
+
+      row.appendChild(bullet);
+      row.appendChild(text);
+      list.appendChild(row);
+    }
+  };
+
+  let cached = [];
+
+  const refresh = async () => {
+    cached = await trainer.storage.listReplays({ limit: 10, offset: 0 });
+    renderList(cached);
+  };
+
+  btnRefresh.onclick = refresh;
+
+  btnPlay.onclick = async () => {
+    const it = cached.find(x => x.id === selectedId);
+    if (!it) return;
+
+    // stop training and show canvas
+    trainer.stop();
+    window.__PV_TRAINING_MUTE__ = false;
+
+    const canvasEl = document.getElementById('game-canvas');
+    if (canvasEl) canvasEl.style.display = 'block';
+    ticker.start();
+
+    // TODO: next step - actual playback overlay
+    console.log('Selected replay:', it);
+    alert('Next step: implement ReplayOverlay playback. (Selected replay logged to console)');
+  };
+
+  refresh();
+}
 
 
   // ✅ 콘솔에서 window.train으로 조작

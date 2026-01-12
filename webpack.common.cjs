@@ -113,10 +113,10 @@ module.exports = {
         removeComments: true,
       },
     }),
-    new WorkboxPlugin.GenerateSW({
-      swDest: 'sw.js',
-      cleanupOutdatedCaches: true,
-      skipWaiting: false,
-    }),
+    // new WorkboxPlugin.GenerateSW({
+    //   swDest: 'sw.js',
+    //   cleanupOutdatedCaches: true,
+    //   skipWaiting: false,
+    // }),
   ],
 };

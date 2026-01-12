@@ -138,6 +138,7 @@ class PikaStereoSound {
    * @param {number} leftOrCenterOrRight -1: left, 0: center, 1: right
    */
   play(leftOrCenterOrRight = 0) {
+    if (window.__PV_TRAINING_MUTE__) return;
     if (leftOrCenterOrRight === 0) {
       this.center.play();
     } else if (leftOrCenterOrRight === -1) {
