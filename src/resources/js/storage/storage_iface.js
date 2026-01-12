@@ -41,4 +41,14 @@ export class StorageIface {
 
   /** @param {any} data */
   async importAll(data) { throw new Error('not implemented'); }
+
+  /** @param {any} replay */
+  async appendReplay(replay) { throw new Error('not implemented'); }
+
+  /** @returns {Promise<any[]>} */
+  async listReplays(opts = {}) { throw new Error('not implemented'); }
+
+  /** @param {number} maxKeep */
+  async pruneReplays(maxKeep) { throw new Error('not implemented'); }
+
 }

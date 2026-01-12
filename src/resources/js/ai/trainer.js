@@ -226,6 +226,11 @@ export class Trainer {
         // episode 저장(무조건)
         await this.storage.appendEpisode(res.episode);
 
+        // point replay 저장(최근 10개 유지)
+        const replay = this._buildPointReplay(res);
+        await this.storage.appendReplay(replay);
+        await this.storage.pruneReplays(10);
+
         // policy 업데이트(승/패만)
         this.policy.learnFromEpisode(res.episode);
 
@@ -334,4 +339,49 @@ export class Trainer {
     await this.storage.setCheckpoint('model_state', this.policy.saveState());
     await this._saveStats();
   }
+
+    _buildPointReplay(res) {
+    const now = Date.now();
+    const id = `rp_${now}_${Math.random().toString(16).slice(2)}`;
+
+    const opponentType = (this.game?.externalEnabledP2) ? 'external' : 'builtin';
+
+    // trace를 "재생 친화적인" compact 포맷으로 줄임
+    const trace = Array.isArray(res.trace) ? res.trace.map((t) => {
+      const obsP1 = t?.obs?.p1 ?? null;
+      const obsP2 = t?.obs?.p2 ?? null;
+
+      // p1 관측 기준으로 p1/p2 상태를 잡는 게 가장 안정적
+      const p1 = obsP1?.me ?? obsP2?.opp ?? null;
+      const p2 = obsP1?.opp ?? obsP2?.me ?? null;
+      const ball = t?.obs?.ball ?? obsP1?.ball ?? obsP2?.ball ?? null;
+
+      return {
+        frame: t.frame | 0,
+        a1: (t.actionP1 ?? 0) | 0,
+        a2: (t.actionP2 ?? 0) | 0,
+        p1: p1 ? { x: p1.x, y: p1.y, yV: p1.yV } : null,
+        p2: p2 ? { x: p2.x, y: p2.y, yV: p2.yV } : null,
+        ball: ball ? { x: ball.x, y: ball.y, xV: ball.xV, yV: ball.yV, isPowerHit: ball.isPowerHit } : null,
+        scores: obsP1?.scores ?? obsP2?.scores ?? null,
+        serve: obsP1?.isPlayer2Serve ?? obsP2?.isPlayer2Serve ?? null,
+        state: t.stateName ?? null,
+      };
+    }) : [];
+
+    return {
+      id,
+      createdAt: now,
+      type: 'point_v1',
+      ok: !!res.ok,
+      learningPlayer: this.learningPlayer,
+      opponentType,
+      scoredBy: res.scoredBy ?? 0,
+      loser: res.loser ?? 0,
+      loseReason: res.loseReason ?? 'UNKNOWN',
+      frames: res.frames ?? 0,
+      trace,
+    };
+  }
+
 }

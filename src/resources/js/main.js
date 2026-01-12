@@ -145,6 +145,162 @@ async function setup() {
     consecutiveSetWinsToGraduate: 3,
   });
   await trainer.init();
+  createTrainingControlPanel({ trainer, ticker });
+
+  /**
+ * Minimal in-page UI for training.
+ * - Start/Stop
+ * - Status readout
+ * - Hide canvas while training (default)
+ *
+ * @param {{ trainer: import('./ai/trainer.js').Trainer, ticker: import('@pixi/ticker').Ticker }} args
+ */
+function createTrainingControlPanel({ trainer, ticker }) {
+  const mount = document.getElementById('game-canvas-container') ?? document.body;
+
+  const panel = document.createElement('div');
+  panel.id = 'training-panel';
+  panel.style.position = 'absolute';
+  panel.style.right = '12px';
+  panel.style.bottom = '12px';
+  panel.style.zIndex = '9999';
+  panel.style.padding = '10px 12px';
+  panel.style.background = 'rgba(0,0,0,0.75)';
+  panel.style.border = '1px solid rgba(255,255,255,0.2)';
+  panel.style.borderRadius = '10px';
+  panel.style.fontFamily = 'system-ui, -apple-system, Segoe UI, Roboto, Arial';
+  panel.style.fontSize = '12px';
+  panel.style.color = '#fff';
+  panel.style.minWidth = '240px';
+  panel.style.userSelect = 'none';
+
+  const title = document.createElement('div');
+  title.textContent = 'TRAINING';
+  title.style.fontWeight = '700';
+  title.style.letterSpacing = '0.08em';
+  title.style.marginBottom = '6px';
+  panel.appendChild(title);
+
+  const row1 = document.createElement('div');
+  row1.style.display = 'flex';
+  row1.style.gap = '8px';
+  row1.style.marginBottom = '8px';
+
+  const btnStart = document.createElement('button');
+  btnStart.textContent = 'Start';
+  btnStart.style.flex = '1';
+  const btnStop = document.createElement('button');
+  btnStop.textContent = 'Stop';
+  btnStop.style.flex = '1';
+
+  for (const b of [btnStart, btnStop]) {
+    b.style.padding = '6px 8px';
+    b.style.borderRadius = '8px';
+    b.style.border = '1px solid rgba(255,255,255,0.25)';
+    b.style.background = 'rgba(255,255,255,0.08)';
+    b.style.color = '#fff';
+    b.style.cursor = 'pointer';
+  }
+  row1.appendChild(btnStart);
+  row1.appendChild(btnStop);
+  panel.appendChild(row1);
+
+  const options = document.createElement('div');
+  options.style.display = 'flex';
+  options.style.alignItems = 'center';
+  options.style.gap = '8px';
+  options.style.marginBottom = '8px';
+
+  const hideLabel = document.createElement('label');
+  hideLabel.style.display = 'flex';
+  hideLabel.style.alignItems = 'center';
+  hideLabel.style.gap = '6px';
+  const hideChk = document.createElement('input');
+  hideChk.type = 'checkbox';
+  hideChk.checked = true;
+  hideLabel.appendChild(hideChk);
+  const hideText = document.createElement('span');
+  hideText.textContent = 'Hide game while training';
+  hideLabel.appendChild(hideText);
+  options.appendChild(hideLabel);
+  panel.appendChild(options);
+
+  const status = document.createElement('pre');
+  status.style.margin = '0';
+  status.style.whiteSpace = 'pre-wrap';
+  status.style.lineHeight = '1.25';
+  status.style.opacity = '0.9';
+  panel.appendChild(status);
+
+  mount.style.position = mount.style.position || 'relative';
+  mount.appendChild(panel);
+
+  const canvasEl = document.getElementById('game-canvas');
+
+  const setCanvasVisible = (visible) => {
+    if (!canvasEl) return;
+    canvasEl.style.display = visible ? 'block' : 'none';
+  };
+
+  let trainingPromise = null;
+
+  const startTraining = () => {
+    const s = trainer.status();
+    if (s.graduated) return;
+    if (s.running) return;
+
+    // Prevent double stepping: stop the visual loop
+    ticker.stop();
+    if (hideChk.checked) setCanvasVisible(false);
+
+    trainingPromise = trainer.start().finally(() => {
+      trainingPromise = null;
+      refresh();
+    });
+    refresh();
+  };
+
+  const stopTraining = () => {
+    trainer.stop();
+    // Resume visuals
+    setCanvasVisible(true);
+    ticker.start();
+    refresh();
+  };
+
+  btnStart.onclick = startTraining;
+  btnStop.onclick = stopTraining;
+
+  hideChk.onchange = () => {
+    const s = trainer.status();
+    if (s.running) {
+      setCanvasVisible(!hideChk.checked);
+    }
+  };
+
+  const refresh = () => {
+    const s = trainer.status();
+    const winratePct = (s.totalEpisodes > 0) ? (s.winrate * 100).toFixed(1) : '0.0';
+    status.textContent = [
+      `running: ${s.running ? 'ON' : 'OFF'}`,
+      `graduated: ${s.graduated ? 'YES' : 'NO'}`,
+      `episodes: ${s.totalEpisodes} (W ${s.wins} / L ${s.losses}, ${winratePct}%)`,
+      `set target: ${s.setWinTarget}, streak: ${s.consecutiveSetWins}/${s.consecutiveSetWinsToGraduate}`,
+      `current set: P1 ${s.currentSet?.p1 ?? 0} - P2 ${s.currentSet?.p2 ?? 0} (set #${s.currentSet?.index ?? 1})`,
+      `speed: ${s.pointsPerTick} point(s)/tick, delay: ${s.tickDelayMs}ms`,
+    ].join('\n');
+
+    btnStart.disabled = s.running || s.graduated;
+    btnStop.disabled = !s.running;
+  };
+
+  refresh();
+  setInterval(refresh, 500);
+
+  return { refresh };
+}
+
+
 
   // ✅ 콘솔에서 window.train으로 조작
   /** @type {any} */ (window).train = {

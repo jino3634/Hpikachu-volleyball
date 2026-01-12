@@ -4,11 +4,12 @@
 import { StorageIface } from './storage_iface.js';
 
 const DB_NAME = 'pika_rl_db';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 const STORE_META = 'meta';
 const STORE_EPISODES = 'episodes';
 const STORE_CHECKPOINTS = 'checkpoints';
+const STORE_REPLAYS = 'replays';
 
 function reqToPromise(req) {
   return new Promise((resolve, reject) => {
@@ -40,6 +41,10 @@ async function openDB() {
     }
     if (!db.objectStoreNames.contains(STORE_CHECKPOINTS)) {
       db.createObjectStore(STORE_CHECKPOINTS); // key-value
+    }
+    if (!db.objectStoreNames.contains(STORE_REPLAYS)) {
+    const os = db.createObjectStore(STORE_REPLAYS, { keyPath: 'id' });
+    os.createIndex('createdAt', 'createdAt', { unique: false });
     }
   };
 
@@ -158,6 +163,86 @@ export class IndexedDBStorage extends StorageIface {
     return out;
   }
 
+  async appendReplay(replay) {
+    this._assert();
+    const tx = this.db.transaction([STORE_REPLAYS], 'readwrite');
+    const os = tx.objectStore(STORE_REPLAYS);
+    os.put(replay);
+    await txDone(tx);
+  }
+
+  async listReplays(opts = {}) {
+    this._assert();
+    const limit = Math.max(0, (opts.limit ?? 10) | 0);
+    const offset = Math.max(0, (opts.offset ?? 0) | 0);
+
+    const tx = this.db.transaction([STORE_REPLAYS], 'readonly');
+    const os = tx.objectStore(STORE_REPLAYS);
+    const idx = os.index('createdAt');
+
+    const out = [];
+    let skipped = 0;
+
+    await new Promise((resolve, reject) => {
+      // 최신순(내림차순)
+      const req = idx.openCursor(null, 'prev');
+      req.onerror = () => reject(req.error);
+      req.onsuccess = () => {
+        const cursor = req.result;
+        if (!cursor) return resolve();
+
+        if (skipped < offset) {
+          skipped++;
+          cursor.continue();
+          return;
+        }
+
+        out.push(cursor.value);
+        if (limit > 0 && out.length >= limit) return resolve();
+        cursor.continue();
+      };
+    });
+
+    await txDone(tx);
+    return out;
+  }
+
+  async pruneReplays(maxKeep = 10) {
+    this._assert();
+    const keep = Math.max(0, maxKeep | 0);
+
+    const tx = this.db.transaction([STORE_REPLAYS], 'readwrite');
+    const os = tx.objectStore(STORE_REPLAYS);
+    const idx = os.index('createdAt');
+
+    const total = await reqToPromise(os.count());
+    const excess = total - keep;
+    if (excess <= 0) {
+      await txDone(tx);
+      return;
+    }
+
+    let removed = 0;
+
+    await new Promise((resolve, reject) => {
+      // 오래된 것부터(오름차순) 삭제
+      const req = idx.openCursor(null, 'next');
+      req.onerror = () => reject(req.error);
+      req.onsuccess = () => {
+        const cursor = req.result;
+        if (!cursor) return resolve();
+
+        os.delete(cursor.primaryKey);
+        removed++;
+        if (removed >= excess) return resolve();
+
+        cursor.continue();
+      };
+    });
+
+    await txDone(tx);
+  }
+
   async getCheckpoint(key) {
     this._assert();
     const tx = this.db.transaction([STORE_CHECKPOINTS], 'readonly');
@@ -191,6 +276,7 @@ export class IndexedDBStorage extends StorageIface {
     const episodes = await this.listEpisodes({ limit: 0, offset: 0 }); // limit=0 => 전부
     const ck_model = await this.getCheckpoint('model_state');
     const ck_stats = await this.getCheckpoint('train_stats');
+    const replays = await this.listReplays({ limit: 0, offset: 0 });
 
     return {
       format: 'pika_rl_export_v1',
@@ -201,6 +287,7 @@ export class IndexedDBStorage extends StorageIface {
         train_stats: ck_stats ?? null,
       },
       episodes,
+      replays,
     };
   }
 
@@ -214,12 +301,14 @@ export class IndexedDBStorage extends StorageIface {
     const episodes = Array.isArray(data.episodes) ? data.episodes : [];
     const meta = data.meta ?? null;
     const checkpoints = data.checkpoints ?? {};
+    const replays = Array.isArray(data.replays) ? data.replays : [];
 
     // merge import: 같은 id는 overwrite
-    const tx = this.db.transaction([STORE_EPISODES, STORE_META, STORE_CHECKPOINTS], 'readwrite');
+    const tx = this.db.transaction([STORE_EPISODES, STORE_META, STORE_CHECKPOINTS, STORE_REPLAYS], 'readwrite');
     const epOS = tx.objectStore(STORE_EPISODES);
     const metaOS = tx.objectStore(STORE_META);
     const ckOS = tx.objectStore(STORE_CHECKPOINTS);
+    const rpOS = tx.objectStore(STORE_REPLAYS);
 
     for (const ep of episodes) {
       if (!ep || !ep.id) continue;
@@ -228,6 +317,10 @@ export class IndexedDBStorage extends StorageIface {
 
     if (meta) {
       metaOS.put(meta, 'meta');
+    }
+    for (const rp of replays) {
+      if (!rp || !rp.id) continue;
+      rpOS.put(rp);
     }
 
     if (checkpoints.model_state != null) ckOS.put(checkpoints.model_state, 'model_state');
