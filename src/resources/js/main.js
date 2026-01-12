@@ -135,18 +135,34 @@ async function setup() {
   const pikaVolley = new PikachuVolleyball(stage, loader.resources);
   setUpUI(pikaVolley, ticker);
 
-  // ✅ Trainer 연결 (P1 학습, P2 builtin AI)
-  const trainer = new Trainer(pikaVolley, {
-    learningPlayer: 1,
-    pointsPerTick: 1,
-    tickDelayMs: 0,
-    autosaveEveryEpisodes: 50,
-    setWinTarget: 15,
-    consecutiveSetWinsToGraduate: 3,
-  });
+  const trainer = new Trainer(pikaVolley, { /* ... */ });
   await trainer.init();
+
+  window.train = window.train || {};
+  window.train.trainer = trainer;
+  window.train.storage = trainer.storage;
+
   createTrainingControlPanel({ trainer, ticker });
-  createReplayPanel({ trainer, ticker });
+  createReplayPanel({ trainer, ticker, pikaVolley });
+
+  // 콘솔용 병합도 여기서 하고
+  window.train = window.train || {};
+  Object.assign(window.train, {
+    start: () => trainer.start(),
+    stop: () => trainer.stop(),
+    status: () => trainer.status(),
+    export: () => trainer.exportToFile(),
+    import: (opts) => trainer.importFromFile(opts),
+    clear: () => trainer.clearAll(),
+    setSpeed: (n) => { trainer.pointsPerTick = Math.max(1, n | 0); },
+    trainer,
+    storage: trainer.storage,
+  });
+
+  start(pikaVolley);   // ✅ 여기서 게임 시작
+}                    // ✅ setup 끝!
+
+
 
   /**
  * Minimal in-page UI for training.
@@ -303,8 +319,160 @@ function createTrainingControlPanel({ trainer, ticker }) {
   return { refresh };
 }
 
-function createReplayPanel({ trainer, ticker }) {
+class ReplayOverlay2D {
+  /**
+   * @param {{ width:number, height:number, mountEl: HTMLElement }} args
+   */
+  constructor({ width, height, mountEl }) {
+    this.width = width;
+    this.height = height;
+
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    canvas.style.position = 'absolute';
+    canvas.style.left = '0';
+    canvas.style.top = '0';
+    canvas.style.pointerEvents = 'none';
+    canvas.style.zIndex = '5000'; // pixi canvas 위
+    canvas.style.imageRendering = 'pixelated';
+
+    // mountEl은 game-canvas-container 같은 상대 위치 컨테이너
+    mountEl.style.position = mountEl.style.position || 'relative';
+    mountEl.appendChild(canvas);
+
+    this.canvas = canvas;
+    this.ctx = canvas.getContext('2d');
+
+    this.running = false;
+    this.paused = false;
+    this.speed = 1; // 1x,2x,4x...
+    this._raf = 0;
+    this._framePos = 0; // float
+    this._trace = [];
+    this._meta = null;
+  }
+
+  setSpeed(n) {
+    this.speed = Math.max(0.25, Number(n) || 1);
+  }
+
+  start(replay) {
+    this.stop();
+
+    this._meta = replay;
+    this._trace = Array.isArray(replay.trace) ? replay.trace : [];
+    this._framePos = 0;
+    this.running = true;
+    this.paused = false;
+
+    this._loop();
+  }
+
+  togglePause() {
+    if (!this.running) return;
+    this.paused = !this.paused;
+  }
+
+  stop() {
+    this.running = false;
+    this.paused = false;
+    if (this._raf) cancelAnimationFrame(this._raf);
+    this._raf = 0;
+    this._trace = [];
+    this._meta = null;
+    this._clear();
+  }
+
+  _clear() {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    ctx.clearRect(0, 0, this.width, this.height);
+  }
+
+  _loop = () => {
+    if (!this.running) return;
+
+    if (!this.paused) {
+      // 60fps 기준으로 speed만큼 진행 (간단/안정)
+      this._framePos += this.speed;
+    }
+
+    const idx = Math.floor(this._framePos);
+    if (idx >= this._trace.length) {
+      this.stop();
+      return;
+    }
+
+    this._draw(this._trace[idx], idx);
+
+    this._raf = requestAnimationFrame(this._loop);
+  };
+
+  _draw(frame, idx) {
+    const ctx = this.ctx;
+    if (!ctx) return;
+
+    ctx.clearRect(0, 0, this.width, this.height);
+
+    // 배경 가이드(선택): 중앙 네트 라인
+    ctx.globalAlpha = 0.35;
+    ctx.beginPath();
+    ctx.moveTo(this.width / 2, 0);
+    ctx.lineTo(this.width / 2, this.height);
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+
+    // 좌표
+    const p1 = frame.p1;
+    const p2 = frame.p2;
+    const ball = frame.ball;
+
+    // player draw (단순 원)
+    if (p1) this._drawCircle(p1.x, p1.y, 14, '#00ffcc');
+    if (p2) this._drawCircle(p2.x, p2.y, 14, '#ffcc00');
+
+    // ball draw
+    if (ball) this._drawCircle(ball.x, ball.y, 6, '#ffffff');
+
+    // 상단 텍스트 HUD
+    const scores = frame.scores;
+    ctx.font = '12px system-ui, -apple-system, Segoe UI, Roboto, Arial';
+    ctx.fillStyle = 'rgba(255,255,255,0.95)';
+    const scoreText = scores ? `Score: P1 ${scores.p1 ?? '?'} - P2 ${scores.p2 ?? '?'}` : 'Score: ?';
+    const infoText = `Replay frame ${idx+1}/${this._trace.length}  speed ${this.speed}x  ${this.paused ? '[PAUSED]' : ''}`;
+    ctx.fillText(scoreText, 10, 16);
+    ctx.fillText(infoText, 10, 32);
+
+    // 메타 표시(포인트 결과)
+    if (this._meta) {
+      const who = (this._meta.scoredBy === 1) ? 'P1 scored' : (this._meta.scoredBy === 2) ? 'P2 scored' : 'unknown';
+      ctx.fillText(`${who}  reason=${this._meta.loseReason}`, 10, 48);
+    }
+  }
+
+  _drawCircle(x, y, r, color) {
+    const ctx = this.ctx;
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.fill();
+
+    ctx.globalAlpha = 0.35;
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = '#000';
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+}
+
+function createReplayPanel({ trainer, ticker, pikaVolley }) {
   const mount = document.getElementById('game-canvas-container') ?? document.body;
+
+  // ✅ overlay 생성 (게임 캔버스 위)
+  const overlay = new ReplayOverlay2D({ width: 432, height: 304, mountEl: mount });
 
   const panel = document.createElement('div');
   panel.id = 'replay-panel';
@@ -319,8 +487,8 @@ function createReplayPanel({ trainer, ticker }) {
   panel.style.fontFamily = 'system-ui, -apple-system, Segoe UI, Roboto, Arial';
   panel.style.fontSize = '12px';
   panel.style.color = '#fff';
-  panel.style.minWidth = '320px';
-  panel.style.maxWidth = '420px';
+  panel.style.minWidth = '360px';
+  panel.style.maxWidth = '460px';
   panel.style.userSelect = 'none';
 
   const title = document.createElement('div');
@@ -330,17 +498,18 @@ function createReplayPanel({ trainer, ticker }) {
   title.style.marginBottom = '6px';
   panel.appendChild(title);
 
-  const row = document.createElement('div');
-  row.style.display = 'flex';
-  row.style.gap = '8px';
-  row.style.marginBottom = '8px';
+  // row1: refresh/play
+  const row1 = document.createElement('div');
+  row1.style.display = 'flex';
+  row1.style.gap = '8px';
+  row1.style.marginBottom = '8px';
 
   const btnRefresh = document.createElement('button');
   btnRefresh.textContent = 'Refresh';
   btnRefresh.style.flex = '1';
 
   const btnPlay = document.createElement('button');
-  btnPlay.textContent = 'Play Selected';
+  btnPlay.textContent = 'Play';
   btnPlay.style.flex = '1';
 
   for (const b of [btnRefresh, btnPlay]) {
@@ -352,9 +521,52 @@ function createReplayPanel({ trainer, ticker }) {
     b.style.cursor = 'pointer';
   }
 
-  row.appendChild(btnRefresh);
-  row.appendChild(btnPlay);
-  panel.appendChild(row);
+  row1.appendChild(btnRefresh);
+  row1.appendChild(btnPlay);
+  panel.appendChild(row1);
+
+  // row2: pause/stop/speed
+  const row2 = document.createElement('div');
+  row2.style.display = 'flex';
+  row2.style.gap = '8px';
+  row2.style.marginBottom = '8px';
+
+  const btnPause = document.createElement('button');
+  btnPause.textContent = 'Pause/Resume';
+  btnPause.style.flex = '1';
+
+  const btnStop = document.createElement('button');
+  btnStop.textContent = 'Stop';
+  btnStop.style.flex = '1';
+
+  const speedSel = document.createElement('select');
+  speedSel.style.flex = '1';
+  speedSel.style.padding = '6px 8px';
+  speedSel.style.borderRadius = '8px';
+  speedSel.style.border = '1px solid rgba(255,255,255,0.25)';
+  speedSel.style.background = 'rgba(255,255,255,0.08)';
+  speedSel.style.color = '#fff';
+  for (const s of [1, 2, 4, 8]) {
+    const opt = document.createElement('option');
+    opt.value = String(s);
+    opt.textContent = `${s}x`;
+    speedSel.appendChild(opt);
+  }
+  speedSel.value = '2'; // 기본 2x
+
+  for (const b of [btnPause, btnStop]) {
+    b.style.padding = '6px 8px';
+    b.style.borderRadius = '8px';
+    b.style.border = '1px solid rgba(255,255,255,0.25)';
+    b.style.background = 'rgba(255,255,255,0.08)';
+    b.style.color = '#fff';
+    b.style.cursor = 'pointer';
+  }
+
+  row2.appendChild(btnPause);
+  row2.appendChild(btnStop);
+  row2.appendChild(speedSel);
+  panel.appendChild(row2);
 
   const list = document.createElement('div');
   list.style.maxHeight = '220px';
@@ -367,6 +579,21 @@ function createReplayPanel({ trainer, ticker }) {
   mount.appendChild(panel);
 
   let selectedId = null;
+  let cached = [];
+
+  // ✅ replay 중엔 게임 로직을 멈추고 렌더만 유지(오버레이가 주인공)
+  const originalGameLoop = pikaVolley?.gameLoop?.bind(pikaVolley);
+  const freezeGameLoop = () => {
+    if (!pikaVolley || !originalGameLoop) return;
+    pikaVolley.gameLoop = () => {
+      // no-op: renderer.render는 ticker 콜백에서 계속 돌지만
+      // gameLoop가 physics 진행/사운드 유발을 막아준다
+    };
+  };
+  const restoreGameLoop = () => {
+    if (!pikaVolley || !originalGameLoop) return;
+    pikaVolley.gameLoop = originalGameLoop;
+  };
 
   const renderList = (items) => {
     list.innerHTML = '';
@@ -408,8 +635,6 @@ function createReplayPanel({ trainer, ticker }) {
     }
   };
 
-  let cached = [];
-
   const refresh = async () => {
     cached = await trainer.storage.listReplays({ limit: 10, offset: 0 });
     renderList(cached);
@@ -421,36 +646,33 @@ function createReplayPanel({ trainer, ticker }) {
     const it = cached.find(x => x.id === selectedId);
     if (!it) return;
 
-    // stop training and show canvas
+    // 학습 중이면 멈추고, 사운드 mute 해제(리플레이는 시각화만; 사운드는 아직 안 씀)
     trainer.stop();
     window.__PV_TRAINING_MUTE__ = false;
 
+    // 캔버스 표시
     const canvasEl = document.getElementById('game-canvas');
     if (canvasEl) canvasEl.style.display = 'block';
-    ticker.start();
 
-    // TODO: next step - actual playback overlay
-    console.log('Selected replay:', it);
-    alert('Next step: implement ReplayOverlay playback. (Selected replay logged to console)');
+    // ✅ 게임 물리 진행 차단
+    freezeGameLoop();
+
+    overlay.setSpeed(Number(speedSel.value));
+    overlay.start(it);
   };
+
+  btnPause.onclick = () => overlay.togglePause();
+
+  btnStop.onclick = () => {
+    overlay.stop();
+    restoreGameLoop();
+  };
+
+  speedSel.onchange = () => overlay.setSpeed(Number(speedSel.value));
 
   refresh();
 }
 
-
-  // ✅ 콘솔에서 window.train으로 조작
-  /** @type {any} */ (window).train = {
-    start: () => trainer.start(),
-    stop: () => trainer.stop(),
-    status: () => trainer.status(),
-    export: () => trainer.exportToFile(),
-    import: (opts) => trainer.importFromFile(opts),
-    clear: () => trainer.clearAll(),
-    setSpeed: (n) => { trainer.pointsPerTick = Math.max(1, n | 0); },
-  };
-
-  start(pikaVolley);
-}
 
 /**
  * Start the game.
