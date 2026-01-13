@@ -259,6 +259,51 @@ export class Trainer {
     };
   }
 
+  /**
+   * Export a warmup snapshot (model weights + warmup checkpoints) so you can skip warmup next runs.
+   * Returned object is JSON-serializable.
+   */
+  async exportWarmupSnapshot() {
+    const warmup = await this.storage.getCheckpoint('warmup');
+    const warmupTrain = await this.storage.getCheckpoint('warmup_train');
+    return {
+      kind: 'warmup_snapshot_v1',
+      createdAt: Date.now(),
+      learningPlayer: this.learningPlayer,
+      modelState: this.policy.saveState(),
+      warmup: warmup ?? null,
+      warmupTrain: warmupTrain ?? null,
+    };
+  }
+
+  /**
+   * Import a warmup snapshot produced by exportWarmupSnapshot().
+   * This overwrites current in-memory model + persisted checkpoints.
+   */
+  async importWarmupSnapshot(snapshot) {
+    if (!snapshot || snapshot.kind !== 'warmup_snapshot_v1') {
+      throw new Error('Invalid warmup snapshot');
+    }
+
+    if (snapshot.modelState) {
+      this.policy.loadState(snapshot.modelState);
+      await this.storage.setCheckpoint('model_state', this.policy.saveState());
+    }
+
+    if (snapshot.warmup) {
+      await this.storage.setCheckpoint('warmup', snapshot.warmup);
+      this.warmup.done = !!snapshot.warmup.done;
+      if (snapshot.warmup.targetSamples) this.warmup.targetSamples = snapshot.warmup.targetSamples | 0;
+    }
+
+    if (snapshot.warmupTrain) {
+      await this.storage.setCheckpoint('warmup_train', snapshot.warmupTrain);
+      this.warmup.trained = !!snapshot.warmupTrain.trained;
+      if (snapshot.warmupTrain.trainEpochs) this.warmup.trainEpochs = snapshot.warmupTrain.trainEpochs | 0;
+      if (snapshot.warmupTrain.trainBatch) this.warmup.trainBatch = snapshot.warmupTrain.trainBatch | 0;
+    }
+  }
+
   async _saveStats() {
     await this.storage.setCheckpoint('train_stats', {
       totalEpisodes: this.totalEpisodes,

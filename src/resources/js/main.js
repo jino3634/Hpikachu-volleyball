@@ -310,6 +310,39 @@ function createTrainingControlPanel({ trainer, ticker }) {
   options.appendChild(hideLabel);
   panel.appendChild(options);
 
+  // Warmup snapshot (skip long warmup next runs)
+  const rowWarm = document.createElement('div');
+  rowWarm.style.display = 'flex';
+  rowWarm.style.gap = '8px';
+  rowWarm.style.marginBottom = '8px';
+
+  const btnSaveWarm = document.createElement('button');
+  btnSaveWarm.textContent = 'Save Warmup';
+  btnSaveWarm.style.flex = '1';
+
+  const btnLoadWarm = document.createElement('button');
+  btnLoadWarm.textContent = 'Load Warmup';
+  btnLoadWarm.style.flex = '1';
+
+  for (const b of [btnSaveWarm, btnLoadWarm]) {
+    b.style.padding = '6px 8px';
+    b.style.borderRadius = '8px';
+    b.style.border = '1px solid rgba(255,255,255,0.25)';
+    b.style.background = 'rgba(255,255,255,0.08)';
+    b.style.color = '#fff';
+    b.style.cursor = 'pointer';
+  }
+
+  const warmupInput = document.createElement('input');
+  warmupInput.type = 'file';
+  warmupInput.accept = 'application/json';
+  warmupInput.style.display = 'none';
+
+  rowWarm.appendChild(btnSaveWarm);
+  rowWarm.appendChild(btnLoadWarm);
+  panel.appendChild(rowWarm);
+  panel.appendChild(warmupInput);
+
   const status = document.createElement('pre');
   status.style.margin = '0';
   status.style.whiteSpace = 'pre-wrap';
@@ -348,6 +381,43 @@ function createTrainingControlPanel({ trainer, ticker }) {
 
   btnStart.onclick = startTraining;
   btnStop.onclick = stopTraining;
+
+  btnSaveWarm.onclick = async () => {
+    try {
+      const snap = await trainer.exportWarmupSnapshot();
+      const blob = new Blob([JSON.stringify(snap, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `warmup_snapshot_${Date.now()}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      console.error(e);
+      alert('Save warmup snapshot failed: ' + (e?.message ?? String(e)));
+    }
+  };
+
+  btnLoadWarm.onclick = () => warmupInput.click();
+
+  warmupInput.onchange = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const txt = await file.text();
+      const snap = JSON.parse(txt);
+      await trainer.importWarmupSnapshot(snap);
+      alert('Warmup snapshot loaded.');
+      refresh();
+    } catch (err) {
+      console.error(err);
+      alert('Load warmup snapshot failed: ' + (err?.message ?? String(err)));
+    } finally {
+      e.target.value = '';
+    }
+  };
 
   hideChk.onchange = () => {
     const s = trainer.status();
