@@ -432,11 +432,11 @@ export class TuplePolicyV1 {
       if (!a || typeof a !== 'object') continue;
 
       const r = Number(tr?.reward ?? 0);
-      if (r === 0) continue;
-      const sign = r > 0 ? 1 : -1;
+      
+      const advantage = r;
 
       const feat = this.buildFeatures(tr?.obs, learningPlayer);
-      const out = this.updateImitation(feat, a, sign);
+      const out = this.updateImitation(feat, a, advantage);
       updated++;
       lossSum += out.loss;
     }
