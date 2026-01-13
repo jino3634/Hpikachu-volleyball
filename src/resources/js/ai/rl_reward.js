@@ -20,5 +20,5 @@ export function computeSparseReward(roundEvents, learningPlayer) {
   if (scored !== 1 && scored !== 2) return 0;
 
   // learningPlayer가 득점했으면 +1, 아니면 -1
-  return scored === learningPlayer ? 1 : -1;
+  return scored === learningPlayer ? 50 : -50;
 }
