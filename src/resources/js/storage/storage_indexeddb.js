@@ -326,13 +326,21 @@ export class IndexedDBStorage extends StorageIface {
         const cursor = req.result;
         if (!cursor) return resolve();
 
+        const v = cursor.value;
+        const id = v?.id ?? '';
+        // 기본: "최근 10개" 목록은 win: 슬롯을 숨김
+        if (typeof id === 'string' && id.startsWith('win:')) {
+          cursor.continue();
+          return;
+        }
+
         if (skipped < offset) {
           skipped++;
           cursor.continue();
           return;
         }
 
-        out.push(cursor.value);
+        out.push(v);
         if (limit > 0 && out.length >= limit) return resolve();
         cursor.continue();
       };
@@ -340,6 +348,88 @@ export class IndexedDBStorage extends StorageIface {
 
     await txDone(tx);
     return out;
+  }
+
+  async listWinReplays(opts = {}) {
+    this._assert();
+    const limit = Math.max(0, (opts.limit ?? 3) | 0);
+    const offset = Math.max(0, (opts.offset ?? 0) | 0);
+
+    const tx = this.db.transaction([STORE_REPLAYS], 'readonly');
+    const os = tx.objectStore(STORE_REPLAYS);
+    const idx = os.index('createdAt');
+
+    const out = [];
+    let skipped = 0;
+
+    await new Promise((resolve, reject) => {
+      // 최신순(내림차순)
+      const req = idx.openCursor(null, 'prev');
+      req.onerror = () => reject(req.error);
+      req.onsuccess = () => {
+        const cursor = req.result;
+        if (!cursor) return resolve();
+
+        const v = cursor.value;
+        const id = v?.id ?? '';
+        if (!(typeof id === 'string' && id.startsWith('win:'))) {
+          cursor.continue();
+          return;
+        }
+
+        if (skipped < offset) {
+          skipped++;
+          cursor.continue();
+          return;
+        }
+
+        out.push(v);
+        if (limit > 0 && out.length >= limit) return resolve();
+        cursor.continue();
+      };
+    });
+
+    await txDone(tx);
+    return out;
+  }
+
+  async pruneWinReplays(maxKeep = 3) {
+    this._assert();
+    const keep = Math.max(0, maxKeep | 0);
+
+    const tx = this.db.transaction([STORE_REPLAYS], 'readwrite');
+    const os = tx.objectStore(STORE_REPLAYS);
+    const idx = os.index('createdAt');
+
+    let kept = 0;
+
+    await new Promise((resolve, reject) => {
+      const req = idx.openCursor(null, 'prev');
+      req.onerror = () => reject(req.error);
+      req.onsuccess = () => {
+        const cursor = req.result;
+        if (!cursor) return resolve();
+
+        const v = cursor.value;
+        const id = v?.id ?? '';
+
+        if (!(typeof id === 'string' && id.startsWith('win:'))) {
+          cursor.continue();
+          return;
+        }
+
+        if (kept < keep) {
+          kept++;
+          cursor.continue();
+          return;
+        }
+
+        os.delete(cursor.primaryKey);
+        cursor.continue();
+      };
+    });
+
+    await txDone(tx);
   }
 
   async pruneReplays(maxKeep = 10) {
@@ -350,27 +440,32 @@ export class IndexedDBStorage extends StorageIface {
     const os = tx.objectStore(STORE_REPLAYS);
     const idx = os.index('createdAt');
 
-    const total = await reqToPromise(os.count());
-    const excess = total - keep;
-    if (excess <= 0) {
-      await txDone(tx);
-      return;
-    }
-
-    let removed = 0;
+    let kept = 0;
 
     await new Promise((resolve, reject) => {
-      // 오래된 것부터(오름차순) 삭제
-      const req = idx.openCursor(null, 'next');
+      // 최신순으로 훑으면서 keep 넘는 "old" 항목을 삭제
+      const req = idx.openCursor(null, 'prev');
       req.onerror = () => reject(req.error);
       req.onsuccess = () => {
         const cursor = req.result;
         if (!cursor) return resolve();
 
-        os.delete(cursor.primaryKey);
-        removed++;
-        if (removed >= excess) return resolve();
+        const v = cursor.value;
+        const id = v?.id ?? '';
 
+        // recent 목록에서 win: 슬롯은 제외(보존/삭제 별도)
+        if (typeof id === 'string' && id.startsWith('win:')) {
+          cursor.continue();
+          return;
+        }
+
+        if (kept < keep) {
+          kept++;
+          cursor.continue();
+          return;
+        }
+
+        os.delete(cursor.primaryKey);
         cursor.continue();
       };
     });

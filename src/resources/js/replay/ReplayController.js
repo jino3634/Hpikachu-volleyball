@@ -56,8 +56,31 @@ export class ReplayController {
   async refresh() {
     if (!this.storage?.listReplays) return;
 
-    // listReplays는 "trace 포함" 객체를 반환하는 형태를 전제로 함(현재 프로젝트 구현)
-    this._cached = await this.storage.listReplays({ limit: 10, offset: 0 });
+    const wins = (this.storage.listWinReplays)
+      ? await this.storage.listWinReplays({ limit: 3, offset: 0 })
+      : [];
+
+    const recent = await this.storage.listReplays({ limit: 10, offset: 0 });
+
+    // merge: wins first, then recent (dedupe by baseId/id)
+    const seen = new Set();
+    const merged = [];
+
+    for (const it of wins) {
+      const key = it?.baseId ?? (typeof it?.id === 'string' ? it.id.replace(/^win:/, '') : it?.id);
+      if (key != null) seen.add(String(key));
+      merged.push(it);
+    }
+
+    for (const it of recent) {
+      const key = it?.baseId ?? (typeof it?.id === 'string' ? it.id.replace(/^win:/, '') : it?.id);
+      const k = String(key);
+      if (seen.has(k)) continue;
+      seen.add(k);
+      merged.push(it);
+    }
+
+    this._cached = merged;
     this.panel.renderList(this._cached);
   }
 

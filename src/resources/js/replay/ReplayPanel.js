@@ -125,7 +125,7 @@ export class ReplayPanel {
 
       const t = new Date(it.createdAt);
       const who = (it.scoredBy === 1) ? 'P1' : (it.scoredBy === 2) ? 'P2' : '?';
-      row.textContent = `${t.toLocaleString()}  ${who}  frames=${it.frames ?? 0}  reason=${it.loseReason ?? ''}`;
+      row.textContent = `${(typeof it.id === 'string' && it.id.startsWith('win:')) ? '🏆 ' : ''}${t.toLocaleString()}  ${who}  frames=${it.frames ?? 0}  reason=${it.loseReason ?? ''}`;
 
       row.onclick = () => {
         this._selectedId = it.id;

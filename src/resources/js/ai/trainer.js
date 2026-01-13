@@ -101,6 +101,10 @@ export class Trainer {
     this.totalWins = 0;
     this.totalLosses = 0;
 
+    // recent-1000 point winrate (persisted)
+    this.recent1000 = { idx: 0, filled: 0, wins: 0, buf: new Array(1000).fill(0) };
+    this._recent1000Dirty = 0;
+
     // set tracking
     this.currentSet = {
       p1: 0,
@@ -125,6 +129,18 @@ export class Trainer {
 
   async init() {
     await this.storage.init();
+
+    // recent1000 checkpoint
+    const recent1000 = await this.storage.getCheckpoint('recent1000');
+    if (recent1000 && typeof recent1000 === 'object') {
+      const filled = Math.max(0, Math.min(1000, (recent1000.filled ?? 0) | 0));
+      const idx = Math.max(0, Math.min(999, (recent1000.idx ?? 0) | 0));
+      const wins = Math.max(0, (recent1000.wins ?? 0) | 0);
+      const buf = Array.isArray(recent1000.buf) ? recent1000.buf.slice(0, 1000).map((x) => (x ? 1 : 0)) : null;
+      if (buf && buf.length === 1000) {
+        this.recent1000 = { idx, filled, wins, buf };
+      }
+    }
 
     // warmup checkpoint
     const warmup = await this.storage.getCheckpoint('warmup');
@@ -185,6 +201,7 @@ export class Trainer {
     } else {
       // 최초 생성
       await this.storage.setCheckpoint('model_state', this.policy.saveState());
+      await this._maybePersistRecent1000(true);
     }
 
     this._runner = new OnePointEpisodeRunner(this.game, {
@@ -226,6 +243,9 @@ export class Trainer {
       wins,
       losses,
       winrate,
+      last1000Count: this.recent1000?.filled ?? 0,
+      last1000Wins: this.recent1000?.wins ?? 0,
+      last1000Winrate: (this.recent1000 && (this.recent1000.filled > 0)) ? (this.recent1000.wins / this.recent1000.filled) : 0,
       pointsPerTick: this.pointsPerTick,
       tickDelayMs: this.tickDelayMs,
       consecutiveSetWins: this.consecutiveSetWins,
@@ -495,10 +515,27 @@ export class Trainer {
           console.warn('[TRAIN] missing episode; skip save/learn', { loseReason: res.loseReason });
         }
 
-        // point replay 저장(최근 10개 유지)
+        // point replay 저장(최근 10개 + 최근 승리 3개 유지)
         const replay = this._buildPointReplay(res);
+
+        // recent 10
         await this.storage.appendReplay(replay);
         await this.storage.pruneReplays(10);
+
+        // win 3 (별도 슬롯: win: 접두사로 중복 저장)
+        const isWinPoint = (replay.ok && replay.scoredBy === this.learningPlayer);
+        if (isWinPoint) {
+          const winReplay = {
+            ...replay,
+            id: `win:${replay.id}`,
+            baseId: replay.id,
+            bucket: 'win',
+          };
+          await this.storage.appendReplay(winReplay);
+          if (this.storage.pruneWinReplays) {
+            await this.storage.pruneWinReplays(3);
+          }
+        }
 
         // policy update: accumulate N points then batch-learn
         const canLearn =
@@ -522,8 +559,16 @@ export class Trainer {
 
         // global stats
         this.totalEpisodes++;
-        if (res.ok && res.scoredBy === this.learningPlayer) this.totalWins++;
+        this.totalEpisodes++;
+        const isWin = (res.ok && res.scoredBy === this.learningPlayer);
+        if (isWin) this.totalWins++;
         else if (res.ok) this.totalLosses++;
+
+        // recent1000 point stats
+        if (res.ok) {
+          this._recordRecent1000(isWin);
+          this._maybePersistRecent1000(false);
+        }
 
         // 🔍 학습 진행 확인용 단일 로그
         console.log(
@@ -677,7 +722,46 @@ _flushBatch(allRemaining = false) {
     await this.storage.setCheckpoint('model_state', this.policy.saveState());
     await this._saveStats();
   }
-    _buildPointReplay(res) {
+    
+  _recordRecent1000(isWin) {
+    const s = this.recent1000;
+    if (!s || !s.buf) return;
+
+    const idx = s.idx | 0;
+    const old = s.buf[idx] ? 1 : 0;
+    const nw = isWin ? 1 : 0;
+
+    if (old !== nw) {
+      s.wins = Math.max(0, (s.wins - old + nw) | 0);
+      s.buf[idx] = nw;
+    }
+
+    s.idx = (idx + 1) % 1000;
+    s.filled = Math.min(1000, (s.filled + 1) | 0);
+
+    this._recent1000Dirty = (this._recent1000Dirty | 0) + 1;
+  }
+
+  async _maybePersistRecent1000(force) {
+    if (!this.storage?.setCheckpoint) return;
+    const dirty = this._recent1000Dirty | 0;
+    if (!force && dirty < 25) return;
+
+    this._recent1000Dirty = 0;
+    try {
+      await this.storage.setCheckpoint('recent1000', {
+        idx: this.recent1000.idx,
+        filled: this.recent1000.filled,
+        wins: this.recent1000.wins,
+        buf: this.recent1000.buf,
+        updatedAt: Date.now(),
+      });
+    } catch (e) {
+      // ignore persistence errors (training can continue)
+    }
+  }
+
+_buildPointReplay(res) {
     const now = Date.now();
     const id = `rp_${now}_${Math.random().toString(16).slice(2)}`;
 

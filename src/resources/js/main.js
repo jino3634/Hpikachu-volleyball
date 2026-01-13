@@ -359,12 +359,14 @@ function createTrainingControlPanel({ trainer, ticker }) {
   const refresh = () => {
     const s = trainer.status();
     const winratePct = (s.totalEpisodes > 0) ? (s.winrate * 100).toFixed(1) : '0.0';
+    const last1000Pct = (s.last1000Count > 0) ? (s.last1000Winrate * 100).toFixed(1) : '0.0';
 
     // ✅ status.textContent는 string만
     status.textContent = [
       `running: ${s.running ? 'ON' : 'OFF'}`,
       `graduated: ${s.graduated ? 'YES' : 'NO'}`,
       `episodes: ${s.totalEpisodes} (W ${s.wins} / L ${s.losses}, ${winratePct}%)`,
+      `last1000: ${s.last1000Wins}/${s.last1000Count} (${last1000Pct}%)`,
       `set target: ${s.setWinTarget}, streak: ${s.consecutiveSetWins}/${s.consecutiveSetWinsToGraduate}`,
       `current set: P1 ${s.currentSet?.p1 ?? 0} - P2 ${s.currentSet?.p2 ?? 0} (set #${s.currentSet?.index ?? 1})`,
       `speed: ${s.pointsPerTick} point(s)/tick, delay: ${s.tickDelayMs}ms`,
