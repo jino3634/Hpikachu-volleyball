@@ -2,12 +2,16 @@
 'use strict';
 
 /**
- * TuplePolicyV1: (xDirection, yDirection, powerHit) 를 직접 출력하는 간단한 선형 정책.
- * - headX: 3-class softmax for xDirection ∈ {-1,0,+1}
- * - headY: 3-class softmax for yDirection ∈ {-1,0,+1}
- * - headP: 2-class softmax for powerHit ∈ {0,1}
+ * TuplePolicyV1 (MLP): (xDirection, yDirection, powerHit) 를 직접 출력하는 확률 정책.
  *
- * Warmup imitation(지도학습)과, 이후 self-play/탐색용 확률 정책에 사용.
+ * 구조:
+ *   features(F) -> MLP trunk (H1,H2) -> 3 heads
+ *     - headX: 3-class softmax for xDirection ∈ {-1,0,+1}
+ *     - headY: 3-class softmax for yDirection ∈ {-1,0,+1}
+ *     - headP: 2-class softmax for powerHit ∈ {0,1}
+ *
+ * 기존(선형) 체크포인트(kind: 'tuple_policy_v1')도 로드 가능:
+ *   - trunk를 identity(linear activation)로 구성해 완전히 동일한 동작을 재현.
  */
 
 function randn() {
@@ -48,6 +52,67 @@ function dot(Wa, feat) {
   return s;
 }
 
+function matVec(W, x, b) {
+  const out = new Float32Array(W.length);
+  for (let i = 0; i < W.length; i++) {
+    out[i] = dot(W[i], x) + (b ? b[i] : 0);
+  }
+  return out;
+}
+
+function addScaledOuter(W, a, x, scale) {
+  // W -= scale * a ⊗ x
+  for (let i = 0; i < W.length; i++) {
+    const Wi = W[i];
+    const ai = a[i];
+    if (ai === 0) continue;
+    const s = scale * ai;
+    for (let j = 0; j < x.length; j++) Wi[j] -= s * x[j];
+  }
+}
+
+function tanhVec(z) {
+  const out = new Float32Array(z.length);
+  for (let i = 0; i < z.length; i++) out[i] = Math.tanh(z[i]);
+  return out;
+}
+
+function tanhGradFromAct(a) {
+  // d/dz tanh(z) = 1 - tanh(z)^2 = 1 - a^2
+  const out = new Float32Array(a.length);
+  for (let i = 0; i < a.length; i++) {
+    const v = a[i];
+    out[i] = 1 - v * v;
+  }
+  return out;
+}
+
+function hadamardInPlace(a, b) {
+  for (let i = 0; i < a.length; i++) a[i] *= b[i];
+  return a;
+}
+
+function matTVec(W, g) {
+  // W^T * g
+  const nOut = W.length;
+  const nIn = (W[0] ? W[0].length : 0);
+  const out = new Float32Array(nIn);
+  for (let i = 0; i < nOut; i++) {
+    const Wi = W[i];
+    const gi = g[i];
+    if (gi === 0) continue;
+    for (let j = 0; j < nIn; j++) out[j] += Wi[j] * gi;
+  }
+  return out;
+}
+
+function clampInt(x, lo, hi) {
+  const v = x | 0;
+  if (v < lo) return lo;
+  if (v > hi) return hi;
+  return v;
+}
+
 // label mapping helpers
 export function mapXDirToClass(x) {
   const v = (x | 0);
@@ -74,47 +139,59 @@ export function mapClassToYDir(c) {
 
 export class TuplePolicyV1 {
   /**
-   * @param {{featureLen?:number, learningRate?:number, epsilon?:number, initStd?:number}} opts
+   * @param {{featureLen?:number, learningRate?:number, epsilon?:number, initStd?:number, hidden1?:number, hidden2?:number, activation?:'tanh'|'linear'}} opts
    */
   constructor(opts = {}) {
     // Feature length is tied to observation schema. Keep in sync with PolicyV1.buildFeatures.
     this.featureLen = Math.max(1, (opts.featureLen ?? 1) | 0);
     this.learningRate = Number(opts.learningRate ?? 0.001);
     this.epsilon = Number(opts.epsilon ?? 0.05);
-    this.initStd = Number(opts.initStd ?? 0.01);
+    this.initStd = Number(opts.initStd ?? 0.02);
 
-    // weights
-    this.Wx = []; // [3][F]
+    // MLP sizes
+    this.hidden1 = Math.max(1, (opts.hidden1 ?? 64) | 0);
+    this.hidden2 = Math.max(1, (opts.hidden2 ?? 64) | 0);
+    this.activation = (opts.activation === 'linear') ? 'linear' : 'tanh';
+
+    // trunk
+    this.W1 = []; // [H1][F]
+    this.b1 = new Float32Array(this.hidden1);
+    this.W2 = []; // [H2][H1]
+    this.b2 = new Float32Array(this.hidden2);
+
+    // heads
+    this.Wx = []; // [3][H2]
     this.bx = new Float32Array(3);
-    this.Wy = []; // [3][F]
+    this.Wy = []; // [3][H2]
     this.by = new Float32Array(3);
-    this.Wp = []; // [2][F]
+    this.Wp = []; // [2][H2]
     this.bp = new Float32Array(2);
 
     this._initParams();
   }
 
+  _initMatrix(rows, cols, std) {
+    const out = [];
+    for (let i = 0; i < rows; i++) {
+      const r = new Float32Array(cols);
+      for (let j = 0; j < cols; j++) r[j] = randn() * std;
+      out.push(r);
+    }
+    return out;
+  }
+
   _initParams() {
-    this.Wx = [];
-    this.Wy = [];
-    this.Wp = [];
-    for (let a = 0; a < 3; a++) {
-      const w = new Float32Array(this.featureLen);
-      for (let j = 0; j < this.featureLen; j++) w[j] = randn() * this.initStd;
-      this.Wx.push(w);
-    }
-    for (let a = 0; a < 3; a++) {
-      const w = new Float32Array(this.featureLen);
-      for (let j = 0; j < this.featureLen; j++) w[j] = randn() * this.initStd;
-      this.Wy.push(w);
-    }
-    for (let a = 0; a < 2; a++) {
-      const w = new Float32Array(this.featureLen);
-      for (let j = 0; j < this.featureLen; j++) w[j] = randn() * this.initStd;
-      this.Wp.push(w);
-    }
+    const std = this.initStd;
+    this.W1 = this._initMatrix(this.hidden1, this.featureLen, std);
+    this.b1 = new Float32Array(this.hidden1);
+    this.W2 = this._initMatrix(this.hidden2, this.hidden1, std);
+    this.b2 = new Float32Array(this.hidden2);
+
+    this.Wx = this._initMatrix(3, this.hidden2, std);
     this.bx = new Float32Array(3);
+    this.Wy = this._initMatrix(3, this.hidden2, std);
     this.by = new Float32Array(3);
+    this.Wp = this._initMatrix(2, this.hidden2, std);
     this.bp = new Float32Array(2);
   }
 
@@ -129,7 +206,6 @@ export class TuplePolicyV1 {
     const opp = obs?.opp ?? {};
     const ball = obs?.ball ?? {};
 
-    // if featureLen mismatch, rebuild a vector to match.
     const feat = new Float32Array(this.featureLen);
     let k = 0;
 
@@ -157,12 +233,35 @@ export class TuplePolicyV1 {
     feat[k++] = Number(obs?.isPlayer2Serve ?? 0);
     feat[k++] = Number(ball.isPowerHit ?? 0);
 
+    // If featureLen is larger than 14 (future extension), remaining entries stay 0.
     return feat;
   }
 
-  _logitsHead(W, b, feat) {
+  _activate(z) {
+    if (this.activation === 'linear') return z;
+    return tanhVec(z);
+  }
+
+  _activationGradFromAct(a) {
+    if (this.activation === 'linear') {
+      const out = new Float32Array(a.length);
+      out.fill(1);
+      return out;
+    }
+    return tanhGradFromAct(a);
+  }
+
+  _forward(feat) {
+    const z1 = matVec(this.W1, feat, this.b1);
+    const h1 = this._activate(z1);
+    const z2 = matVec(this.W2, h1, this.b2);
+    const h2 = this._activate(z2);
+    return { feat, h1, h2 };
+  }
+
+  _logitsHead(W, b, h2) {
     const out = new Float32Array(b.length);
-    for (let a = 0; a < b.length; a++) out[a] = dot(W[a], feat) + b[a];
+    for (let a = 0; a < b.length; a++) out[a] = dot(W[a], h2) + b[a];
     return out;
   }
 
@@ -171,10 +270,11 @@ export class TuplePolicyV1 {
    */
   actDeterministic(obs, playerIndex) {
     const feat = this.buildFeatures(obs, playerIndex);
+    const { h2 } = this._forward(feat);
 
-    const lx = this._logitsHead(this.Wx, this.bx, feat);
-    const ly = this._logitsHead(this.Wy, this.by, feat);
-    const lp = this._logitsHead(this.Wp, this.bp, feat);
+    const lx = this._logitsHead(this.Wx, this.bx, h2);
+    const ly = this._logitsHead(this.Wy, this.by, h2);
+    const lp = this._logitsHead(this.Wp, this.bp, h2);
 
     let ax = 0, ay = 0, ap = 0;
     for (let i = 1; i < 3; i++) if (lx[i] > lx[ax]) ax = i;
@@ -204,9 +304,10 @@ export class TuplePolicyV1 {
     }
 
     const feat = this.buildFeatures(obs, playerIndex);
-    const px = softmax(Array.from(this._logitsHead(this.Wx, this.bx, feat)));
-    const py = softmax(Array.from(this._logitsHead(this.Wy, this.by, feat)));
-    const pp = softmax(Array.from(this._logitsHead(this.Wp, this.bp, feat)));
+    const { h2 } = this._forward(feat);
+    const px = softmax(Array.from(this._logitsHead(this.Wx, this.bx, h2)));
+    const py = softmax(Array.from(this._logitsHead(this.Wy, this.by, h2)));
+    const pp = softmax(Array.from(this._logitsHead(this.Wp, this.bp, h2)));
 
     const ax = sampleCategorical(px);
     const ay = sampleCategorical(py);
@@ -220,20 +321,25 @@ export class TuplePolicyV1 {
   }
 
   /**
-   * Supervised update for one sample.
+   * Supervised/RL-lite update for one sample.
+   * sign=+1 강화, sign=-1 억제
    * @param {Float32Array} feat
    * @param {{xDirection:number, yDirection:number, powerHit:number}} label
+   * @param {number} sign
    * @returns {{loss:number, ax:number, ay:number, ap:number}}
    */
   updateImitation(feat, label, sign = 1) {
-    const tx = mapXDirToClass(label.xDirection);
-    const ty = mapYDirToClass(label.yDirection);
+    const tx = clampInt(mapXDirToClass(label.xDirection), 0, 2);
+    const ty = clampInt(mapYDirToClass(label.yDirection), 0, 2);
     const tp = (label.powerHit ?? 0) ? 1 : 0;
 
-    // forward
-    const lx = this._logitsHead(this.Wx, this.bx, feat);
-    const ly = this._logitsHead(this.Wy, this.by, feat);
-    const lp = this._logitsHead(this.Wp, this.bp, feat);
+    // forward trunk
+    const { h1, h2 } = this._forward(feat);
+
+    // heads forward
+    const lx = this._logitsHead(this.Wx, this.bx, h2);
+    const ly = this._logitsHead(this.Wy, this.by, h2);
+    const lp = this._logitsHead(this.Wp, this.bp, h2);
 
     const px = softmax(Array.from(lx));
     const py = softmax(Array.from(ly));
@@ -242,7 +348,7 @@ export class TuplePolicyV1 {
     const eps = 1e-8;
     const loss = -Math.log(px[tx] + eps) - Math.log(py[ty] + eps) - Math.log(pp[tp] + eps);
 
-    // gradients: (p - y)
+    // gradients at logits: (p - y)
     const gx = new Float32Array(3);
     const gy = new Float32Array(3);
     const gp = new Float32Array(2);
@@ -251,28 +357,55 @@ export class TuplePolicyV1 {
     for (let i = 0; i < 2; i++) gp[i] = pp[i] - (i === tp ? 1 : 0);
 
     const lr = this.learningRate * (Number(sign) || 0);
+    if (lr === 0) return { loss, ax: tx, ay: ty, ap: tp };
 
-    // update weights
+    // --- head updates + accumulate dL/dh2
+    const dh2 = new Float32Array(this.hidden2);
+    // headX
     for (let a = 0; a < 3; a++) {
-      const Wa = this.Wx[a];
       const ga = gx[a];
-      for (let j = 0; j < feat.length; j++) Wa[j] -= lr * ga * feat[j];
+      const Wa = this.Wx[a];
+      for (let j = 0; j < dh2.length; j++) dh2[j] += Wa[j] * ga;
+      for (let j = 0; j < h2.length; j++) Wa[j] -= lr * ga * h2[j];
       this.bx[a] -= lr * ga;
     }
+    // headY
     for (let a = 0; a < 3; a++) {
-      const Wa = this.Wy[a];
       const ga = gy[a];
-      for (let j = 0; j < feat.length; j++) Wa[j] -= lr * ga * feat[j];
+      const Wa = this.Wy[a];
+      for (let j = 0; j < dh2.length; j++) dh2[j] += Wa[j] * ga;
+      for (let j = 0; j < h2.length; j++) Wa[j] -= lr * ga * h2[j];
       this.by[a] -= lr * ga;
     }
+    // headP
     for (let a = 0; a < 2; a++) {
-      const Wa = this.Wp[a];
       const ga = gp[a];
-      for (let j = 0; j < feat.length; j++) Wa[j] -= lr * ga * feat[j];
+      const Wa = this.Wp[a];
+      for (let j = 0; j < dh2.length; j++) dh2[j] += Wa[j] * ga;
+      for (let j = 0; j < h2.length; j++) Wa[j] -= lr * ga * h2[j];
       this.bp[a] -= lr * ga;
     }
 
-    // predictions
+    // --- backprop through trunk (h2 -> h1 -> feat)
+    // dL/dz2 = dL/dh2 * act'(z2) ; we only have h2, so use act' from activation output
+    const dz2 = new Float32Array(dh2);
+    hadamardInPlace(dz2, this._activationGradFromAct(h2));
+
+    // W2,b2 update
+    // W2 -= lr * dz2 ⊗ h1
+    addScaledOuter(this.W2, dz2, h1, lr);
+    for (let i = 0; i < this.b2.length; i++) this.b2[i] -= lr * dz2[i];
+
+    // dL/dh1 = W2^T * dz2
+    const dh1 = matTVec(this.W2, dz2);
+    const dz1 = new Float32Array(dh1);
+    hadamardInPlace(dz1, this._activationGradFromAct(h1));
+
+    // W1,b1 update
+    addScaledOuter(this.W1, dz1, feat, lr);
+    for (let i = 0; i < this.b1.length; i++) this.b1[i] -= lr * dz1[i];
+
+    // predictions (argmax)
     let ax = 0, ay = 0, ap = 0;
     for (let i = 1; i < 3; i++) if (px[i] > px[ax]) ax = i;
     for (let i = 1; i < 3; i++) if (py[i] > py[ay]) ay = i;
@@ -283,12 +416,6 @@ export class TuplePolicyV1 {
 
   /**
    * Lightweight on-policy improvement from an episode.
-   * - If actions in transitions are tuple objects, treat them as labels.
-   * - We only reinforce positive-reward transitions to avoid destabilizing early training.
-   *
-   * This is intentionally simple: it keeps the pipeline running and improves
-   * the policy without introducing a full RL algorithm yet.
-   *
    * @param {any} episode
    * @returns {{updated:number, avgLoss:number}}
    */
@@ -301,7 +428,6 @@ export class TuplePolicyV1 {
     let lossSum = 0;
 
     for (const tr of trans) {
-      // Only support tuple actions here (the new pipeline)
       const a = tr?.action;
       if (!a || typeof a !== 'object') continue;
 
@@ -324,7 +450,15 @@ export class TuplePolicyV1 {
       learningRate: this.learningRate,
       epsilon: this.epsilon,
       initStd: this.initStd,
+      hidden1: this.hidden1,
+      hidden2: this.hidden2,
+      activation: this.activation,
     });
+    c.W1 = this.W1.map(w => new Float32Array(w));
+    c.b1 = new Float32Array(this.b1);
+    c.W2 = this.W2.map(w => new Float32Array(w));
+    c.b2 = new Float32Array(this.b2);
+
     c.Wx = this.Wx.map(w => new Float32Array(w));
     c.bx = new Float32Array(this.bx);
     c.Wy = this.Wy.map(w => new Float32Array(w));
@@ -336,11 +470,16 @@ export class TuplePolicyV1 {
 
   addNoise(std = 0.01) {
     const s = Number(std);
-    for (const head of [this.Wx, this.Wy, this.Wp]) {
-      for (const w of head) {
-        for (let j = 0; j < w.length; j++) w[j] += randn() * s;
-      }
-    }
+    const addNoiseMat = (M) => {
+      for (const row of M) for (let j = 0; j < row.length; j++) row[j] += randn() * s;
+    };
+    addNoiseMat(this.W1);
+    addNoiseMat(this.W2);
+    addNoiseMat(this.Wx);
+    addNoiseMat(this.Wy);
+    addNoiseMat(this.Wp);
+    for (let i = 0; i < this.b1.length; i++) this.b1[i] += randn() * s;
+    for (let i = 0; i < this.b2.length; i++) this.b2[i] += randn() * s;
     for (let i = 0; i < this.bx.length; i++) this.bx[i] += randn() * s;
     for (let i = 0; i < this.by.length; i++) this.by[i] += randn() * s;
     for (let i = 0; i < this.bp.length; i++) this.bp[i] += randn() * s;
@@ -348,11 +487,18 @@ export class TuplePolicyV1 {
 
   saveState() {
     return {
-      kind: 'tuple_policy_v1',
+      kind: 'tuple_policy_mlp_v1',
       featureLen: this.featureLen,
       learningRate: this.learningRate,
       epsilon: this.epsilon,
       initStd: this.initStd,
+      hidden1: this.hidden1,
+      hidden2: this.hidden2,
+      activation: this.activation,
+      W1: this.W1.map(w => Array.from(w)),
+      b1: Array.from(this.b1),
+      W2: this.W2.map(w => Array.from(w)),
+      b2: Array.from(this.b2),
       Wx: this.Wx.map(w => Array.from(w)),
       bx: Array.from(this.bx),
       Wy: this.Wy.map(w => Array.from(w)),
@@ -364,35 +510,100 @@ export class TuplePolicyV1 {
   }
 
   loadState(state) {
-    if (!state || state.kind !== 'tuple_policy_v1') return;
+    if (!state || typeof state !== 'object') return;
+
+    // --- Backward compatibility: old linear state (kind: 'tuple_policy_v1')
+    if (state.kind === 'tuple_policy_v1' && state.Wx && state.Wy && state.Wp) {
+      // Build identity trunk so old heads act directly on features.
+      this.featureLen = Math.max(1, state.featureLen | 0);
+      this.hidden1 = this.featureLen;
+      this.hidden2 = this.featureLen;
+      this.learningRate = Number(state.learningRate ?? this.learningRate);
+      this.epsilon = Number(state.epsilon ?? this.epsilon);
+      this.initStd = Number(state.initStd ?? this.initStd);
+      this.activation = 'linear';
+
+      // identity matrices
+      this.W1 = [];
+      for (let i = 0; i < this.hidden1; i++) {
+        const row = new Float32Array(this.featureLen);
+        row[i] = 1;
+        this.W1.push(row);
+      }
+      this.b1 = new Float32Array(this.hidden1);
+
+      this.W2 = [];
+      for (let i = 0; i < this.hidden2; i++) {
+        const row = new Float32Array(this.hidden1);
+        row[i] = 1;
+        this.W2.push(row);
+      }
+      this.b2 = new Float32Array(this.hidden2);
+
+      const toF32 = (arr) => new Float32Array(Array.isArray(arr) ? arr.map(Number) : []);
+      const toHead = (head, nClass) => {
+        const out = [];
+        for (let a = 0; a < nClass; a++) {
+          const row = head?.[a] ?? [];
+          const w = toF32(row);
+          const ww = new Float32Array(this.hidden2);
+          ww.set(w.subarray(0, this.hidden2));
+          out.push(ww);
+        }
+        return out;
+      };
+      this.Wx = toHead(state.Wx, 3);
+      this.bx = toF32(state.bx ?? []);
+      if (this.bx.length !== 3) this.bx = new Float32Array(3);
+      this.Wy = toHead(state.Wy, 3);
+      this.by = toF32(state.by ?? []);
+      if (this.by.length !== 3) this.by = new Float32Array(3);
+      this.Wp = toHead(state.Wp, 2);
+      this.bp = toF32(state.bp ?? []);
+      if (this.bp.length !== 2) this.bp = new Float32Array(2);
+      return;
+    }
+
+    if (state.kind !== 'tuple_policy_mlp_v1') return;
+
     this.featureLen = Math.max(1, state.featureLen | 0);
+    this.hidden1 = Math.max(1, (state.hidden1 ?? this.hidden1) | 0);
+    this.hidden2 = Math.max(1, (state.hidden2 ?? this.hidden2) | 0);
     this.learningRate = Number(state.learningRate ?? this.learningRate);
     this.epsilon = Number(state.epsilon ?? this.epsilon);
     this.initStd = Number(state.initStd ?? this.initStd);
+    this.activation = (state.activation === 'linear') ? 'linear' : 'tanh';
 
     const toF32 = (arr) => new Float32Array(Array.isArray(arr) ? arr.map(Number) : []);
-    const toHead = (head, nClass) => {
+    const toMat = (mat, rows, cols) => {
       const out = [];
-      for (let a = 0; a < nClass; a++) {
-        const row = head?.[a] ?? [];
+      for (let i = 0; i < rows; i++) {
+        const row = mat?.[i] ?? [];
         const w = toF32(row);
-        // ensure length
-        const ww = new Float32Array(this.featureLen);
-        ww.set(w.subarray(0, this.featureLen));
+        const ww = new Float32Array(cols);
+        ww.set(w.subarray(0, cols));
         out.push(ww);
       }
       return out;
     };
 
-    this.Wx = toHead(state.Wx, 3);
+    this.W1 = toMat(state.W1, this.hidden1, this.featureLen);
+    this.b1 = toF32(state.b1 ?? []);
+    if (this.b1.length !== this.hidden1) this.b1 = new Float32Array(this.hidden1);
+
+    this.W2 = toMat(state.W2, this.hidden2, this.hidden1);
+    this.b2 = toF32(state.b2 ?? []);
+    if (this.b2.length !== this.hidden2) this.b2 = new Float32Array(this.hidden2);
+
+    this.Wx = toMat(state.Wx, 3, this.hidden2);
     this.bx = toF32(state.bx ?? []);
     if (this.bx.length !== 3) this.bx = new Float32Array(3);
 
-    this.Wy = toHead(state.Wy, 3);
+    this.Wy = toMat(state.Wy, 3, this.hidden2);
     this.by = toF32(state.by ?? []);
     if (this.by.length !== 3) this.by = new Float32Array(3);
 
-    this.Wp = toHead(state.Wp, 2);
+    this.Wp = toMat(state.Wp, 2, this.hidden2);
     this.bp = toF32(state.bp ?? []);
     if (this.bp.length !== 2) this.bp = new Float32Array(2);
   }

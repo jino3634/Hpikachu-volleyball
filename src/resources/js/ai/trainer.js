@@ -123,6 +123,8 @@ export class Trainer {
       learningRate: 0.001,
       epsilon: 0.08,
       initStd: 0.01,
+      hidden1: 64,
+      hidden2: 64,
     });
     this.agent = new TuplePolicyAgentV1(this.policy, { playerIndex: this.learningPlayer, deterministic: false });
   }
@@ -196,7 +198,8 @@ export class Trainer {
 
     // model_state
     const model = await this.storage.getCheckpoint('model_state');
-    if (model && model.kind === 'tuple_policy_v1') {
+    if (model && (model.kind === 'tuple_policy_mlp_v1' || model.kind === 'tuple_policy_v1')) {
+      // tuple_policy_v1 (old linear) is still loadable (it will be wrapped as an identity-trunk MLP)
       this.policy.loadState(model);
     } else {
       // 최초 생성
@@ -695,7 +698,7 @@ _flushBatch(allRemaining = false) {
 
     // reload model
     const model = await this.storage.getCheckpoint('model_state');
-    if (model && model.kind === 'tuple_policy_v1') {
+    if (model && (model.kind === 'tuple_policy_mlp_v1' || model.kind === 'tuple_policy_v1')) {
       this.policy.loadState(model);
     } else {
       await this.storage.setCheckpoint('model_state', this.policy.saveState());
