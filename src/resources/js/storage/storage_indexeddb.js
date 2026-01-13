@@ -107,6 +107,11 @@ export class IndexedDBStorage extends StorageIface {
   async appendEpisode(episode) {
     this._assert();
 
+    if (!episode) {
+      console.warn('[IndexedDBStorage] appendEpisode: episode is null/undefined');
+      return;
+    }
+
     // 학습 루프에서 예외가 나도 전체가 멈추지 않도록 방어
     if (!episode || typeof episode !== 'object') {
       console.warn('[IndexedDBStorage] appendEpisode: invalid episode', episode);

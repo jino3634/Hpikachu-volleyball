@@ -500,7 +500,7 @@ export class Trainer {
     while (this.running && !this.graduated) {
       for (let i = 0; i < this.pointsPerTick; i++) {
         // 한 포인트 실행
-        const res = this._runner.runOnePoint();
+        const res = await this._runner.runOnePoint();
         this.lastResult = res;
 
         if (!res) {
