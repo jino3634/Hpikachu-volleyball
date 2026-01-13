@@ -424,16 +424,54 @@ export class TuplePolicyV1 {
     if (!Array.isArray(trans) || trans.length === 0) return { updated: 0, avgLoss: 0 };
 
     const learningPlayer = /** @type {1|2} */ (episode.learningPlayer ?? 1);
-    let updated = 0;
-    let lossSum = 0;
 
+    // --- Collect usable transitions (must have action object) and their rewards.
+    const usable = [];
+    const rewards = [];
     for (const tr of trans) {
       const a = tr?.action;
       if (!a || typeof a !== 'object') continue;
-
       const r = Number(tr?.reward ?? 0);
-      
-      const advantage = r;
+      usable.push(tr);
+      rewards.push(r);
+    }
+    const T = usable.length;
+    if (T === 0) return { updated: 0, avgLoss: 0 };
+
+    // --- Baseline (mean) + scale (std) to stabilize updates across episodes.
+    let mean = 0;
+    for (let i = 0; i < rewards.length; i++) mean += rewards[i];
+    mean /= T;
+
+    let varSum = 0;
+    for (let i = 0; i < rewards.length; i++) {
+      const d = rewards[i] - mean;
+      varSum += d * d;
+    }
+    const std = Math.sqrt(varSum / T);
+    const scale = std > 1e-6 ? std : 1; // avoid division by 0
+
+    // --- Length normalization: make long/short episodes have similar total impact.
+    const lenNorm = 1 / Math.sqrt(T);
+
+    // --- Clip advantages to avoid rare spikes dominating updates.
+    const ADV_CLIP = 3;
+
+    let updated = 0;
+    let lossSum = 0;
+
+    for (let i = 0; i < T; i++) {
+      const tr = usable[i];
+      const a = tr.action;
+
+      const r = rewards[i];
+      // Advantage: centered, scaled, and length-normalized.
+      let advantage = ((r - mean) / scale) * lenNorm;
+      if (advantage > ADV_CLIP) advantage = ADV_CLIP;
+      else if (advantage < -ADV_CLIP) advantage = -ADV_CLIP;
+
+      // If advantage is ~0, skip to save compute (no meaningful update).
+      if (Math.abs(advantage) < 1e-12) continue;
 
       const feat = this.buildFeatures(tr?.obs, learningPlayer);
       const out = this.updateImitation(feat, a, advantage);
