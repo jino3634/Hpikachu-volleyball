@@ -607,7 +607,6 @@ export class Trainer {
 
         // global stats
         this.totalEpisodes++;
-        this.totalEpisodes++;
         const isWin = (res.ok && res.scoredBy === this.learningPlayer);
         if (isWin) this.totalWins++;
         else if (res.ok) this.totalLosses++;
