@@ -76,7 +76,7 @@ export class Trainer {
     this.warmup = {
       done: false,
       trained: false,
-      targetSamples: 100000,
+      targetSamples: 1000000,
       trainEpochs: 2,
       trainBatch: 256,
     };
