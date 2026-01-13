@@ -109,6 +109,19 @@ export class EpisodeBuilder {
    * @returns {import('./rl_schema.js').Episode}
    */
   toEpisode() {
+
+    // === reward redistribution over all frames (win/loss credit assignment) ===
+    if (this.scoredBy !== null && this.scoredBy !== undefined) {
+      const T = this.transitions.length;
+      const sign = (this.scoredBy === this.learningPlayer) ? 1 : -1;
+      const R = 50;
+      const gamma = 0.995;
+      for (let i = 0; i < T; i++) {
+        const t = T - 1 - i;
+        this.transitions[i].reward = sign * R * Math.pow(gamma, t);
+      }
+    }
+
     return {
       schemaVersion: SCHEMA_VERSION,
       episodeId: this.episodeId,
