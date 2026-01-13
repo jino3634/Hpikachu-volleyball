@@ -225,7 +225,7 @@ export class TuplePolicyV1 {
    * @param {{xDirection:number, yDirection:number, powerHit:number}} label
    * @returns {{loss:number, ax:number, ay:number, ap:number}}
    */
-  updateImitation(feat, label) {
+  updateImitation(feat, label, sign = 1) {
     const tx = mapXDirToClass(label.xDirection);
     const ty = mapYDirToClass(label.yDirection);
     const tp = (label.powerHit ?? 0) ? 1 : 0;
@@ -250,7 +250,7 @@ export class TuplePolicyV1 {
     for (let i = 0; i < 3; i++) gy[i] = py[i] - (i === ty ? 1 : 0);
     for (let i = 0; i < 2; i++) gp[i] = pp[i] - (i === tp ? 1 : 0);
 
-    const lr = this.learningRate;
+    const lr = this.learningRate * (Number(sign) || 0);
 
     // update weights
     for (let a = 0; a < 3; a++) {
@@ -306,10 +306,11 @@ export class TuplePolicyV1 {
       if (!a || typeof a !== 'object') continue;
 
       const r = Number(tr?.reward ?? 0);
-      if (r <= 0) continue; // reinforce only positive signals
+      if (r === 0) continue;
+      const sign = r > 0 ? 1 : -1;
 
       const feat = this.buildFeatures(tr?.obs, learningPlayer);
-      const out = this.updateImitation(feat, a);
+      const out = this.updateImitation(feat, a, sign);
       updated++;
       lossSum += out.loss;
     }

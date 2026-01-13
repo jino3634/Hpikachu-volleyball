@@ -88,7 +88,15 @@ export class Trainer {
     // Phase1: track best margin (p1Score - p2Score) for current snapshot
     this.phase1BestMargin = -999;
 
-    // global stats
+    
+    // batch update (N points accumulate)
+    this.batchPoints = 64;
+    this.maxBufferPoints = 256;
+    this.pointBuffer = [];
+    this.flushCount = 0;
+    this.bufferSkipped = 0;
+
+// global stats
     this.totalEpisodes = 0;
     this.totalWins = 0;
     this.totalLosses = 0;
@@ -492,9 +500,24 @@ export class Trainer {
         await this.storage.appendReplay(replay);
         await this.storage.pruneReplays(10);
 
-        // policy 업데이트(episode가 있을 때만)
-        if (res.episode) {
-          this.policy.learnFromEpisode(res.episode);
+        // policy update: accumulate N points then batch-learn
+        const canLearn =
+          res.ok === true &&
+          res.frames > 0 &&
+          res.loseReason !== 'EXCEPTION' &&
+          !!res.episode;
+
+        if (canLearn) {
+          this.pointBuffer.push({ episode: res.episode });
+          if (this.pointBuffer.length > this.maxBufferPoints) {
+            // safety: drop oldest if something goes wrong
+            this.pointBuffer.splice(0, this.pointBuffer.length - this.maxBufferPoints);
+          }
+          if (this.pointBuffer.length >= this.batchPoints) {
+            this._flushBatch(false);
+          }
+        } else {
+          this.bufferSkipped++;
         }
 
         // global stats
@@ -537,6 +560,8 @@ export class Trainer {
             this.graduated = true;
             this.mode = 'PHASE2';
             this.running = false;
+            // flush remaining buffered points before finalize
+            this._flushBatch(true);
             await this._saveStats();
             console.log('[P1->P2] graduated via 3 consecutive set wins; mode set to PHASE2');
           }
@@ -556,10 +581,33 @@ export class Trainer {
       await sleep(this.tickDelayMs > 0 ? this.tickDelayMs : 0);
     }
 
+    // flush remaining buffered points
+    this._flushBatch(true);
+
     // 종료 시점에도 저장
     await this._saveStats();
     await this.storage.setCheckpoint('model_state', this.policy.saveState());
   }
+
+_flushBatch(allRemaining = false) {
+  const n = allRemaining ? this.pointBuffer.length : this.batchPoints;
+  if (!n || n <= 0) return;
+
+  const batch = this.pointBuffer.splice(0, n);
+  let updatedTotal = 0;
+  for (const item of batch) {
+    try {
+      const out = this.policy.learnFromEpisode(item.episode);
+      if (out && typeof out.updated === 'number') updatedTotal += out.updated;
+    } catch (e) {
+      console.warn('[BATCH] learnFromEpisode failed; skip item', e);
+    }
+  }
+
+  this.flushCount++;
+  console.log(`[BATCH] flush=${this.flushCount} size=${batch.length} updated=${updatedTotal} skipped=${this.bufferSkipped}`);
+}
+
 
   stop() {
     this.running = false;
