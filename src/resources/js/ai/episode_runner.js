@@ -283,7 +283,7 @@ export class OnePointEpisodeRunner {
       if (trace.length < this.maxTraceFrames) {
         trace.push({
           t: frames,
-          obs: { p1: obs1, p2: obs2, ball: obs1?.ball ?? obs2?.ball ?? null },
+          obs: { p1: obs1, p2: obs2, ball: (obs1?.raw?.ball ?? obs2?.raw?.ball ?? obs1?.ball ?? obs2?.ball ?? null) },
           action: { p1: p1Input, p2: p2Input },
           roundEvents: ev,
         });

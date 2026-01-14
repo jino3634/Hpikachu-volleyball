@@ -824,13 +824,19 @@ _buildPointReplay(res) {
       const p2 = obsP1?.opp ?? obsP2?.me ?? null;
       const ball = t?.obs?.ball ?? obsP1?.ball ?? obsP2?.ball ?? null;
 
+      // obs_patch(정규화 관측)에서도 리플레이는 픽셀 좌표(raw)를 우선 사용
+      const p1Pix = obsP1?.raw?.me ?? obsP2?.raw?.opp ?? p1;
+      const p2Pix = obsP1?.raw?.opp ?? obsP2?.raw?.me ?? p2;
+      // obs_patch에서는 t.obs.ball이 정규화일 수 있으니 raw.ball을 최우선 사용
+      const ballPix = obsP1?.raw?.ball ?? obsP2?.raw?.ball ?? t?.obs?.ball ?? ball;
+
       return {
-        frame: t.frame | 0,
+        frame: ((t.frame ?? t.t ?? 0) | 0),
         a1: (t.actionP1 ?? 0) | 0,
         a2: (t.actionP2 ?? 0) | 0,
-        p1: p1 ? { x: p1.x, y: p1.y, yV: p1.yV } : null,
-        p2: p2 ? { x: p2.x, y: p2.y, yV: p2.yV } : null,
-        ball: ball ? { x: ball.x, y: ball.y, xV: ball.xV, yV: ball.yV, isPowerHit: ball.isPowerHit } : null,
+        p1: p1Pix ? { x: p1Pix.x, y: p1Pix.y, yV: p1Pix.yV } : null,
+        p2: p2Pix ? { x: p2Pix.x, y: p2Pix.y, yV: p2Pix.yV } : null,
+        ball: ballPix ? { x: ballPix.x, y: ballPix.y, xV: ballPix.xV, yV: ballPix.yV, isPowerHit: ballPix.isPowerHit } : null,
         scores: obsP1?.scores ?? obsP2?.scores ?? null,
         serve: obsP1?.isPlayer2Serve ?? obsP2?.isPlayer2Serve ?? null,
         state: t.stateName ?? null,

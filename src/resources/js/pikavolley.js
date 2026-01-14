@@ -918,7 +918,9 @@ export class PikachuVolleyball {
     const opp = this.physics[`player${playerIndex === 1 ? 2 : 1}`];
     const b = this.physics.ball;
 
-    return {
+    // --- Observation post-processing (player-centric, learning-friendly) ---
+    // Keep raw snapshot for debugging/compat.
+    const raw = {
       me: {
         x: me.x, y: me.y,
         yV: me.yVelocity,
@@ -942,10 +944,90 @@ export class PikachuVolleyball {
         expectedX: b.expectedLandingPointX,
         isPowerHit: b.isPowerHit ? 1 : 0,
       },
+    };
+
+    // Court constants (from physics.js): GROUND_WIDTH=432, BALL_TOUCHING_GROUND_Y_COORD=252
+    const W = 432;
+    const H = 252;
+
+    const clamp = (v, lo, hi) => (v < lo ? lo : (v > hi ? hi : v));
+    const norm01 = (v, max) => (max <= 0 ? 0 : (v / max));
+    const norm11 = (v, max) => (norm01(v, max) * 2 - 1);
+
+    // Flip to make the observation always "me is on the left".
+    const needFlip = Boolean(raw.me.isP2);
+    const flipX = (x) => (W - x);
+    const xTo = (x) => (needFlip ? flipX(x) : x);
+    const xVTo = (xv) => (needFlip ? -xv : xv);
+
+    // Normalize positions to [-1, 1]
+    const nx = (x) => norm11(clamp(x, 0, W), W);
+    const ny = (y) => norm11(clamp(y, 0, H), H);
+
+    // Velocity clipping (empirical-safe ranges based on physics.js assignments)
+    // - ball.xV can spike from hits, keep a wide clip
+    // - y velocities are generally smaller
+    const clipBallXV = 160;
+    const clipBallYV = 60;
+    const clipPlayerYV = 25;
+    const nv = (v, clip) => (clip <= 0 ? 0 : (clamp(v, -clip, clip) / clip));
+
+    const meIsLying = raw.me.state === 4 ? 1 : 0;
+    const meIsDiving = raw.me.state === 3 ? 1 : 0;
+    const meIsAir = (raw.me.y < 244 || raw.me.state === 1 || raw.me.state === 2 || raw.me.state === 3) ? 1 : 0;
+    const meCanAct = (raw.me.state <= 3) ? 1 : 0;
+
+    const oppIsLying = raw.opp.state === 4 ? 1 : 0;
+    const oppIsAir = (raw.opp.y < 244 || raw.opp.state === 1 || raw.opp.state === 2 || raw.opp.state === 3) ? 1 : 0;
+
+    // Build processed obs while keeping original field names.
+    const meP = {
+      x: nx(xTo(raw.me.x)),
+      y: ny(raw.me.y),
+      yV: nv(raw.me.yV, clipPlayerYV),
+      state: raw.me.state,
+      divingDir: raw.me.divingDir,
+      lying: raw.me.lying,
+      isP2: 0, // after flipping, "me" is always treated as left-side
+      bold: raw.me.bold,
+      isAir: meIsAir,
+      isDiving: meIsDiving,
+      isLying: meIsLying,
+      canAct: meCanAct,
+    };
+
+    const oppP = {
+      x: nx(xTo(raw.opp.x)),
+      y: ny(raw.opp.y),
+      yV: nv(raw.opp.yV, clipPlayerYV),
+      state: raw.opp.state,
+      divingDir: raw.opp.divingDir,
+      lying: raw.opp.lying,
+      isP2: 1, // opponent is always right-side in this player-centric view
+      isAir: oppIsAir,
+      isLying: oppIsLying,
+    };
+
+    const ballP = {
+      x: nx(xTo(raw.ball.x)),
+      y: ny(raw.ball.y),
+      xV: nv(xVTo(raw.ball.xV), clipBallXV),
+      yV: nv(raw.ball.yV, clipBallYV),
+      expectedX: nx(xTo(raw.ball.expectedX)),
+      isPowerHit: raw.ball.isPowerHit,
+    };
+
+    return {
+      me: meP,
+      opp: oppP,
+      ball: ballP,
+      // keep high-level flags as-is (do NOT flip scores/serve flags here)
       scores: [this.scores[0], this.scores[1]],
       isPlayer2Serve: this.isPlayer2Serve ? 1 : 0,
       roundEnded: this.roundEnded ? 1 : 0,
       gameEnded: this.gameEnded ? 1 : 0,
+      // raw snapshot for debugging/backward-compat usage
+      raw,
     };
   }
 
