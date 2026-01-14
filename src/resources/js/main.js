@@ -343,6 +343,50 @@ function createTrainingControlPanel({ trainer, ticker }) {
   panel.appendChild(rowWarm);
   panel.appendChild(warmupInput);
 
+  // Debug log (download full diagnostics; avoids losing logs due to DevTools buffer)
+  const rowDbg = document.createElement('div');
+  rowDbg.style.display = 'flex';
+  rowDbg.style.gap = '8px';
+  rowDbg.style.marginBottom = '8px';
+
+  const btnDlLog = document.createElement('button');
+  btnDlLog.textContent = 'Download log';
+  const btnClrLog = document.createElement('button');
+  btnClrLog.textContent = 'Clear log';
+
+  for (const b of [btnDlLog, btnClrLog]) {
+    b.style.flex = '1';
+    b.style.padding = '6px 8px';
+    b.style.borderRadius = '8px';
+    b.style.border = '1px solid rgba(255,255,255,0.25)';
+    b.style.background = 'rgba(255,255,255,0.08)';
+    b.style.color = '#fff';
+    b.style.cursor = 'pointer';
+  }
+
+  btnDlLog.onclick = () => {
+    try {
+      if (window.downloadDebugLog) window.downloadDebugLog();
+      else console.log('[DEBUG] downloadDebugLog not found on window');
+    } catch (e) {
+      console.log('[DEBUG] downloadDebugLog failed', e);
+    }
+  };
+
+  btnClrLog.onclick = () => {
+    try {
+      if (window.clearDebugLog) window.clearDebugLog();
+      else console.log('[DEBUG] clearDebugLog not found on window');
+    } catch (e) {
+      console.log('[DEBUG] clearDebugLog failed', e);
+    }
+  };
+
+  rowDbg.appendChild(btnDlLog);
+  rowDbg.appendChild(btnClrLog);
+  panel.appendChild(rowDbg);
+
+
   const status = document.createElement('pre');
   status.style.margin = '0';
   status.style.whiteSpace = 'pre-wrap';

@@ -5,6 +5,7 @@ import { OnePointEpisodeRunner } from './episode_runner.js';
 import { IndexedDBStorage } from '../storage/storage_indexeddb.js';
 import { PpoPolicyV1 } from './ppo_policy_v1.js';
 import { PpoPolicyAgentV1 } from './ppo_agent_v1.js';
+import { logDebug, downloadDebugLog, clearDebugLog } from './debug_log.js';
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
@@ -358,11 +359,11 @@ export class Trainer {
     if (already >= target) {
       this.warmup.done = true;
       await this.storage.setCheckpoint('warmup', { done: true, targetSamples: target, updatedAt: Date.now() });
-      console.log(`[WARMUP] dataset already ready: samples=${already}`);
+      logDebug(`[WARMUP] dataset already ready: samples=${already}`);
       return;
     }
 
-    console.log(`[WARMUP] collecting imitation samples... target=${target}, current=${already}`);
+    logDebug(`[WARMUP] collecting imitation samples... target=${target}, current=${already}`);
 
     const gameAny = /** @type {any} */ (this.game);
     // Save previous control config
@@ -425,7 +426,7 @@ export class Trainer {
           await this.storage.appendImitationSamples(chunk);
         }
         const dbCount = await this.storage.countImitationSamples();
-        console.log(`[WARMUP] frames=${frames} samples=${dbCount}/${target}`);
+        logDebug(`[WARMUP] frames=${frames} samples=${dbCount}/${target}`);
         await sleep(0);
       }
     }
@@ -436,7 +437,7 @@ export class Trainer {
     }
 
     const finalCount = await this.storage.countImitationSamples();
-    console.log(`[WARMUP] done. frames=${frames} samples=${finalCount}`);
+    logDebug(`[WARMUP] done. frames=${frames} samples=${finalCount}`);
 
     this.warmup.done = true;
     await this.storage.setCheckpoint('warmup', { done: true, targetSamples: target, updatedAt: Date.now() });
@@ -458,7 +459,7 @@ export class Trainer {
 
     const total = await this.storage.countImitationSamples();
     if (total <= 0) {
-      console.warn('[WARMUP-TRAIN] no imitation samples; skip');
+      logDebug('[WARN]', '[WARMUP-TRAIN] no imitation samples; skip');
       this.warmup.trained = true;
       await this.storage.setCheckpoint('warmup_train', { trained: true, updatedAt: Date.now() });
       return;
@@ -473,7 +474,45 @@ export class Trainer {
     samples.reverse();
 
     const N = samples.length;
-    console.log(`[WARMUP-TRAIN] start. samples=${N}, epochs=${epochs}, batch=${batchSize}`);
+    logDebug(`[WARMUP-TRAIN] start. samples=${N}, epochs=${epochs}, batch=${batchSize}`);
+    // ---- BC/WARMUP DIAGNOSTICS ----
+    // Label distribution / validity check (helps catch mapping or off-by-one bugs)
+    {
+      const histX = { '-1': 0, '0': 0, '1': 0, invalid: 0 };
+      const histY = { '-1': 0, '0': 0, '1': 0, invalid: 0 };
+      const histP = { '0': 0, '1': 0, invalid: 0 };
+      for (let i = 0; i < N; i++) {
+        const s = samples[i];
+        const lx = (s?.label?.xDirection ?? 0);
+        const ly = (s?.label?.yDirection ?? 0);
+        const lp = (s?.label?.powerHit ?? 0);
+        if (lx === -1 || lx === 0 || lx === 1) histX[String(lx)]++; else histX.invalid++;
+        if (ly === -1 || ly === 0 || ly === 1) histY[String(ly)]++; else histY.invalid++;
+        if (lp === 0 || lp === 1 || lp === true || lp === false) histP[String(Number(!!lp))]++; else histP.invalid++;
+      }
+      logDebug(`[WARMUP-DIST] xDir(-1,0,1)=${histX['-1']},${histX['0']},${histX['1']} invalid=${histX.invalid}`);
+      logDebug(`[WARMUP-DIST] yDir(-1,0,1)=${histY['-1']},${histY['0']},${histY['1']} invalid=${histY.invalid}`);
+      logDebug(`[WARMUP-DIST] power(0,1)=${histP['0']},${histP['1']} invalid=${histP.invalid}`);
+    }
+
+    // Print a few raw samples before training to sanity-check label/action conventions
+    // (If these look wrong, BC will NEVER reach 40%+ no matter how long you train.)
+    {
+      const policyAny = /** @type {any} */ (this.policy);
+      const K = Math.min(10, N);
+      for (let i = 0; i < K; i++) {
+        const s = samples[(Math.random() * N) | 0];
+        if (!s?.obs) continue;
+        if (typeof policyAny.evaluate !== 'function') break;
+        const ev = policyAny.evaluate(s.obs, this.learningPlayer);
+        const lx = (s.label?.xDirection ?? 0) | 0;
+        const ly = (s.label?.yDirection ?? 0) | 0;
+        const lp = (s.label?.powerHit ?? 0) ? 1 : 0;
+        const fmt = (arr) => Array.from(arr).map(v => Number(v).toFixed(3)).join(',');
+        logDebug(`[WARMUP-SAMPLE] lx=${lx} ly=${ly} lp=${lp}  px=[${fmt(ev.px)}] py=[${fmt(ev.py)}] pp=[${fmt(ev.pp)}]`);
+      }
+    }
+    // ---- /BC/WARMUP DIAGNOSTICS ----
 
     let globalStep = 0;
 
@@ -489,6 +528,12 @@ export class Trainer {
       let lossSum = 0;
       let nSeen = 0;
       let accX = 0, accY = 0, accP = 0;
+      // Confusion matrices (labelClass -> predClass) to diagnose mapping errors
+      const cmX = [ [0,0,0], [0,0,0], [0,0,0] ];
+      const cmY = [ [0,0,0], [0,0,0], [0,0,0] ];
+      const cmP = [ [0,0], [0,0] ];
+      let invalidLabel = 0;
+      let mismatchShown = 0;
 
       for (let i = 0; i < N; i += batchSize) {
         const end = Math.min(N, i + batchSize);
@@ -514,6 +559,38 @@ export class Trainer {
           const ly = (s.label.yDirection ?? 0) | 0;
           const lp = (s.label.powerHit ?? 0) ? 1 : 0;
 
+          const lxs = (lx < 0 ? -1 : (lx > 0 ? 1 : 0));
+          const lys = (ly < 0 ? -1 : (ly > 0 ? 1 : 0));
+          const lxc = (lxs < 0 ? 0 : (lxs > 0 ? 2 : 1));
+          const lyc = (lys < 0 ? 0 : (lys > 0 ? 2 : 1));
+          if (!((lx === -1 || lx === 0 || lx === 1) && (ly === -1 || ly === 0 || ly === 1))) {
+            invalidLabel++;
+          } else {
+            cmX[lxc][r.ax]++;
+            cmY[lyc][r.ay]++;
+            cmP[lp][r.ap]++;
+          }
+
+          // Show a few mismatches with predicted probabilities (helps catch mirrored/shifted labels)
+          if (mismatchShown < 5) {
+            const pxDir = (r.ax === 0 ? -1 : (r.ax === 2 ? 1 : 0));
+            const pyDir = (r.ay === 0 ? -1 : (r.ay === 2 ? 1 : 0));
+            const mx = (pxDir !== lxs);
+            const my = (pyDir !== lys);
+            const mp = (r.ap !== lp);
+            if (mx || my || mp) {
+              mismatchShown++;
+              const policyAny2 = /** @type {any} */ (this.policy);
+              if (typeof policyAny2.evaluate === 'function') {
+                const ev2 = policyAny2.evaluate(s.obs, this.learningPlayer);
+                const fmt = (arr) => Array.from(arr).map(v => Number(v).toFixed(3)).join(',');
+                logDebug(`[WARMUP-MISMATCH] lx=${lx} ly=${ly} lp=${lp}  pred(ax,ay,ap)=${r.ax},${r.ay},${r.ap}  px=[${fmt(ev2.px)}] py=[${fmt(ev2.py)}] pp=[${fmt(ev2.pp)}]`);
+              } else {
+                logDebug(`[WARMUP-MISMATCH] lx=${lx} ly=${ly} lp=${lp}  pred(ax,ay,ap)=${r.ax},${r.ay},${r.ap}`);
+              }
+            }
+          }
+
           // map predicted classes -> tuple for quick acc
           const px = (r.ax === 0 ? -1 : (r.ax === 2 ? 1 : 0));
           const py = (r.ay === 0 ? -1 : (r.ay === 2 ? 1 : 0));
@@ -528,7 +605,7 @@ export class Trainer {
           const ax = accX / Math.max(1, nSeen);
           const ay = accY / Math.max(1, nSeen);
           const ap = accP / Math.max(1, nSeen);
-          console.log(`[WARMUP-TRAIN] ep=${ep + 1}/${epochs} step=${globalStep} loss=${meanLoss.toFixed(3)} acc(x,y,p)=${ax.toFixed(3)},${ay.toFixed(3)},${ap.toFixed(3)}`);
+          logDebug(`[WARMUP-TRAIN] ep=${ep + 1}/${epochs} step=${globalStep} loss=${meanLoss.toFixed(3)} acc(x,y,p)=${ax.toFixed(3)},${ay.toFixed(3)},${ap.toFixed(3)}`);
         }
       }
 
@@ -536,7 +613,12 @@ export class Trainer {
       const ax = accX / Math.max(1, nSeen);
       const ay = accY / Math.max(1, nSeen);
       const ap = accP / Math.max(1, nSeen);
-      console.log(`[WARMUP-TRAIN] epoch done ${ep + 1}/${epochs}. loss=${meanLoss.toFixed(3)} acc(x,y,p)=${ax.toFixed(3)},${ay.toFixed(3)},${ap.toFixed(3)}`);
+      logDebug(`[WARMUP-TRAIN] epoch done ${ep + 1}/${epochs}. loss=${meanLoss.toFixed(3)} acc(x,y,p)=${ax.toFixed(3)},${ay.toFixed(3)},${ap.toFixed(3)}`);
+      // Confusion matrix summary (rows=labelClass, cols=predClass) for this epoch
+      const cmRow = (row) => row.map(v => String(v)).join(',');
+      logDebug(`[WARMUP-CM-X] rows(label -1,0,1): [${cmRow(cmX[0])}] [${cmRow(cmX[1])}] [${cmRow(cmX[2])}] invalidLabel=${invalidLabel}`);
+      logDebug(`[WARMUP-CM-Y] rows(label -1,0,1): [${cmRow(cmY[0])}] [${cmRow(cmY[1])}] [${cmRow(cmY[2])}] invalidLabel=${invalidLabel}`);
+      logDebug(`[WARMUP-CM-P] rows(label 0,1): [${cmRow(cmP[0])}] [${cmRow(cmP[1])}]`);
     }
 
     // Save updated model state
@@ -545,7 +627,7 @@ export class Trainer {
     this.warmup.trained = true;
     await this.storage.setCheckpoint('warmup_train', { trained: true, trainEpochs: epochs, trainBatch: batchSize, updatedAt: Date.now() });
 
-    console.log('[WARMUP-TRAIN] done. model_state saved.');
+    logDebug('[WARMUP-TRAIN] done. model_state saved.');
   }
 
 
@@ -578,7 +660,7 @@ export class Trainer {
         this.lastResult = res;
 
         if (!res) {
-          console.warn('[TRAIN] runOnePoint returned null/undefined');
+          logDebug('[WARN]', '[TRAIN] runOnePoint returned null/undefined');
           continue;
         }
 
@@ -586,7 +668,7 @@ export class Trainer {
         if (res.episode) {
           await this.storage.appendEpisode(res.episode);
         } else {
-          console.warn('[TRAIN] missing episode; skip save/learn', { loseReason: res.loseReason });
+          logDebug('[WARN]', '[TRAIN] missing episode; skip save/learn', { loseReason: res.loseReason });
         }
 
         // point replay 저장(최근 10개 + 최근 승리 3개 유지)
@@ -662,23 +744,23 @@ export class Trainer {
               minibatch: this.ppoMinibatch,
             });
 
-            console.log(`[PPO] steps=${stats.steps} updates=${stats.updates} approxKL=${stats.approxKl.toFixed(6)}`);
+            logDebug(`[PPO] steps=${stats.steps} updates=${stats.updates} approxKL=${stats.approxKl.toFixed(6)}`);
             if (stats && typeof stats.policyLoss === 'number') {
-              console.log(`[PPO-LOSS] policyLoss=${stats.policyLoss.toFixed(6)} valueLoss=${stats.valueLoss.toFixed(6)} clipFrac=${stats.clipFrac.toFixed(4)} gradNorm=${stats.gradNorm.toFixed(6)} wNorm=${stats.wNorm.toFixed(3)}`);
-              if (stats.vrCorr !== undefined) console.log(`[VALUE-DIAG] corr=${stats.vrCorr.toFixed(4)}`);
-            if (stats.advPos !== undefined) console.log(`[ADV-SIGN] pos=${stats.advPos} neg=${stats.advNeg} zero=${stats.advZero}`);
-            console.log(`[PPO-ADV] advMean=${stats.advMean.toFixed(6)} advStd=${stats.advStd.toFixed(6)} retMean=${stats.retMean.toFixed(6)} retStd=${stats.retStd.toFixed(6)} rewMean=${stats.rewMean.toFixed(6)} rewStd=${stats.rewStd.toFixed(6)}`);
+              logDebug(`[PPO-LOSS] policyLoss=${stats.policyLoss.toFixed(6)} valueLoss=${stats.valueLoss.toFixed(6)} clipFrac=${stats.clipFrac.toFixed(4)} gradNorm=${stats.gradNorm.toFixed(6)} wNorm=${stats.wNorm.toFixed(3)}`);
+              if (stats.vrCorr !== undefined) logDebug(`[VALUE-DIAG] corr=${stats.vrCorr.toFixed(4)}`);
+            if (stats.advPos !== undefined) logDebug(`[ADV-SIGN] pos=${stats.advPos} neg=${stats.advNeg} zero=${stats.advZero}`);
+            logDebug(`[PPO-ADV] advMean=${stats.advMean.toFixed(6)} advStd=${stats.advStd.toFixed(6)} retMean=${stats.retMean.toFixed(6)} retStd=${stats.retStd.toFixed(6)} rewMean=${stats.rewMean.toFixed(6)} rewStd=${stats.rewStd.toFixed(6)}`);
             }
             if (this.learnDiag) {
               const total = Math.max(1, this.learnDiag.transitions);
               
             if (this.learnDiag && this.learnDiag.stateLearn) {
               const s = this.learnDiag.stateLearn;
-              console.log(`[STATE-LEARN] canAct=${s.canAct} ground=${s.ground} air=${s.air} diving=${s.diving} lying=${s.lying}`);
+              logDebug(`[STATE-LEARN] canAct=${s.canAct} ground=${s.ground} air=${s.air} diving=${s.diving} lying=${s.lying}`);
               this.learnDiag.stateLearn = { canAct:0, air:0, ground:0, diving:0, lying:0 };
             }
 
-            console.log(`[LEARN-DIAG] episodes=${this.learnDiag.episodes} transitions=${this.learnDiag.transitions} pushed=${this.rollout.length} skippedNoInfo=${this.learnDiag.skippedNoInfo} skippedBadFields=${this.learnDiag.skippedBadFields}`);
+            logDebug(`[LEARN-DIAG] episodes=${this.learnDiag.episodes} transitions=${this.learnDiag.transitions} pushed=${this.rollout.length} skippedNoInfo=${this.learnDiag.skippedNoInfo} skippedBadFields=${this.learnDiag.skippedBadFields}`);
               // reset per flush
               this.learnDiag.episodes = 0;
               this.learnDiag.transitions = 0;
@@ -688,7 +770,7 @@ export class Trainer {
 
           // Diagnostics
           if (this.policy && this.policy.debug) {
-            console.log(`[PPO-DIAG] nanFeatures=${this.policy.debug.nanFeatures} invalidSteps=${this.policy.debug.invalidFeatureSteps} forcedIdle=${this.policy.debug.forcedIdle} (noAct=${this.policy.debug.forcedIdleNoAct}, lying=${this.policy.debug.forcedIdleLying}, diving=${this.policy.debug.forcedIdleDiving}) powerHitSampled=${this.policy.debug.powerHitSampled}`);
+            logDebug(`[PPO-DIAG] nanFeatures=${this.policy.debug.nanFeatures} invalidSteps=${this.policy.debug.invalidFeatureSteps} forcedIdle=${this.policy.debug.forcedIdle} (noAct=${this.policy.debug.forcedIdleNoAct}, lying=${this.policy.debug.forcedIdleLying}, diving=${this.policy.debug.forcedIdleDiving}) powerHitSampled=${this.policy.debug.powerHitSampled}`);
             // Additional rolling diagnostics from policy
             const as = this.policy.debug.actionStats;
             if (as && as.n > 0) {
@@ -696,7 +778,7 @@ export class Trainer {
               const ap1 = (as.apCounts?.[1] ?? 0);
               const phNear = (as.powerHitNearBall ?? 0);
               const phTot = Math.max(1, (as.powerHitTotal ?? ap1));
-              console.log(`[PPO-ACTION] n=${n} entX=${(as.entX/n).toFixed(4)} entY=${(as.entY/n).toFixed(4)} entP=${(as.entP/n).toFixed(4)} maxX=${(as.maxX/n).toFixed(4)} maxY=${(as.maxY/n).toFixed(4)} maxP=${(as.maxP/n).toFixed(4)} ap1Rate=${(ap1/n).toFixed(4)} powerHitNearBallRate=${(phNear/phTot).toFixed(4)} ax=${JSON.stringify(as.axCounts)} ay=${JSON.stringify(as.ayCounts)} ap=${JSON.stringify(as.apCounts)}`);
+              logDebug(`[PPO-ACTION] n=${n} entX=${(as.entX/n).toFixed(4)} entY=${(as.entY/n).toFixed(4)} entP=${(as.entP/n).toFixed(4)} maxX=${(as.maxX/n).toFixed(4)} maxY=${(as.maxY/n).toFixed(4)} maxP=${(as.maxP/n).toFixed(4)} ap1Rate=${(ap1/n).toFixed(4)} powerHitNearBallRate=${(phNear/phTot).toFixed(4)} ax=${JSON.stringify(as.axCounts)} ay=${JSON.stringify(as.ayCounts)} ap=${JSON.stringify(as.apCounts)}`);
             }
             const fs = this.policy.debug.featStats;
             if (fs && fs.n > 0) {
@@ -709,7 +791,7 @@ export class Trainer {
               };
               const keys = [0,1,2,8,9,10,14,15,16,17,18,19]; // core spatial features
               const rows = keys.filter(i => i < this.policy.featureLen).map(pick);
-              console.log(`[FEAT-DIAG] n=${n} ` + rows.map(r => `f${r.i}[min=${r.min.toFixed(2)},max=${r.max.toFixed(2)},mean=${r.mean.toFixed(2)},std=${r.std.toFixed(2)}]`).join(' '));
+              logDebug(`[FEAT-DIAG] n=${n} ` + rows.map(r => `f${r.i}[min=${r.min.toFixed(2)},max=${r.max.toFixed(2)},mean=${r.mean.toFixed(2)},std=${r.std.toFixed(2)}]`).join(' '));
             }
             // reset rolling diagnostics per flush
             this.policy.debug.nanFeatures = 0;
@@ -738,9 +820,9 @@ export class Trainer {
 
           }
           if (this.game && this.game.debugStats) {
-            console.log(`[GAME-DIAG] decisions=${this.game.debugStats.decisions} forcedIdle=${this.game.debugStats.forcedIdle} powerHitReq=${this.game.debugStats.powerHitRequested} powerHitApplied=${this.game.debugStats.powerHitApplied}`);
+            logDebug(`[GAME-DIAG] decisions=${this.game.debugStats.decisions} forcedIdle=${this.game.debugStats.forcedIdle} powerHitReq=${this.game.debugStats.powerHitRequested} powerHitApplied=${this.game.debugStats.powerHitApplied}`);
               const req = this.game.debugStats.powerHitRequested; const app = this.game.debugStats.powerHitApplied;
-              if (req > 0) console.log(`[ACTION-EFFECTIVE] powerHitAppliedRate=${(app/req).toFixed(4)}`);
+              if (req > 0) logDebug(`[ACTION-EFFECTIVE] powerHitAppliedRate=${(app/req).toFixed(4)}`);
             this.game.debugStats.decisions = 0;
             this.game.debugStats.forcedIdle = 0;
             this.game.debugStats.powerHitRequested = 0;
@@ -764,7 +846,7 @@ export class Trainer {
         }
 
         // 🔍 학습 진행 확인용 단일 로그
-        console.log(
+        logDebug(
         `[TRAIN] ep=${this.totalEpisodes} W=${this.totalWins} L=${this.totalLosses} ` +
         `WR=${(this.totalWins / Math.max(1, this.totalEpisodes)).toFixed(3)} ` +
         `last={scoredBy:${res.scoredBy}, loser:${res.loser}, frames:${res.frames}}`
@@ -787,7 +869,7 @@ export class Trainer {
             // save immediately so the best margin snapshot is persisted
             await this.storage.setCheckpoint('model_state', this.policy.saveState());
             await this._saveStats();
-            console.log(`[P1] new bestMargin=${this.phase1BestMargin} (score ${this.currentSet.p1}-${this.currentSet.p2}) -> saved current`);
+            logDebug(`[P1] new bestMargin=${this.phase1BestMargin} (score ${this.currentSet.p1}-${this.currentSet.p2}) -> saved current`);
           }
 
           if (p1Won) this.consecutiveSetWins++;
@@ -801,7 +883,7 @@ export class Trainer {
             // flush remaining rollout buffer before finalize
             await this._flushRollout(true);
             await this._saveStats();
-            console.log('[P1->P2] graduated via 3 consecutive set wins; mode set to PHASE2');
+            logDebug('[P1->P2] graduated via 3 consecutive set wins; mode set to PHASE2');
           }
 
           // 다음 세트로
@@ -839,12 +921,12 @@ _flushBatch(allRemaining = false) {
       const out = policyAny.learnFromEpisode(item.episode);
       if (out && typeof out.updated === 'number') updatedTotal += out.updated;
     } catch (e) {
-      console.warn('[BATCH] learnFromEpisode failed; skip item', e);
+      logDebug('[WARN]', '[BATCH] learnFromEpisode failed; skip item', e);
     }
   }
 
   this.flushCount++;
-  console.log(`[BATCH] flush=${this.flushCount} size=${batch.length} updated=${updatedTotal} skipped=${this.bufferSkipped}`);
+  logDebug(`[BATCH] flush=${this.flushCount} size=${batch.length} updated=${updatedTotal} skipped=${this.bufferSkipped}`);
 }
 
 
@@ -1017,14 +1099,14 @@ _buildPointReplay(res) {
         epochs: this.ppoEpochs,
         minibatch: this.ppoMinibatch,
       });
-      console.log(`[PPO] flush steps=${stats.steps} updates=${stats.updates} approxKL=${stats.approxKl.toFixed(6)}`);
+      logDebug(`[PPO] flush steps=${stats.steps} updates=${stats.updates} approxKL=${stats.approxKl.toFixed(6)}`);
             if (stats && typeof stats.policyLoss === 'number') {
-              console.log(`[PPO-LOSS] policyLoss=${stats.policyLoss.toFixed(6)} valueLoss=${stats.valueLoss.toFixed(6)} clipFrac=${stats.clipFrac.toFixed(4)} gradNorm=${stats.gradNorm.toFixed(6)} wNorm=${stats.wNorm.toFixed(3)}`);
-              console.log(`[PPO-ADV] advMean=${stats.advMean.toFixed(6)} advStd=${stats.advStd.toFixed(6)} retMean=${stats.retMean.toFixed(6)} retStd=${stats.retStd.toFixed(6)} rewMean=${stats.rewMean.toFixed(6)} rewStd=${stats.rewStd.toFixed(6)}`);
+              logDebug(`[PPO-LOSS] policyLoss=${stats.policyLoss.toFixed(6)} valueLoss=${stats.valueLoss.toFixed(6)} clipFrac=${stats.clipFrac.toFixed(4)} gradNorm=${stats.gradNorm.toFixed(6)} wNorm=${stats.wNorm.toFixed(3)}`);
+              logDebug(`[PPO-ADV] advMean=${stats.advMean.toFixed(6)} advStd=${stats.advStd.toFixed(6)} retMean=${stats.retMean.toFixed(6)} retStd=${stats.retStd.toFixed(6)} rewMean=${stats.rewMean.toFixed(6)} rewStd=${stats.rewStd.toFixed(6)}`);
             }
             if (this.learnDiag) {
               const total = Math.max(1, this.learnDiag.transitions);
-              console.log(`[LEARN-DIAG] episodes=${this.learnDiag.episodes} transitions=${this.learnDiag.transitions} pushed=${this.rollout.length} skippedNoInfo=${this.learnDiag.skippedNoInfo} skippedBadFields=${this.learnDiag.skippedBadFields}`);
+              logDebug(`[LEARN-DIAG] episodes=${this.learnDiag.episodes} transitions=${this.learnDiag.transitions} pushed=${this.rollout.length} skippedNoInfo=${this.learnDiag.skippedNoInfo} skippedBadFields=${this.learnDiag.skippedBadFields}`);
               // reset per flush
               this.learnDiag.episodes = 0;
               this.learnDiag.transitions = 0;
@@ -1033,7 +1115,7 @@ _buildPointReplay(res) {
             }
 
       if (this.policy && this.policy.debug) {
-        console.log(`[PPO-DIAG] nanFeatures=${this.policy.debug.nanFeatures} invalidSteps=${this.policy.debug.invalidFeatureSteps} forcedIdle=${this.policy.debug.forcedIdle} (noAct=${this.policy.debug.forcedIdleNoAct}, lying=${this.policy.debug.forcedIdleLying}, diving=${this.policy.debug.forcedIdleDiving}) powerHitSampled=${this.policy.debug.powerHitSampled}`);
+        logDebug(`[PPO-DIAG] nanFeatures=${this.policy.debug.nanFeatures} invalidSteps=${this.policy.debug.invalidFeatureSteps} forcedIdle=${this.policy.debug.forcedIdle} (noAct=${this.policy.debug.forcedIdleNoAct}, lying=${this.policy.debug.forcedIdleLying}, diving=${this.policy.debug.forcedIdleDiving}) powerHitSampled=${this.policy.debug.powerHitSampled}`);
             // Additional rolling diagnostics from policy
             const as = this.policy.debug.actionStats;
             if (as && as.n > 0) {
@@ -1041,7 +1123,7 @@ _buildPointReplay(res) {
               const ap1 = (as.apCounts?.[1] ?? 0);
               const phNear = (as.powerHitNearBall ?? 0);
               const phTot = Math.max(1, (as.powerHitTotal ?? ap1));
-              console.log(`[PPO-ACTION] n=${n} entX=${(as.entX/n).toFixed(4)} entY=${(as.entY/n).toFixed(4)} entP=${(as.entP/n).toFixed(4)} maxX=${(as.maxX/n).toFixed(4)} maxY=${(as.maxY/n).toFixed(4)} maxP=${(as.maxP/n).toFixed(4)} ap1Rate=${(ap1/n).toFixed(4)} powerHitNearBallRate=${(phNear/phTot).toFixed(4)} ax=${JSON.stringify(as.axCounts)} ay=${JSON.stringify(as.ayCounts)} ap=${JSON.stringify(as.apCounts)}`);
+              logDebug(`[PPO-ACTION] n=${n} entX=${(as.entX/n).toFixed(4)} entY=${(as.entY/n).toFixed(4)} entP=${(as.entP/n).toFixed(4)} maxX=${(as.maxX/n).toFixed(4)} maxY=${(as.maxY/n).toFixed(4)} maxP=${(as.maxP/n).toFixed(4)} ap1Rate=${(ap1/n).toFixed(4)} powerHitNearBallRate=${(phNear/phTot).toFixed(4)} ax=${JSON.stringify(as.axCounts)} ay=${JSON.stringify(as.ayCounts)} ap=${JSON.stringify(as.apCounts)}`);
             }
             const fs = this.policy.debug.featStats;
             if (fs && fs.n > 0) {
@@ -1054,7 +1136,7 @@ _buildPointReplay(res) {
               };
               const keys = [0,1,2,8,9,10,14,15,16,17,18,19]; // core spatial features
               const rows = keys.filter(i => i < this.policy.featureLen).map(pick);
-              console.log(`[FEAT-DIAG] n=${n} ` + rows.map(r => `f${r.i}[min=${r.min.toFixed(2)},max=${r.max.toFixed(2)},mean=${r.mean.toFixed(2)},std=${r.std.toFixed(2)}]`).join(' '));
+              logDebug(`[FEAT-DIAG] n=${n} ` + rows.map(r => `f${r.i}[min=${r.min.toFixed(2)},max=${r.max.toFixed(2)},mean=${r.mean.toFixed(2)},std=${r.std.toFixed(2)}]`).join(' '));
             }
         this.policy.debug.nanFeatures = 0;
         this.policy.debug.invalidFeatureSteps = 0;
@@ -1082,7 +1164,7 @@ _buildPointReplay(res) {
 
       }
       if (this.game && this.game.debugStats) {
-        console.log(`[GAME-DIAG] decisions=${this.game.debugStats.decisions} forcedIdle=${this.game.debugStats.forcedIdle} powerHitReq=${this.game.debugStats.powerHitRequested} powerHitApplied=${this.game.debugStats.powerHitApplied}`);
+        logDebug(`[GAME-DIAG] decisions=${this.game.debugStats.decisions} forcedIdle=${this.game.debugStats.forcedIdle} powerHitReq=${this.game.debugStats.powerHitRequested} powerHitApplied=${this.game.debugStats.powerHitApplied}`);
         this.game.debugStats.decisions = 0;
         this.game.debugStats.forcedIdle = 0;
         this.game.debugStats.powerHitRequested = 0;
