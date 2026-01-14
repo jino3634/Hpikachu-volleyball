@@ -720,3 +720,26 @@ export class TuplePolicyV1 {
     if (this.bp.length !== 2) this.bp = new Float32Array(2);
   }
 }
+
+
+function sanitizeAction(action, obs, phase) {
+  const me = obs.me || {};
+  const isAir = !!me.isAir;
+  const isLying = !!me.isLying;
+  const isDiving = !!me.isDiving;
+  const canAct = me.canAct !== false;
+  if (isLying || isDiving || !canAct || obs.roundEnded || obs.gameEnded || me.state===5 || me.state===6) {
+    return {xDirection:0,yDirection:0,powerHit:0};
+  }
+  // phase safety
+  if (phase !== 0) action.powerHit = 0;
+  // ground constraints
+  if (!isAir) {
+    if (action.yDirection === 1) action.yDirection = 0;
+    if (action.powerHit === 1) {
+      action.yDirection = 0; // critical fix
+      if (action.xDirection === 0) action.xDirection = Math.random()<0.5?-1:1;
+    }
+  }
+  return sanitizeAction(action, obs, phaseInDecisionInterval);
+}
