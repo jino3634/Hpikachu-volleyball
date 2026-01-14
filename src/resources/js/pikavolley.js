@@ -50,6 +50,15 @@ export class PikachuVolleyball {
       ),
     ];
 
+    // Debug stats for training diagnostics (safe to ignore in normal gameplay)
+    this.debugStats = {
+      decisions: 0,
+      forcedIdle: 0,
+      powerHitRequested: 0,
+      powerHitApplied: 0,
+    };
+
+
     /** @type {number} game fps */
     this.normalFPS = 25;
     /** @type {number} fps for slow motion */
@@ -200,7 +209,11 @@ export class PikachuVolleyball {
       p = 0;
     }
 
-    // POWER_DOWN style (y=+1) is only meaningful in air
+    // Count applied powerHit triggers (decision-phase 0 only)
+    if (p === 1 && phaseInDecisionInterval === 0 && this.debugStats) {
+      this.debugStats.powerHitApplied++;
+    }
+// POWER_DOWN style (y=+1) is only meaningful in air
     if (y === 1) {
       const player = this.physics[`player${playerIndex}`];
       const isAir = player.y < 244; // physics.js: PLAYER_TOUCHING_GROUND_Y_COORD = 244
@@ -1015,12 +1028,12 @@ isPowerHit: b.isPowerHit ? 1 : 0,
     const clipPlayerYV = 25;
     const nv = (v, clip) => (clip <= 0 ? 0 : (clamp(v, -clip, clip) / clip));
 
-    const meIsLying = raw.me.state === 4 ? 1 : 0;
+    const meIsLying = (raw.me.state === 4 && (raw.me.lying|0) > 0) ? 1 : 0;
     const meIsDiving = raw.me.state === 3 ? 1 : 0;
     const meIsAir = (raw.me.y < 244 || raw.me.state === 1 || raw.me.state === 2 || raw.me.state === 3) ? 1 : 0;
     const meCanAct = (raw.me.state <= 3) ? 1 : 0;
 
-    const oppIsLying = raw.opp.state === 4 ? 1 : 0;
+    const oppIsLying = (raw.opp.state === 4 && (raw.opp.lying|0) > 0) ? 1 : 0;
     const oppIsAir = (raw.opp.y < 244 || raw.opp.state === 1 || raw.opp.state === 2 || raw.opp.state === 3) ? 1 : 0;
 
     // Build processed obs while keeping original field names.

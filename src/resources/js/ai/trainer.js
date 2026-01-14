@@ -119,7 +119,7 @@ export class Trainer {
 
     // policy (tuple outputs)
     this.policy = new PpoPolicyV1({
-      featureLen: 16,
+      featureLen: 24,
       learningRate: 0.0003,
       hidden1: 64,
       hidden2: 64,
@@ -648,6 +648,25 @@ export class Trainer {
             });
 
             console.log(`[PPO] steps=${stats.steps} updates=${stats.updates} approxKL=${stats.approxKl.toFixed(6)}`);
+          // Diagnostics
+          if (this.policy && this.policy.debug) {
+            console.log(`[PPO-DIAG] nanFeatures=${this.policy.debug.nanFeatures} invalidSteps=${this.policy.debug.invalidFeatureSteps} forcedIdle=${this.policy.debug.forcedIdle} (noAct=${this.policy.debug.forcedIdleNoAct}, lying=${this.policy.debug.forcedIdleLying}, diving=${this.policy.debug.forcedIdleDiving}) powerHitSampled=${this.policy.debug.powerHitSampled}`);
+            // reset rolling diagnostics per flush
+            this.policy.debug.nanFeatures = 0;
+            this.policy.debug.invalidFeatureSteps = 0;
+            this.policy.debug.forcedIdle = 0;
+            this.policy.debug.forcedIdleNoAct = 0;
+            this.policy.debug.forcedIdleLying = 0;
+            this.policy.debug.forcedIdleDiving = 0;
+            this.policy.debug.powerHitSampled = 0;
+          }
+          if (this.game && this.game.debugStats) {
+            console.log(`[GAME-DIAG] decisions=${this.game.debugStats.decisions} forcedIdle=${this.game.debugStats.forcedIdle} powerHitReq=${this.game.debugStats.powerHitRequested} powerHitApplied=${this.game.debugStats.powerHitApplied}`);
+            this.game.debugStats.decisions = 0;
+            this.game.debugStats.forcedIdle = 0;
+            this.game.debugStats.powerHitRequested = 0;
+            this.game.debugStats.powerHitApplied = 0;
+          }
           }
         } else {
           this.bufferSkipped++;
@@ -920,6 +939,23 @@ _buildPointReplay(res) {
         minibatch: this.ppoMinibatch,
       });
       console.log(`[PPO] flush steps=${stats.steps} updates=${stats.updates} approxKL=${stats.approxKl.toFixed(6)}`);
+      if (this.policy && this.policy.debug) {
+        console.log(`[PPO-DIAG] nanFeatures=${this.policy.debug.nanFeatures} invalidSteps=${this.policy.debug.invalidFeatureSteps} forcedIdle=${this.policy.debug.forcedIdle} (noAct=${this.policy.debug.forcedIdleNoAct}, lying=${this.policy.debug.forcedIdleLying}, diving=${this.policy.debug.forcedIdleDiving}) powerHitSampled=${this.policy.debug.powerHitSampled}`);
+        this.policy.debug.nanFeatures = 0;
+        this.policy.debug.invalidFeatureSteps = 0;
+        this.policy.debug.forcedIdle = 0;
+        this.policy.debug.forcedIdleNoAct = 0;
+        this.policy.debug.forcedIdleLying = 0;
+        this.policy.debug.forcedIdleDiving = 0;
+        this.policy.debug.powerHitSampled = 0;
+      }
+      if (this.game && this.game.debugStats) {
+        console.log(`[GAME-DIAG] decisions=${this.game.debugStats.decisions} forcedIdle=${this.game.debugStats.forcedIdle} powerHitReq=${this.game.debugStats.powerHitRequested} powerHitApplied=${this.game.debugStats.powerHitApplied}`);
+        this.game.debugStats.decisions = 0;
+        this.game.debugStats.forcedIdle = 0;
+        this.game.debugStats.powerHitRequested = 0;
+        this.game.debugStats.powerHitApplied = 0;
+      }
       if (!force) break;
       if (this.rollout.length < this.minRolloutToUpdate) break;
     }

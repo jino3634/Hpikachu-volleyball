@@ -25,10 +25,26 @@ export class PpoPolicyAgentV1 {
    * @param {any} obs
    * @param {1|2} playerIndex
    */
-  chooseInput(obs, playerIndex) {
+  chooseInput(obs, playerIndex, game) {
     const pi = (playerIndex ?? this.playerIndex);
     const out = this.policy.act(obs, pi, { deterministic: this.deterministic, epsilon: this.epsilon });
     this.lastDecision = out;
+
+    // Optional per-game debug stats (for UI/logging)
+    if (game && typeof game === 'object') {
+      if (!game.debugStats) {
+        game.debugStats = {
+          decisions: 0,
+          forcedIdle: 0,
+          powerHitRequested: 0,
+          powerHitApplied: 0,
+        };
+      }
+      game.debugStats.decisions++;
+      if (out?.meta?.forcedIdle) game.debugStats.forcedIdle++;
+      if (out?.action?.powerHit === 1) game.debugStats.powerHitRequested++;
+    }
+
     return out.action;
-  }
+}
 }

@@ -104,7 +104,19 @@ export class PpoPolicyV1 {
     this.kind = 'ppo_policy_v1';
     this.featureLen = Math.max(1, (opts.featureLen ?? 16) | 0);
 
-    this.hidden1 = Math.max(1, (opts.hidden1 ?? 64) | 0);
+    
+
+    // debug/diagnostics counters (for training stability)
+    this.debug = {
+      nanFeatures: 0,
+      invalidFeatureSteps: 0,
+      forcedIdle: 0,
+      forcedIdleNoAct: 0,
+      forcedIdleLying: 0,
+      forcedIdleDiving: 0,
+      powerHitSampled: 0,
+    };
+this.hidden1 = Math.max(1, (opts.hidden1 ?? 64) | 0);
     this.hidden2 = Math.max(1, (opts.hidden2 ?? 64) | 0);
     this.activation = (opts.activation === 'linear') ? 'linear' : 'tanh';
 
@@ -201,40 +213,89 @@ export class PpoPolicyV1 {
     const opp = obs?.opp ?? {};
     const ball = obs?.ball ?? {};
 
-    // Expected normalized inputs from getObservation():
-    // positions in [-1,1], velocities roughly [-1,1] after clip/scale.
+    // Expanded feature vector (default 24):
+    // 0  me.x
+    // 1  me.y
+    // 2  me.yV
+    // 3  me.isAir
+    // 4  me.isDiving
+    // 5  me.isLying
+    // 6  me.canAct
+    // 7  me.stateNorm (0..1)
+    // 8  opp.x
+    // 9  opp.y
+    // 10 opp.yV
+    // 11 opp.isAir
+    // 12 opp.isDiving
+    // 13 opp.isLying
+    // 14 ball.x
+    // 15 ball.y
+    // 16 ball.xV
+    // 17 ball.yV
+    // 18 ball.landingX
+    // 19 ball.timeToLand
+    // 20 ball.isPowerHit
+    // 21 me.divingDirNorm (-1..1)
+    // 22 opp.stateNorm (0..1)
+    // 23 me.isServe (0/1) if provided else 0
     const f = new Float32Array(this.featureLen);
 
-    // 0..3 me
-    // Note: getObservation() provides {x, y, yV, ...} (no xV for players).
+    const meState = Number(me.state ?? 0);
+    const oppState = Number(opp.state ?? 0);
+
+    // Booleans are encoded as 0/1.
+    const meIsLying = !!me.isLying || (Number(me.lying ?? 0) > 0) || meState === 4;
+    const meIsDiving = !!me.isDiving || meState === 3;
+    const meCanAct = (me.canAct !== undefined) ? !!me.canAct : (!meIsLying && !meIsDiving);
+    const meIsAir = (me.isAir !== undefined) ? !!me.isAir : (meState === 1 || meState === 2);
+
+    const oppIsLying = !!opp.isLying || (Number(opp.lying ?? 0) > 0) || oppState === 4;
+    const oppIsDiving = !!opp.isDiving || oppState === 3;
+    const oppIsAir = (opp.isAir !== undefined) ? !!opp.isAir : (oppState === 1 || oppState === 2);
+
+    // Fill (guarded)
     f[0] = Number(me.x ?? 0);
     f[1] = Number(me.y ?? 0);
-    f[2] = 0;
-    f[3] = Number(me.yV ?? me.yv ?? 0);
+    f[2] = Number(me.yV ?? me.yv ?? 0);
+    f[3] = meIsAir ? 1 : 0;
+    f[4] = meIsDiving ? 1 : 0;
+    f[5] = meIsLying ? 1 : 0;
+    f[6] = meCanAct ? 1 : 0;
+    f[7] = Math.max(0, Math.min(1, meState / 4));
 
-    // 4..7 opp
-    f[4] = Number(opp.x ?? 0);
-    f[5] = Number(opp.y ?? 0);
-    f[6] = 0;
-    f[7] = Number(opp.yV ?? opp.yv ?? 0);
+    f[8] = Number(opp.x ?? 0);
+    f[9] = Number(opp.y ?? 0);
+    f[10] = Number(opp.yV ?? opp.yv ?? 0);
+    f[11] = oppIsAir ? 1 : 0;
+    f[12] = oppIsDiving ? 1 : 0;
+    f[13] = oppIsLying ? 1 : 0;
 
-    // 8..11 ball
-    // getObservation() provides ball.xV/ball.yV (camel-case V).
-    f[8] = Number(ball.x ?? 0);
-    f[9] = Number(ball.y ?? 0);
-    f[10] = Number(ball.xV ?? ball.xv ?? 0);
-    f[11] = Number(ball.yV ?? ball.yv ?? 0);
+    f[14] = Number(ball.x ?? 0);
+    f[15] = Number(ball.y ?? 0);
+    f[16] = Number(ball.xV ?? ball.xv ?? 0);
+    f[17] = Number(ball.yV ?? ball.yv ?? 0);
+    f[18] = Number(ball.landingX ?? ball.expectedX ?? 0);
+    f[19] = Number(ball.timeToLand ?? 0);
+    f[20] = (ball.isPowerHit !== undefined) ? (ball.isPowerHit ? 1 : 0) : 0;
 
-    // 12..13 prediction helpers (ball)
-    // landingX: expected landing x in player-centric coords ([-1,1])
-    // timeToLand: normalized frames until landing (0..1)
-    f[12] = Number((ball.landingX ?? ball.expectedX ?? 0));
-    f[13] = Number((ball.timeToLand ?? 0));
+    // divingDir is typically -1/0/1 (player-centric). Clamp to [-1,1].
+    const dd = Number(me.divingDir ?? 0);
+    f[21] = Math.max(-1, Math.min(1, dd));
 
-    // 14..15 helper signals (agent)
-    // serve / canAct like flags (if missing, 0)
-    f[14] = (me.canAct !== undefined) ? (me.canAct ? 1 : 0) : 0;
-    f[15] = (me.isServe !== undefined) ? (me.isServe ? 1 : 0) : 0;
+    f[22] = Math.max(0, Math.min(1, oppState / 4));
+    f[23] = (me.isServe !== undefined) ? (me.isServe ? 1 : 0) : 0;
+
+    // NaN/Inf guard: replace with 0 and count.
+    let invalid = false;
+    for (let i = 0; i < this.featureLen; i++) {
+      const v = f[i];
+      if (!Number.isFinite(v)) {
+        invalid = true;
+        this.debug.nanFeatures++;
+        f[i] = 0;
+      }
+    }
+    if (invalid) this.debug.invalidFeatureSteps++;
     return f;
   }
 
@@ -302,7 +363,7 @@ export class PpoPolicyV1 {
   _maskedProbs(logitsX, logitsY, logitsP, obs) {
     const me = obs?.me ?? {};
     const state = Number(me.state ?? 0);
-    const isLying = !!me.isLying || (Number(me.lying ?? 0) > 0) || state === 4;
+    const isLying = !!me.isLying || state === 4;
     const isDiving = !!me.isDiving || state === 3;
     const canAct = (me.canAct !== undefined) ? !!me.canAct : (!isLying && !isDiving);
     const isAir = (me.isAir !== undefined) ? !!me.isAir : (state === 1 || state === 2);
@@ -357,17 +418,21 @@ export class PpoPolicyV1 {
 
     const me = obs?.me ?? {};
     const state = Number(me.state ?? 0);
-    const isLying = !!me.isLying || (Number(me.lying ?? 0) > 0) || state === 4;
+    const isLying = !!me.isLying || state === 4;
     const isDiving = !!me.isDiving || state === 3;
     const canAct = (me.canAct !== undefined) ? !!me.canAct : (!isLying && !isDiving);
     const isAir = (me.isAir !== undefined) ? !!me.isAir : (state === 1 || state === 2);
 
     if (!canAct || isLying || isDiving) {
+      this.debug.forcedIdle++;
+      if (!canAct) this.debug.forcedIdleNoAct++;
+      if (isLying) this.debug.forcedIdleLying++;
+      if (isDiving) this.debug.forcedIdleDiving++;
       return {
         action: { xDirection: 0, yDirection: 0, powerHit: 0 },
         logp: 0,
         value: 0,
-        meta: { forcedIdle: true },
+        meta: { forcedIdle: true, reason: (!canAct ? 'noAct' : (isLying ? 'lying' : 'diving')) },
       };
     }
 
@@ -383,7 +448,9 @@ export class PpoPolicyV1 {
       const ay = ayChoices[(Math.random() * ayChoices.length) | 0];
       const ap = powerHit ? 1 : 0;
 
-      const logp = logProbFromProbs(px, ax) + logProbFromProbs(py, ay) + logProbFromProbs(pp, ap);
+      if (ap === 1) this.debug.powerHitSampled++;
+
+    const logp = logProbFromProbs(px, ax) + logProbFromProbs(py, ay) + logProbFromProbs(pp, ap);
       return {
         action: { xDirection: mapClassToXDir(ax), yDirection: mapClassToYDir(ay), powerHit },
         logp,
