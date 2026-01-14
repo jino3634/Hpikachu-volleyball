@@ -1,7 +1,7 @@
 // ui_model_io.js
 'use strict';
 
-import { downloadBlob } from './storage/export_import_helpers.js';
+import { downloadBlob } from './export_import_helpers.js';
 
 export async function bindModelIO(agent, {
   exportBtnId,
