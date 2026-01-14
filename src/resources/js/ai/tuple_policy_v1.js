@@ -265,10 +265,24 @@ export class TuplePolicyV1 {
     return out;
   }
 
-  /**
-   * Deterministic (argmax) input
+    /**
+   * Deterministic (argmax) input with action validity masking.
+   * - Ground: forbid y=+1 (POWER_DOWN)
+   * - If lying/diving/can't act: force IDLE
+   * - If ground & powerHit=1: forbid x=0 (force dive direction)
    */
   actDeterministic(obs, playerIndex) {
+    const me = obs?.me ?? {};
+    const state = Number(me.state ?? 0);
+    const isLying = !!me.isLying || (Number(me.lying ?? 0) > 0) || state === 4;
+    const isDiving = !!me.isDiving || state === 3;
+    const canAct = (me.canAct !== undefined) ? !!me.canAct : (!isLying && !isDiving);
+    const isAir = (me.isAir !== undefined) ? !!me.isAir : (state === 1 || state === 2);
+
+    if (!canAct || isLying || isDiving) {
+      return { xDirection: 0, yDirection: 0, powerHit: 0 };
+    }
+
     const feat = this.buildFeatures(obs, playerIndex);
     const { h2 } = this._forward(feat);
 
@@ -276,51 +290,111 @@ export class TuplePolicyV1 {
     const ly = this._logitsHead(this.Wy, this.by, h2);
     const lp = this._logitsHead(this.Wp, this.bp, h2);
 
-    let ax = 0, ay = 0, ap = 0;
-    for (let i = 1; i < 3; i++) if (lx[i] > lx[ax]) ax = i;
-    for (let i = 1; i < 3; i++) if (ly[i] > ly[ay]) ay = i;
+    // Choose powerHit first (argmax)
+    let ap = 0;
     for (let i = 1; i < 2; i++) if (lp[i] > lp[ap]) ap = i;
+    const powerHit = ap | 0;
+
+    // X selection (mask x=0 if ground & powerHit=1 to avoid wasted "power only")
+    let ax = 0;
+    if (!isAir && powerHit === 1) {
+      // argmax among classes {0,2} -> xDir {-1,+1}
+      ax = (lx[2] > lx[0]) ? 2 : 0;
+    } else {
+      for (let i = 1; i < 3; i++) if (lx[i] > lx[ax]) ax = i;
+    }
+
+    // Y selection (mask y=+1 on ground)
+    let ay = 0;
+    if (!isAir) {
+      // choose among {0,1} -> yDir {-1,0}
+      ay = (ly[1] > ly[0]) ? 1 : 0;
+    } else {
+      for (let i = 1; i < 3; i++) if (ly[i] > ly[ay]) ay = i;
+    }
 
     return {
       xDirection: mapClassToXDir(ax),
       yDirection: mapClassToYDir(ay),
-      powerHit: ap | 0,
+      powerHit,
     };
   }
 
   /**
-   * Stochastic input (softmax sampling + epsilon random)
+   * Stochastic input (softmax sampling + epsilon random) with action validity masking.
+   * - Ground: forbid y=+1 (POWER_DOWN)
+   * - If lying/diving/can't act: force IDLE
+   * - If ground & powerHit=1: forbid x=0 (force dive direction)
    */
   actStochastic(obs, playerIndex) {
+    const me = obs?.me ?? {};
+    const state = Number(me.state ?? 0);
+    const isLying = !!me.isLying || (Number(me.lying ?? 0) > 0) || state === 4;
+    const isDiving = !!me.isDiving || state === 3;
+    const canAct = (me.canAct !== undefined) ? !!me.canAct : (!isLying && !isDiving);
+    const isAir = (me.isAir !== undefined) ? !!me.isAir : (state === 1 || state === 2);
+
+    if (!canAct || isLying || isDiving) {
+      return { xDirection: 0, yDirection: 0, powerHit: 0 };
+    }
+
+    const randChoice = (arr) => arr[(Math.random() * arr.length) | 0];
+
+    // epsilon random (but still valid)
     if (Math.random() < this.epsilon) {
-      const ax = (Math.random() * 3) | 0;
-      const ay = (Math.random() * 3) | 0;
-      const ap = (Math.random() * 2) | 0;
+      const powerHit = randChoice([0, 1]);
+      const xClasses = (!isAir && powerHit === 1) ? [0, 2] : [0, 1, 2];
+      const yClasses = (!isAir) ? [0, 1] : [0, 1, 2];
+      const ax = randChoice(xClasses);
+      const ay = randChoice(yClasses);
       return {
         xDirection: mapClassToXDir(ax),
         yDirection: mapClassToYDir(ay),
-        powerHit: ap,
+        powerHit,
       };
     }
 
     const feat = this.buildFeatures(obs, playerIndex);
     const { h2 } = this._forward(feat);
+
     const px = softmax(Array.from(this._logitsHead(this.Wx, this.bx, h2)));
     const py = softmax(Array.from(this._logitsHead(this.Wy, this.by, h2)));
     const pp = softmax(Array.from(this._logitsHead(this.Wp, this.bp, h2)));
 
-    const ax = sampleCategorical(px);
-    const ay = sampleCategorical(py);
-    const ap = sampleCategorical(pp);
+    // sample powerHit first
+    const powerHit = sampleCategorical(pp);
+
+    // sample x with mask if needed
+    let ax = 0;
+    if (!isAir && powerHit === 1) {
+      // normalize probabilities over {0,2}
+      const a0 = px[0], a2 = px[2];
+      const s = a0 + a2;
+      const r = Math.random() * (s > 0 ? s : 1);
+      ax = (r < a0) ? 0 : 2;
+    } else {
+      ax = sampleCategorical(px);
+    }
+
+    // sample y with ground mask (forbid +1)
+    let ay = 0;
+    if (!isAir) {
+      const a0 = py[0], a1 = py[1];
+      const s = a0 + a1;
+      const r = Math.random() * (s > 0 ? s : 1);
+      ay = (r < a0) ? 0 : 1;
+    } else {
+      ay = sampleCategorical(py);
+    }
 
     return {
       xDirection: mapClassToXDir(ax),
       yDirection: mapClassToYDir(ay),
-      powerHit: ap,
+      powerHit,
     };
   }
 
-  /**
+/**
    * Supervised/RL-lite update for one sample.
    * sign=+1 강화, sign=-1 억제
    * @param {Float32Array} feat
