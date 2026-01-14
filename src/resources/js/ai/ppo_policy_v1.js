@@ -206,22 +206,24 @@ export class PpoPolicyV1 {
     const f = new Float32Array(this.featureLen);
 
     // 0..3 me
+    // Note: getObservation() provides {x, y, yV, ...} (no xV for players).
     f[0] = Number(me.x ?? 0);
     f[1] = Number(me.y ?? 0);
-    f[2] = Number(me.xv ?? 0);
-    f[3] = Number(me.yv ?? 0);
+    f[2] = 0;
+    f[3] = Number(me.yV ?? me.yv ?? 0);
 
     // 4..7 opp
     f[4] = Number(opp.x ?? 0);
     f[5] = Number(opp.y ?? 0);
-    f[6] = Number(opp.xv ?? 0);
-    f[7] = Number(opp.yv ?? 0);
+    f[6] = 0;
+    f[7] = Number(opp.yV ?? opp.yv ?? 0);
 
     // 8..11 ball
+    // getObservation() provides ball.xV/ball.yV (camel-case V).
     f[8] = Number(ball.x ?? 0);
     f[9] = Number(ball.y ?? 0);
-    f[10] = Number(ball.xv ?? 0);
-    f[11] = Number(ball.yv ?? 0);
+    f[10] = Number(ball.xV ?? ball.xv ?? 0);
+    f[11] = Number(ball.yV ?? ball.yv ?? 0);
 
     // 12..13 prediction helpers (ball)
     // landingX: expected landing x in player-centric coords ([-1,1])
@@ -233,7 +235,7 @@ export class PpoPolicyV1 {
     // serve / canAct like flags (if missing, 0)
     f[14] = (me.canAct !== undefined) ? (me.canAct ? 1 : 0) : 0;
     f[15] = (me.isServe !== undefined) ? (me.isServe ? 1 : 0) : 0;
-return f;
+    return f;
   }
 
   _forward(feat) {
@@ -739,6 +741,20 @@ return f;
       -logProbFromProbs(ev.py, ay) +
       -logProbFromProbs(ev.pp, ap);
 
+    // Predicted classes (for logging/diagnostics)
+    const argmax = (arr) => {
+      let mi = 0;
+      let mv = arr?.[0] ?? -Infinity;
+      for (let i = 1; i < (arr?.length ?? 0); i++) {
+        const v = arr[i];
+        if (v > mv) { mv = v; mi = i; }
+      }
+      return mi;
+    };
+    const predAx = argmax(ev.px);
+    const predAy = argmax(ev.py);
+    const predAp = argmax(ev.pp);
+
     // Backprop through existing policy-gradient accumulator:
     // For CE loss L = -log p(a), dL/dlogp = -1
     const g = this._zeroGrads();
@@ -748,7 +764,7 @@ return f;
     const lr = (this.imitationLr !== undefined) ? Number(this.imitationLr) : (this.lrActor ?? this.lr);
     this._applyGrads(g, lr);
 
-    return { loss: nll };
+    return { loss: nll, ax: predAx, ay: predAy, ap: predAp };
   }
 
   saveState() {
