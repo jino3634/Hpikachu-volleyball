@@ -367,27 +367,33 @@ export class OnePointEpisodeRunner {
       // Only create decisionInfo if we actually sampled a decision this frame.
       const decisionInfo = (canAct && hasChooseInput && agent && agent.lastDecision)
         ? {
-          logp: agent.lastDecision.logp ?? 0,
-          value: agent.lastDecision.value ?? 0,
-          forcedIdle: !!agent.lastDecision?.meta?.forcedIdle,
-          forcedIdleReason: agent.lastDecision?.meta?.reason ?? null,
-        }
+            logp: agent.lastDecision.logp,
+            value: agent.lastDecision.value,
+            forcedIdle: !!agent.lastDecision?.meta?.forcedIdle,
+            forcedIdleReason: agent.lastDecision?.meta?.reason ?? null,
+          }
         : null;
 
-      // Skip *all* forcedIdle steps from learning transitions (reason-agnostic).
-      const skip = !!(decisionInfo && decisionInfo.forcedIdle);
+      // 1) no decisionInfo => cannot be used by PPO, so skip creating a transition
+      if (!decisionInfo) {
+        // (optional) you can count it: skippedNoDecisionInfo++
+      } else {
+        // 2) forcedIdle => skip (reason-agnostic)
+        const skip = !!decisionInfo.forcedIdle;
 
-      if (!skip) {
-        builder.addStep({
-          t: frames,
-          obs,
-          action: hasChooseInput ? inputTuple : (aLearn | 0),
-          nextObs,
-          done: false,
-          info: decisionInfo,
-          roundEvents: ev,
-        });
+        if (!skip) {
+          builder.addStep({
+            t: frames,
+            obs,
+            action: inputTuple,     // PPO path should be tuple-based
+            nextObs,
+            done: false,
+            info: decisionInfo,     // always non-null here
+            roundEvents: ev,
+          });
+        }
       }
+
       // Note: when canAct=false, decisionInfo=null, and we also never sampled action.
       // We still advance the game, but we do not train on this frame and do not count a decision.
 

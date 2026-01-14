@@ -712,11 +712,12 @@ export class Trainer {
           const transitions = res.episode.transitions ?? [];
           this.learnDiag.episodes++;
           this.learnDiag.transitions += transitions.length;
+            let skippedNoInfo = 0;
+            let skippedBadFields = 0;
           for (const tr of transitions) {
-            const info = tr.info ?? {};
-            // For PPO we need old log-prob and value from the moment we acted.
-            if (!info) { this.learnDiag.skippedNoInfo++; continue; }
-             if (typeof info.logp !== 'number' || typeof info.value !== 'number') { this.learnDiag.skippedBadFields++; continue; }
+            const info = tr.info; // keep null/undefined as-is
+            if (!info) { skippedNoInfo++; continue; }
+            if (typeof info.logp !== 'number' || typeof info.value !== 'number') { skippedBadFields++; continue; }
 
             const me = tr.obs?.me ?? {};
              const st = Number(me.state ?? 0);
