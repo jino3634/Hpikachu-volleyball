@@ -250,35 +250,41 @@ export class OnePointEpisodeRunner {
       const obs2 = this.game.getObservation(2);
       const obs = (this.learningPlayer === 1) ? obs1 : obs2;
 
+      // If cannot act (lying/diving/etc), skip *decision sampling itself*.
+      // (obs.me.canAct is produced by getObservation() and is 0 when state > 3)
+      const canAct = !(obs && obs.me && obs.me.canAct === 0);
+
       // action: prefer tuple-based API
       let aLearn = 0;
       let inputTuple = { xDirection: 0, yDirection: 0, powerHit: 0 };
-      try {
-        if (hasChooseInput) {
-          inputTuple = agent.chooseInput(obs, this.learningPlayer, this.game) || inputTuple;
-        } else {
-          // Backward-compatible: some agents implement chooseAction(obs, playerIndex, game),
-          // others implement chooseAction(physics, playerIndex, game). Try obs first, then physics.
-          try {
-            aLearn = agent.chooseAction(obs, this.learningPlayer, this.game);
-          } catch (_) {
-            aLearn = undefined;
-          }
-          if (typeof aLearn !== 'number') {
+
+      if (canAct) {
+        try {
+          if (hasChooseInput) {
+            inputTuple = agent.chooseInput(obs, this.learningPlayer, this.game) || inputTuple;
+          } else {
+            // Backward-compatible: some agents implement chooseAction(obs, playerIndex, game),
+            // others implement chooseAction(physics, playerIndex, game). Try obs first, then physics.
             try {
-              aLearn = agent.chooseAction(this.game.physics, this.learningPlayer, this.game);
+              aLearn = agent.chooseAction(obs, this.learningPlayer, this.game);
             } catch (_) {
-              aLearn = 0;
+              aLearn = undefined;
             }
+            if (typeof aLearn !== 'number') {
+              try {
+                aLearn = agent.chooseAction(this.game.physics, this.learningPlayer, this.game);
+              } catch (_) {
+                aLearn = 0;
+              }
+            }
+            aLearn = (aLearn | 0);
           }
-          // map actionId -> tuple if helper exists
-          if (typeof this.game._actionIdToInputTuple === 'function') {
-            inputTuple = this.game._actionIdToInputTuple(aLearn | 0);
-          }
+        } catch (_) {
+          // keep defaults
         }
-      } catch (_) {
-        // keep defaults
       }
+      // else: leave inputTuple neutral (0,0,0) and do NOT call agent at all
+
 
       // opponent is builtin (externalEnabled=false) so we only inject learning side
       const p1Input = (this.learningPlayer === 1) ? inputTuple : { xDirection: 0, yDirection: 0, powerHit: 0 };
@@ -358,7 +364,8 @@ export class OnePointEpisodeRunner {
       }
 
       // builder step (reward는 builder가 roundEvents로 내부 계산)
-      const decisionInfo = (hasChooseInput && agent && agent.lastDecision)
+      // Only create decisionInfo if we actually sampled a decision this frame.
+      const decisionInfo = (canAct && hasChooseInput && agent && agent.lastDecision)
         ? {
           logp: agent.lastDecision.logp ?? 0,
           value: agent.lastDecision.value ?? 0,
@@ -367,9 +374,9 @@ export class OnePointEpisodeRunner {
         }
         : null;
 
-      // If the policy was forced to idle (cannot act), do NOT add this step into
-      // learning transitions. These samples are mostly noise and can destabilize PPO.
-      const skip = (decisionInfo && decisionInfo.forcedIdle && (decisionInfo.forcedIdleReason === "noAct"));
+      // Skip *all* forcedIdle steps from learning transitions (reason-agnostic).
+      const skip = !!(decisionInfo && decisionInfo.forcedIdle);
+
       if (!skip) {
         builder.addStep({
           t: frames,
@@ -381,6 +388,11 @@ export class OnePointEpisodeRunner {
           roundEvents: ev,
         });
       }
+      // Note: when canAct=false, decisionInfo=null, and we also never sampled action.
+      // We still advance the game, but we do not train on this frame and do not count a decision.
+
+
+
 
       frames++;
 
