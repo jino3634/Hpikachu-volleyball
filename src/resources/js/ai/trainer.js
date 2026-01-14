@@ -488,7 +488,15 @@ export class Trainer {
         const lp = (s?.label?.powerHit ?? 0);
         if (lx === -1 || lx === 0 || lx === 1) histX[String(lx)]++; else histX.invalid++;
         if (ly === -1 || ly === 0 || ly === 1) histY[String(ly)]++; else histY.invalid++;
-        if (lp === 0 || lp === 1 || lp === true || lp === false) histP[String(Number(!!lp))]++; else histP.invalid++;
+        // Normalize lp to 0/1 if possible, otherwise mark invalid.
+        // Avoid boolean comparisons because TS may infer lp as number-only.
+        const lpNum = (lp === 0 || lp === 1) ? lp : Number.isFinite(Number(lp)) ? (Number(lp) ? 1 : 0) : -1;
+
+        if (lpNum === 0 || lpNum === 1) histP[String(lpNum)]++;
+        else histP.invalid++;
+
+        if (lpNum === 0 || lpNum === 1) histP[String(lpNum)]++;
+        else histP.invalid++;
       }
       logDebug(`[WARMUP-DIST] xDir(-1,0,1)=${histX['-1']},${histX['0']},${histX['1']} invalid=${histX.invalid}`);
       logDebug(`[WARMUP-DIST] yDir(-1,0,1)=${histY['-1']},${histY['0']},${histY['1']} invalid=${histY.invalid}`);
@@ -819,14 +827,17 @@ export class Trainer {
             this.policy.debug.lastUpdate = null;
 
           }
-          if (this.game && this.game.debugStats) {
-            logDebug(`[GAME-DIAG] decisions=${this.game.debugStats.decisions} forcedIdle=${this.game.debugStats.forcedIdle} powerHitReq=${this.game.debugStats.powerHitRequested} powerHitApplied=${this.game.debugStats.powerHitApplied}`);
-              const req = this.game.debugStats.powerHitRequested; const app = this.game.debugStats.powerHitApplied;
-              if (req > 0) logDebug(`[ACTION-EFFECTIVE] powerHitAppliedRate=${(app/req).toFixed(4)}`);
-            this.game.debugStats.decisions = 0;
-            this.game.debugStats.forcedIdle = 0;
-            this.game.debugStats.powerHitRequested = 0;
-            this.game.debugStats.powerHitApplied = 0;
+          const gameAny = /** @type {any} */ (this.game);
+          if (gameAny && gameAny.debugStats) {
+            const ds = gameAny.debugStats;
+            logDebug(`[GAME-DIAG] decisions=${ds.decisions} forcedIdle=${ds.forcedIdle} powerHitReq=${ds.powerHitRequested} powerHitApplied=${ds.powerHitApplied}`);
+            const req = ds.powerHitRequested;
+            const app = ds.powerHitApplied;
+            if (req > 0) logDebug(`[ACTION-EFFECTIVE] powerHitAppliedRate=${(app / req).toFixed(4)}`);
+            ds.decisions = 0;
+            ds.forcedIdle = 0;
+            ds.powerHitRequested = 0;
+            ds.powerHitApplied = 0;
           }
           }
         } else {
@@ -1163,12 +1174,14 @@ _buildPointReplay(res) {
             this.policy.debug.lastUpdate = null;
 
       }
-      if (this.game && this.game.debugStats) {
-        logDebug(`[GAME-DIAG] decisions=${this.game.debugStats.decisions} forcedIdle=${this.game.debugStats.forcedIdle} powerHitReq=${this.game.debugStats.powerHitRequested} powerHitApplied=${this.game.debugStats.powerHitApplied}`);
-        this.game.debugStats.decisions = 0;
-        this.game.debugStats.forcedIdle = 0;
-        this.game.debugStats.powerHitRequested = 0;
-        this.game.debugStats.powerHitApplied = 0;
+      const gameAny2 = /** @type {any} */ (this.game);
+      if (gameAny2 && gameAny2.debugStats) {
+        const ds = gameAny2.debugStats;
+        logDebug(`[GAME-DIAG] decisions=${ds.decisions} forcedIdle=${ds.forcedIdle} powerHitReq=${ds.powerHitRequested} powerHitApplied=${ds.powerHitApplied}`);
+        ds.decisions = 0;
+        ds.forcedIdle = 0;
+        ds.powerHitRequested = 0;
+        ds.powerHitApplied = 0;
       }
       if (!force) break;
       if (this.rollout.length < this.minRolloutToUpdate) break;

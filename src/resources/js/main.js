@@ -366,7 +366,8 @@ function createTrainingControlPanel({ trainer, ticker }) {
 
   btnDlLog.onclick = () => {
     try {
-      if (window.downloadDebugLog) window.downloadDebugLog();
+      const w = /** @type {any} */ (window);
+      if (w.downloadDebugLog) w.downloadDebugLog();
       else console.log('[DEBUG] downloadDebugLog not found on window');
     } catch (e) {
       console.log('[DEBUG] downloadDebugLog failed', e);
@@ -375,7 +376,8 @@ function createTrainingControlPanel({ trainer, ticker }) {
 
   btnClrLog.onclick = () => {
     try {
-      if (window.clearDebugLog) window.clearDebugLog();
+      const w = /** @type {any} */ (window);
+      if (w.clearDebugLog) w.clearDebugLog();
       else console.log('[DEBUG] clearDebugLog not found on window');
     } catch (e) {
       console.log('[DEBUG] clearDebugLog failed', e);
