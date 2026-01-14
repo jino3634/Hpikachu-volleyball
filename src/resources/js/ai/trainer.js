@@ -495,11 +495,14 @@ export class Trainer {
         for (let k = i; k < end; k++) {
           const s = samples[idx[k]];
           const feat = this.policy.buildFeatures(s.obs, this.learningPlayer);
+          // NOTE: policy implementation may expose warmup helper methods that are not declared in typings.
+          // Cast to any to keep type-checking happy while preserving runtime behavior.
+          const policyAny = /** @type {any} */ (this.policy);
           let r;
-          if (typeof this.policy.updateImitationSample === 'function') {
-            r = this.policy.updateImitationSample(s.obs, this.learningPlayer, s.label);
+          if (typeof policyAny.updateImitationSample === 'function') {
+            r = policyAny.updateImitationSample(s.obs, this.learningPlayer, s.label);
           } else {
-            r = this.policy.updateImitation(feat, s.label);
+            r = policyAny.updateImitation(feat, s.label);
           }
 
           lossSum += r.loss;
@@ -734,7 +737,8 @@ _flushBatch(allRemaining = false) {
   let updatedTotal = 0;
   for (const item of batch) {
     try {
-      const out = this.policy.learnFromEpisode(item.episode);
+      const policyAny = /** @type {any} */ (this.policy);
+      const out = policyAny.learnFromEpisode(item.episode);
       if (out && typeof out.updated === 'number') updatedTotal += out.updated;
     } catch (e) {
       console.warn('[BATCH] learnFromEpisode failed; skip item', e);

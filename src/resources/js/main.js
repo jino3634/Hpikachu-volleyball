@@ -403,7 +403,8 @@ function createTrainingControlPanel({ trainer, ticker }) {
   btnLoadWarm.onclick = () => warmupInput.click();
 
   warmupInput.onchange = async (e) => {
-    const file = e.target.files?.[0];
+    const input = /** @type {HTMLInputElement} */ (e.target);
+    const file = input.files?.[0];
     if (!file) return;
     try {
       const txt = await file.text();
@@ -415,7 +416,7 @@ function createTrainingControlPanel({ trainer, ticker }) {
       console.error(err);
       alert('Load warmup snapshot failed: ' + (err?.message ?? String(err)));
     } finally {
-      e.target.value = '';
+      input.value = '';
     }
   };
 

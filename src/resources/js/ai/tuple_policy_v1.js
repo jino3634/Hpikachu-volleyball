@@ -151,6 +151,7 @@ export class TuplePolicyV1 {
     // MLP sizes
     this.hidden1 = Math.max(1, (opts.hidden1 ?? 64) | 0);
     this.hidden2 = Math.max(1, (opts.hidden2 ?? 64) | 0);
+    /** @type {'tanh'|'linear'} */
     this.activation = (opts.activation === 'linear') ? 'linear' : 'tanh';
 
     // trunk
@@ -741,5 +742,6 @@ function sanitizeAction(action, obs, phase) {
       if (action.xDirection === 0) action.xDirection = Math.random()<0.5?-1:1;
     }
   }
-  return sanitizeAction(action, obs, phaseInDecisionInterval);
+  // IMPORTANT: do not recurse here. At this point constraints are applied.
+  return action;
 }
