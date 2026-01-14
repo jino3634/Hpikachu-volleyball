@@ -257,7 +257,20 @@ export class OnePointEpisodeRunner {
         if (hasChooseInput) {
           inputTuple = agent.chooseInput(obs, this.learningPlayer, this.game) || inputTuple;
         } else {
-          aLearn = agent.chooseAction(obs, this.learningPlayer, this.game);
+          // Backward-compatible: some agents implement chooseAction(obs, playerIndex, game),
+          // others implement chooseAction(physics, playerIndex, game). Try obs first, then physics.
+          try {
+            aLearn = agent.chooseAction(obs, this.learningPlayer, this.game);
+          } catch (_) {
+            aLearn = undefined;
+          }
+          if (typeof aLearn !== 'number') {
+            try {
+              aLearn = agent.chooseAction(this.game.physics, this.learningPlayer, this.game);
+            } catch (_) {
+              aLearn = 0;
+            }
+          }
           // map actionId -> tuple if helper exists
           if (typeof this.game._actionIdToInputTuple === 'function') {
             inputTuple = this.game._actionIdToInputTuple(aLearn | 0);

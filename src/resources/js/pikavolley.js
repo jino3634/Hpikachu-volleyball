@@ -160,20 +160,30 @@ export class PikachuVolleyball {
   }
 
   _actionIdToInputTuple(actionId) {
-    // NOTE: This mapping is kept for backward compatibility only.
-    // New agents should output {xDirection, yDirection, powerHit} directly.
+    // NOTE:
+    // - This mapping is for backward compatibility (actionId-based agents).
+    // - Keep it consistent with src/resources/js/ai/agents.js ACTION enum (0..14).
+    // - New agents should output {xDirection, yDirection, powerHit} directly.
     let x = 0, y = 0, p = 0;
     switch (actionId | 0) {
-      case 0: break;                 // IDLE
-      case 1: x = -1; break;         // LEFT
-      case 2: x = 1; break;          // RIGHT
-      case 3: y = -1; break;         // JUMP
-      case 4: x = -1; y = -1; break; // JUMP_LEFT
-      case 5: x = 1; y = -1; break;  // JUMP_RIGHT
+      case 0: break;                         // IDLE
+      case 1: x = -1; break;                 // LEFT
+      case 2: x = 1; break;                  // RIGHT
+      case 3: y = -1; break;                 // JUMP
+      case 4: x = -1; y = -1; break;         // JUMP_LEFT
+      case 5: x = 1; y = -1; break;          // JUMP_RIGHT
+
       case 6: p = 1; break;                  // POWER_NEUTRAL
       case 7: x = -1; p = 1; break;          // POWER_LEFT
       case 8: x = 1; p = 1; break;           // POWER_RIGHT
-      case 9: y = 1; p = 1; break;           // POWER_DOWN (air only)
+
+      case 9: y = -1; p = 1; break;          // POWER_UP
+      case 10: x = -1; y = -1; p = 1; break; // POWER_UP_LEFT
+      case 11: x = 1; y = -1; p = 1; break;  // POWER_UP_RIGHT
+
+      case 12: y = 1; p = 1; break;          // POWER_DOWN (air only)
+      case 13: x = -1; y = 1; p = 1; break;  // POWER_DOWN_LEFT
+      case 14: x = 1; y = 1; p = 1; break;   // POWER_DOWN_RIGHT
       default: break;
     }
     return { xDirection: x, yDirection: y, powerHit: p };
@@ -255,7 +265,22 @@ export class PikachuVolleyball {
           if (typeof this.agent1.chooseInput === 'function') {
             this._heldInputP1 = this.agent1.chooseInput(obs1, 1, this) || { xDirection: 0, yDirection: 0, powerHit: 0 };
           } else {
-            this._heldActionP1 = (this.agent1.chooseAction(obs1, 1, this) | 0);
+            // Backward-compatible: some agents expect (obs, playerIndex, game),
+            // others expect raw physics only. Try obs first, then fallback to physics.
+            let a1;
+            try {
+              a1 = this.agent1.chooseAction(obs1, 1, this);
+            } catch (_) {
+              a1 = undefined;
+            }
+            if (typeof a1 !== 'number') {
+              try {
+                a1 = this.agent1.chooseAction(this.physics, 1, this);
+              } catch (_) {
+                a1 = 0;
+              }
+            }
+            this._heldActionP1 = (a1 | 0);
             this._heldInputP1 = this._actionIdToInputTuple(this._heldActionP1);
           }
         }
@@ -264,7 +289,22 @@ export class PikachuVolleyball {
           if (typeof this.agent2.chooseInput === 'function') {
             this._heldInputP2 = this.agent2.chooseInput(obs2, 2, this) || { xDirection: 0, yDirection: 0, powerHit: 0 };
           } else {
-            this._heldActionP2 = (this.agent2.chooseAction(obs2, 2, this) | 0);
+            // Backward-compatible: some agents expect (obs, playerIndex, game),
+            // others expect raw physics only. Try obs first, then fallback to physics.
+            let a2;
+            try {
+              a2 = this.agent2.chooseAction(obs2, 2, this);
+            } catch (_) {
+              a2 = undefined;
+            }
+            if (typeof a2 !== 'number') {
+              try {
+                a2 = this.agent2.chooseAction(this.physics, 2, this);
+              } catch (_) {
+                a2 = 0;
+              }
+            }
+            this._heldActionP2 = (a2 | 0);
             this._heldInputP2 = this._actionIdToInputTuple(this._heldActionP2);
           }
         }
@@ -903,7 +943,8 @@ export class PikachuVolleyball {
 
   /**
    * 외부 에이전트 연결
-   * agent는 chooseAction(obs, playerIndex, game) 메서드만 있으면 됨.
+   * agent는 chooseInput(obs, playerIndex, game) 또는 chooseAction(...)을 제공하면 됨.
+   * chooseAction은 (obs, playerIndex, game) 또는 (physics, playerIndex, game) 형태를 모두 허용한다.
    */
   setAgents(agent1, agent2) {
     this.agent1 = agent1;
