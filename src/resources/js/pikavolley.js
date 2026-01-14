@@ -58,6 +58,12 @@ export class PikachuVolleyball {
       powerHitApplied: 0,
     };
 
+    // Hold powerHit for N frames within a decision interval (default: 2 = full interval)
+    // You can override by setting globalThis.__PPO_POWERHIT_HOLD_FRAMES (e.g., 1 to revert).
+    const holdCfg = (typeof globalThis !== 'undefined') ? globalThis.__PPO_POWERHIT_HOLD_FRAMES : undefined;
+    this.powerHitHoldFrames = (typeof holdCfg === 'number' && isFinite(holdCfg) && holdCfg >= 1) ? (holdCfg | 0) : 2;
+
+
 
     /** @type {number} game fps */
     this.normalFPS = 25;
@@ -204,13 +210,14 @@ export class PikachuVolleyball {
     let y = (inputTuple && typeof inputTuple.yDirection === 'number') ? (inputTuple.yDirection | 0) : 0;
     let p = (inputTuple && typeof inputTuple.powerHit === 'number') ? (inputTuple.powerHit | 0) : 0;
 
-    // powerHit is a 1-frame trigger at the beginning of each decision interval
-    if (p === 1 && phaseInDecisionInterval !== 0) {
+    // powerHit trigger can be held for multiple frames within a decision interval
+    const holdFrames = (typeof this.powerHitHoldFrames === 'number' && this.powerHitHoldFrames >= 1) ? this.powerHitHoldFrames : 1;
+    if (p === 1 && phaseInDecisionInterval >= holdFrames) {
       p = 0;
     }
 
-    // Count applied powerHit triggers (decision-phase 0 only)
-    if (p === 1 && phaseInDecisionInterval === 0 && this.debugStats) {
+    // Count applied powerHit triggers (after holding/masking)
+    if (p === 1 && this.debugStats) {
       this.debugStats.powerHitApplied++;
     }
 // POWER_DOWN style (y=+1) is only meaningful in air

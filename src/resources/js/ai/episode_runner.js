@@ -359,18 +359,27 @@ export class OnePointEpisodeRunner {
 
       // builder step (reward는 builder가 roundEvents로 내부 계산)
       const decisionInfo = (hasChooseInput && agent && agent.lastDecision)
-        ? { logp: agent.lastDecision.logp ?? 0, value: agent.lastDecision.value ?? 0 }
+        ? {
+          logp: agent.lastDecision.logp ?? 0,
+          value: agent.lastDecision.value ?? 0,
+          forcedIdle: !!agent.lastDecision?.meta?.forcedIdle,
+          forcedIdleReason: agent.lastDecision?.meta?.reason ?? null,
+        }
         : null;
 
-      builder.addStep({
-        t: frames,
-        obs,
-        action: hasChooseInput ? inputTuple : (aLearn | 0),
-        nextObs,
-        done: false,
-        info: decisionInfo,
-        roundEvents: ev,
-      });
+      // If the policy was forced to idle (cannot act), do NOT add this step into
+      // learning transitions. These samples are mostly noise and can destabilize PPO.
+      if (!(decisionInfo && decisionInfo.forcedIdle)) {
+        builder.addStep({
+          t: frames,
+          obs,
+          action: hasChooseInput ? inputTuple : (aLearn | 0),
+          nextObs,
+          done: false,
+          info: decisionInfo,
+          roundEvents: ev,
+        });
+      }
 
       frames++;
 

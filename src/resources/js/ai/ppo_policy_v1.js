@@ -361,38 +361,56 @@ this.hidden1 = Math.max(1, (opts.hidden1 ?? 64) | 0);
    * @returns {{px:Float32Array, py:Float32Array, pp:Float32Array}}
    */
   _maskedProbs(logitsX, logitsY, logitsP, obs) {
-    const me = obs?.me ?? {};
-    const state = Number(me.state ?? 0);
-    const isLying = !!me.isLying || state === 4;
-    const isDiving = !!me.isDiving || state === 3;
-    const canAct = (me.canAct !== undefined) ? !!me.canAct : (!isLying && !isDiving);
-    const isAir = (me.isAir !== undefined) ? !!me.isAir : (state === 1 || state === 2);
+  const me = obs?.me ?? {};
+  const state = Number(me.state ?? 0);
+  const isLying = !!me.isLying || state === 4;
+  const isDiving = !!me.isDiving || state === 3;
+  const canAct = (me.canAct !== undefined) ? !!me.canAct : (!isLying && !isDiving);
+  const isAir = (me.isAir !== undefined) ? !!me.isAir : (state === 1 || state === 2);
 
-    // if cannot act, force IDLE effectively
-    if (!canAct || isLying || isDiving) {
-      const px = new Float32Array([0, 1, 0]);
-      const py = new Float32Array([0, 1, 0]);
-      const pp = new Float32Array([1, 0]);
-      return { px, py, pp };
-    }
-
-    const mx = new Float32Array(logitsX);
-    const my = new Float32Array(logitsY);
-    const mp = new Float32Array(logitsP);
-
-    // constraint: if ground & powerHit=1, forbid x=0 (force dive direction)
-    // We'll enforce this later by re-masking x after sampling power=1 on ground.
-    // Here we only restrict y on ground: forbid DOWN (+1). Jump is y=-1.
-    if (!isAir) {
-      // y classes: 0->-1 (jump), 1->0 (idle), 2->+1 (down)
-      my[2] = -1e9;
-    }
-
-    const px0 = softmax(mx);
-    const py0 = softmax(my);
-    const pp0 = softmax(mp);
-    return { px: px0, py: py0, pp: pp0 };
+  // If cannot act at all, force IDLE effectively.
+  if (!canAct) {
+    const px = new Float32Array([0, 1, 0]);
+    const py = new Float32Array([0, 1, 0]);
+    const pp = new Float32Array([1, 0]);
+    return { px, py, pp };
   }
+
+  const mx = new Float32Array(logitsX);
+  const my = new Float32Array(logitsY);
+  const mp = new Float32Array(logitsP);
+
+  // Base constraint: on ground, forbid DOWN (+1). Jump is y=-1.
+  if (!isAir) {
+    // y classes: 0->-1 (jump), 1->0 (idle), 2->+1 (down)
+    my[2] = -1e9;
+  }
+
+  // Soft mask for transient states. Inputs may be ignored by the game, so we:
+  // - Do NOT hard-force IDLE here (keeps gradients / exploration alive)
+  // - Heavily bias toward IDLE / no-power to avoid garbage actions
+  if (isLying) {
+    // Strongly prefer IDLE
+    mx[0] -= 6; mx[2] -= 6; // x: reduce left/right
+    my[0] -= 6; my[2] -= 6; // y: reduce jump/down (down already forbidden on ground)
+    mp[1] -= 6;             // powerHit=1 discouraged
+  } else if (isDiving) {
+    // Prefer continuing dive direction (if known), otherwise IDLE-ish.
+    const dd = Number(me.divingDir ?? 0); // -1,0,1 typically
+    if (dd < 0) { mx[0] += 2; mx[1] -= 2; mx[2] -= 2; }
+    else if (dd > 0) { mx[2] += 2; mx[1] -= 2; mx[0] -= 2; }
+    else { mx[1] += 2; mx[0] -= 2; mx[2] -= 2; }
+
+    // While diving, avoid spamming jump/down and power.
+    my[0] -= 4; my[2] -= 4;
+    mp[1] -= 4;
+  }
+
+  const px0 = softmax(mx);
+  const py0 = softmax(my);
+  const pp0 = softmax(mp);
+  return { px: px0, py: py0, pp: pp0 };
+}
 
   /**
    * Evaluate: compute action distribution + value for obs.
@@ -423,17 +441,25 @@ this.hidden1 = Math.max(1, (opts.hidden1 ?? 64) | 0);
     const canAct = (me.canAct !== undefined) ? !!me.canAct : (!isLying && !isDiving);
     const isAir = (me.isAir !== undefined) ? !!me.isAir : (state === 1 || state === 2);
 
-    if (!canAct || isLying || isDiving) {
+    if (!canAct) {
+      // Truly cannot act: force IDLE and skip learning.
       this.debug.forcedIdle++;
-      if (!canAct) this.debug.forcedIdleNoAct++;
-      if (isLying) this.debug.forcedIdleLying++;
-      if (isDiving) this.debug.forcedIdleDiving++;
+      this.debug.forcedIdleNoAct++;
       return {
         action: { xDirection: 0, yDirection: 0, powerHit: 0 },
         logp: 0,
         value: 0,
-        meta: { forcedIdle: true, reason: (!canAct ? 'noAct' : (isLying ? 'lying' : 'diving')) },
+        meta: { forcedIdle: true, reason: 'noAct' },
       };
+    }
+
+    // Diving / lying: do not force IDLE. Apply soft mask later.
+    // Mark as forcedIdle for learning-skip (episode_builder will skip these steps).
+    const skipLearn = (isLying || isDiving);
+    if (skipLearn) {
+      this.debug.forcedIdle++;
+      if (isLying) this.debug.forcedIdleLying++;
+      if (isDiving) this.debug.forcedIdleDiving++;
     }
 
     const { px, py, pp, value } = this.evaluate(obs, playerIndex);
@@ -455,7 +481,7 @@ this.hidden1 = Math.max(1, (opts.hidden1 ?? 64) | 0);
         action: { xDirection: mapClassToXDir(ax), yDirection: mapClassToYDir(ay), powerHit },
         logp,
         value,
-        meta: { epsRandom: true, ax, ay, ap },
+        meta: { epsRandom: true, ax, ay, ap, forcedIdle: skipLearn, reason: (skipLearn ? (isLying ? 'lying' : 'diving') : null) },
       };
     }
 
@@ -486,7 +512,9 @@ this.hidden1 = Math.max(1, (opts.hidden1 ?? 64) | 0);
 
     const logp = logProbFromProbs(px, ax) + logProbFromProbs(py, ay) + logProbFromProbs(pp, ap);
     const action = { xDirection: mapClassToXDir(ax), yDirection: mapClassToYDir(ay), powerHit: ap ? 1 : 0 };
-    return { action, logp, value, meta: { ax, ay, ap } };
+    // diagnostics: count sampled power-hit actions (main policy path)
+    if (ap === 1) this.debug.powerHitSampled++;
+    return { action, logp, value, meta: { ax, ay, ap, forcedIdle: skipLearn, reason: (skipLearn ? (isLying ? 'lying' : 'diving') : null) } };
   }
 
   /**
