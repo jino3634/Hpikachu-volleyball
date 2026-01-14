@@ -755,10 +755,15 @@ export class PpoPolicyV1 {
     const predAy = argmax(ev.py);
     const predAp = argmax(ev.pp);
 
-    // Backprop through existing policy-gradient accumulator:
-    // For CE loss L = -log p(a), dL/dlogp = -1
+    // Backprop through existing policy-gradient accumulator.
+    // NOTE: _accumulateGrads uses:
+    //   dlogits = -dL_dlogp * (onehot - probs)
+    // For CE loss L = -log p(a), the correct gradient w.r.t logits is:
+    //   dL/dlogits = (probs - onehot)
+    // which corresponds to dL_dlogp = +1.
+    // Therefore we pass +w (NOT -w) to *increase* probability of the demonstrated action.
     const g = this._zeroGrads();
-    this._accumulateGrads(g, obs, playerIndex, label, -w, 0);
+    this._accumulateGrads(g, obs, playerIndex, label, +w, 0);
 
     // Apply grads using imitation LR (fallback to actor LR)
     const lr = (this.imitationLr !== undefined) ? Number(this.imitationLr) : (this.lrActor ?? this.lr);
