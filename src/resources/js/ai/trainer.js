@@ -215,7 +215,7 @@ export class Trainer {
 
     // model_state
     const model = await this.storage.getCheckpoint('model_state');
-    if (model && (model.kind === 'tuple_policy_mlp_v1' || model.kind === 'tuple_policy_v1')) {
+    if (model && (model.kind === 'tuple_policy_mlp_v1' || model.kind === 'tuple_policy_v1' || model.kind === 'ppo_policy_v1')) {
       // tuple_policy_v1 (old linear) is still loadable (it will be wrapped as an identity-trunk MLP)
       this.policy.loadState(model);
     } else {
@@ -787,7 +787,7 @@ _flushBatch(allRemaining = false) {
 
     // reload model
     const model = await this.storage.getCheckpoint('model_state');
-    if (model && (model.kind === 'tuple_policy_mlp_v1' || model.kind === 'tuple_policy_v1')) {
+    if (model && (model.kind === 'tuple_policy_mlp_v1' || model.kind === 'tuple_policy_v1' || model.kind === 'ppo_policy_v1')) {
       this.policy.loadState(model);
     } else {
       await this.storage.setCheckpoint('model_state', this.policy.saveState());

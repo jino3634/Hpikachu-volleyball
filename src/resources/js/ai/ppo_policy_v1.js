@@ -4,7 +4,7 @@
 /**
  * PPO Policy (Actor-Critic) for tuple action space:
  *   xDirection: -1|0|1   (3-class categorical)
- *   yDirection: -1|0|1   (3-class categorical)  (y=+1 is jump)
+ *   yDirection: -1|0|1   (3-class categorical)  (y=-1 is jump)
  *   powerHit: 0|1        (2-class categorical)
  *
  * This policy is intentionally dependency-free and uses simple SGD.
@@ -319,10 +319,10 @@ return f;
 
     // constraint: if ground & powerHit=1, forbid x=0 (force dive direction)
     // We'll enforce this later by re-masking x after sampling power=1 on ground.
-    // Here we only restrict y if ground (no down-jump).
+    // Here we only restrict y on ground: forbid DOWN (+1). Jump is y=-1.
     if (!isAir) {
-      // y classes: forbid ay=0 (down) on ground, allow 1(0),2(jump)
-      my[0] = -1e9;
+      // y classes: 0->-1 (jump), 1->0 (idle), 2->+1 (down)
+      my[2] = -1e9;
     }
 
     const px0 = softmax(mx);
@@ -376,7 +376,7 @@ return f;
       const powerHit = (Math.random() < 0.5) ? 1 : 0;
       let axChoices = [0, 1, 2];
       if (!isAir && powerHit === 1) axChoices = [0, 2];
-      const ayChoices = (!isAir) ? [1, 2] : [0, 1, 2];
+      const ayChoices = (!isAir) ? [0, 1, 2] : [0, 1, 2];
       const ax = axChoices[(Math.random() * axChoices.length) | 0];
       const ay = ayChoices[(Math.random() * ayChoices.length) | 0];
       const ap = powerHit ? 1 : 0;
