@@ -369,7 +369,8 @@ export class OnePointEpisodeRunner {
 
       // If the policy was forced to idle (cannot act), do NOT add this step into
       // learning transitions. These samples are mostly noise and can destabilize PPO.
-      if (!(decisionInfo && decisionInfo.forcedIdle)) {
+      const skip = (decisionInfo && decisionInfo.forcedIdle && (decisionInfo.forcedIdleReason === "noAct"));
+      if (!skip) {
         builder.addStep({
           t: frames,
           obs,

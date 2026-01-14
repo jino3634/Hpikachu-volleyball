@@ -120,7 +120,7 @@ export class Trainer {
     // policy (tuple outputs)
     this.policy = new PpoPolicyV1({
       featureLen: 24,
-      learningRate: 0.0003,
+      learningRate: 0.001,
       hidden1: 64,
       hidden2: 64,
       initStd: 0.02,
