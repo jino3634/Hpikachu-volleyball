@@ -665,7 +665,9 @@ this.hidden1 = Math.max(1, (opts.hidden1 ?? 64) | 0);
     const epochs = Math.max(1, (opts.epochs ?? 4) | 0);
     const mb = Math.max(8, (opts.minibatch ?? 256) | 0);
 
-    this._vSum=0; this._rSum=0; this._vSum2=0; this._rSum2=0; this._vrCount=0; this._advPos=0; this._advNeg=0; this._advZero=0;
+    // Value diagnostics accumulators (reset each ppoUpdate)
+    this._vSum=0; this._rSum=0; this._vSum2=0; this._rSum2=0; this._vrSum=0; this._vrCount=0;
+    this._advPos=0; this._advNeg=0; this._advZero=0;
     let stats = { steps: batch.length, updates: 0, approxKl: 0, policyLoss: 0, valueLoss: 0, clipFrac: 0, gradNorm: 0, wNorm: 0, advMean: 0, advStd: 0, retMean: 0, retStd: 0, rewMean: 0, rewStd: 0, vrCorr: 0 };
 
     for (let ep = 0; ep < epochs; ep++) {
@@ -706,7 +708,10 @@ this.hidden1 = Math.max(1, (opts.hidden1 ?? 64) | 0);
           const evalNow = this.logpValue(obs, it.playerIndex ?? 1, action);
           const logp = evalNow.logp;
           const v = evalNow.value;
-          this._vSum += v; this._vSum2 += v*v; this._rSum += ret; this._rSum2 += ret*ret; this._vrCount++;
+          this._vSum += v; this._vSum2 += v*v;
+          this._rSum += ret; this._rSum2 += ret*ret;
+          this._vrSum += v * ret;
+          this._vrCount++;
           const ratio = Math.exp(clip(logp - oldLogp, -10, 10));
 
           // Accumulate advantage/return/reward stats
@@ -911,9 +916,11 @@ this.hidden1 = Math.max(1, (opts.hidden1 ?? 64) | 0);
     const dlogitsP = new Float32Array(2);
 
     if (dL_dlogp !== 0) {
-      for (let i = 0; i < 3; i++) dlogitsX[i] = -dL_dlogp * ((i === ax ? 1 : 0) - px[i]);
-      for (let i = 0; i < 3; i++) dlogitsY[i] = -dL_dlogp * ((i === ay ? 1 : 0) - py[i]);
-      for (let i = 0; i < 2; i++) dlogitsP[i] = -dL_dlogp * ((i === ap ? 1 : 0) - pp[i]);
+      // d logp / d logits = onehot - probs
+      // Therefore: dL/dlogits = dL/dlogp * (onehot - probs)
+      for (let i = 0; i < 3; i++) dlogitsX[i] = dL_dlogp * ((i === ax ? 1 : 0) - px[i]);
+      for (let i = 0; i < 3; i++) dlogitsY[i] = dL_dlogp * ((i === ay ? 1 : 0) - py[i]);
+      for (let i = 0; i < 2; i++) dlogitsP[i] = dL_dlogp * ((i === ap ? 1 : 0) - pp[i]);
     }
 
     // grads for heads + accumulate dh2
@@ -1073,19 +1080,21 @@ this.hidden1 = Math.max(1, (opts.hidden1 ?? 64) | 0);
     const predAy = argmax(ev.py);
     const predAp = argmax(ev.pp);
 
-    // Backprop through existing policy-gradient accumulator.
-    // NOTE: _accumulateGrads uses:
-    //   dlogits = -dL_dlogp * (onehot - probs)
-    // For CE loss L = -log p(a), the correct gradient w.r.t logits is:
-    //   dL/dlogits = (probs - onehot)
-    // which corresponds to dL_dlogp = +1.
-    // Therefore we pass +w (NOT -w) to *increase* probability of the demonstrated action.
+    // Backprop through the same accumulator used by PPO.
+    // For CE loss L = -log p(a):
+    //   dL/dlogp = -1
+    // and since d logp / d logits = (onehot - probs):
+    //   dL/dlogits = -1 * (onehot - probs) = (probs - onehot)
+    // Therefore we pass -w so SGD increases probability of the demonstrated action.
     const g = this._zeroGrads();
-    this._accumulateGrads(g, obs, playerIndex, label, +w, 0);
+    this._accumulateGrads(g, obs, playerIndex, label, -w, 0);
 
-    // Apply grads using imitation LR (fallback to actor LR)
-    const lr = (this.imitationLr !== undefined) ? Number(this.imitationLr) : (this.lrActor ?? this.lr);
-    this._applyGrads(g, lr);
+    // Apply grads using an imitation learning-rate.
+    // _applyGrads expects a *scale* relative to this.learningRate.
+    const imitationLr = Number(this.imitationLr ?? this.learningRate);
+    const base = Number(this.learningRate) || 1;
+    const scale = imitationLr / base;
+    this._applyGrads(g, scale);
 
     return { loss: nll, ax: predAx, ay: predAy, ap: predAp };
   }
