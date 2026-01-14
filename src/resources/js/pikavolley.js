@@ -942,7 +942,9 @@ export class PikachuVolleyball {
         x: b.x, y: b.y,
         xV: b.xVelocity, yV: b.yVelocity,
         expectedX: b.expectedLandingPointX,
-        isPowerHit: b.isPowerHit ? 1 : 0,
+        
+        timeToLand: b.expectedLandingFrames,
+isPowerHit: b.isPowerHit ? 1 : 0,
       },
     };
 
@@ -1014,7 +1016,10 @@ export class PikachuVolleyball {
       xV: nv(xVTo(raw.ball.xV), clipBallXV),
       yV: nv(raw.ball.yV, clipBallYV),
       expectedX: nx(xTo(raw.ball.expectedX)),
-      isPowerHit: raw.ball.isPowerHit,
+      
+      landingX: nx(xTo(raw.ball.expectedX)),
+      timeToLand: Math.max(0, Math.min(1, (raw.ball.timeToLand ?? 0) / 180)),
+isPowerHit: raw.ball.isPowerHit,
     };
 
     return {

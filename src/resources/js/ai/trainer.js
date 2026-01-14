@@ -3,8 +3,8 @@
 
 import { OnePointEpisodeRunner } from './episode_runner.js';
 import { IndexedDBStorage } from '../storage/storage_indexeddb.js';
-import { TuplePolicyV1 } from './tuple_policy_v1.js';
-import { TuplePolicyAgentV1 } from './tuple_agent_v1.js';
+import { PpoPolicyV1 } from './ppo_policy_v1.js';
+import { PpoPolicyAgentV1 } from './ppo_agent_v1.js';
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
@@ -118,15 +118,32 @@ export class Trainer {
     this._runner = null;
 
     // policy (tuple outputs)
-    this.policy = new TuplePolicyV1({
-      featureLen: 14,
-      learningRate: 0.001,
-      epsilon: 0.08,
-      initStd: 0.01,
+    this.policy = new PpoPolicyV1({
+      featureLen: 16,
+      learningRate: 0.0003,
       hidden1: 64,
       hidden2: 64,
+      initStd: 0.02,
+      clipEps: 0.2,
+      vfCoef: 0.5,
+      gamma: 0.995,
+      gaeLambda: 0.95,
     });
-    this.agent = new TuplePolicyAgentV1(this.policy, { playerIndex: this.learningPlayer, deterministic: false });
+
+    // PPO needs stochastic sampling during training; keep a little epsilon exploration.
+    this.agent = new PpoPolicyAgentV1(this.policy, {
+      playerIndex: this.learningPlayer,
+      deterministic: false,
+      epsilon: 0.02,
+    });
+
+    // PPO rollout settings
+    this.rollout = [];
+    this.rolloutSteps = 2048;
+    this.minRolloutToUpdate = 512; // flush threshold for remaining rollout steps
+
+    this.ppoEpochs = 4;
+    this.ppoMinibatch = 256;
   }
 
   async init() {
@@ -478,7 +495,12 @@ export class Trainer {
         for (let k = i; k < end; k++) {
           const s = samples[idx[k]];
           const feat = this.policy.buildFeatures(s.obs, this.learningPlayer);
-          const r = this.policy.updateImitation(feat, s.label);
+          let r;
+          if (typeof this.policy.updateImitationSample === 'function') {
+            r = this.policy.updateImitationSample(s.obs, this.learningPlayer, s.label);
+          } else {
+            r = this.policy.updateImitation(feat, s.label);
+          }
 
           lossSum += r.loss;
           nSeen++;
@@ -585,7 +607,7 @@ export class Trainer {
           }
         }
 
-        // policy update: accumulate N points then batch-learn
+        // PPO rollout collection + update
         const canLearn =
           res.ok === true &&
           res.frames > 0 &&
@@ -593,13 +615,36 @@ export class Trainer {
           !!res.episode;
 
         if (canLearn) {
-          this.pointBuffer.push({ episode: res.episode });
-          if (this.pointBuffer.length > this.maxBufferPoints) {
-            // safety: drop oldest if something goes wrong
-            this.pointBuffer.splice(0, this.pointBuffer.length - this.maxBufferPoints);
+          const transitions = res.episode.transitions ?? [];
+          for (const tr of transitions) {
+            const info = tr.info ?? {};
+            // For PPO we need old log-prob and value from the moment we acted.
+            if (typeof info.logp !== 'number' || typeof info.value !== 'number') continue;
+
+            this.rollout.push({
+              obs: tr.obs ?? null,
+              action: tr.action ?? null,
+              reward: Number(tr.reward ?? 0),
+              done: !!tr.done,
+              oldLogp: Number(info.logp ?? 0),
+              value: Number(info.value ?? 0),
+              playerIndex: this.learningPlayer,
+            });
           }
-          if (this.pointBuffer.length >= this.batchPoints) {
-            this._flushBatch(false);
+
+          // update when enough rollout steps are collected
+          while (this.rollout.length >= this.rolloutSteps) {
+            const batch = this.rollout.splice(0, this.rolloutSteps);
+
+            // compute GAE + returns
+            this.policy.computeGAE(batch);
+
+            const stats = this.policy.ppoUpdate(batch, {
+              epochs: this.ppoEpochs,
+              minibatch: this.ppoMinibatch,
+            });
+
+            console.log(`[PPO] steps=${stats.steps} updates=${stats.updates} approxKL=${stats.approxKl.toFixed(6)}`);
           }
         } else {
           this.bufferSkipped++;
@@ -652,8 +697,8 @@ export class Trainer {
             this.graduated = true;
             this.mode = 'PHASE2';
             this.running = false;
-            // flush remaining buffered points before finalize
-            this._flushBatch(true);
+            // flush remaining rollout buffer before finalize
+            await this._flushRollout(true);
             await this._saveStats();
             console.log('[P1->P2] graduated via 3 consecutive set wins; mode set to PHASE2');
           }
@@ -673,8 +718,8 @@ export class Trainer {
       await sleep(this.tickDelayMs > 0 ? this.tickDelayMs : 0);
     }
 
-    // flush remaining buffered points
-    this._flushBatch(true);
+    // flush remaining rollout steps (PPO)
+    await this._flushRollout(true);
 
     // 종료 시점에도 저장
     await this._saveStats();
@@ -856,5 +901,23 @@ _buildPointReplay(res) {
       frames: res.frames ?? 0,
       trace,
     };
+  }
+
+  async _flushRollout(force = false) {
+    // PPO rollout updates are performed in start() loop when rolloutSteps are met.
+    // This helper flushes remaining partial rollout (e.g., on stop/graduation).
+    const threshold = force ? this.minRolloutToUpdate : this.rolloutSteps;
+    while (this.rollout.length >= threshold) {
+      const take = force ? this.rollout.length : this.rolloutSteps;
+      const batch = this.rollout.splice(0, take);
+      this.policy.computeGAE(batch);
+      const stats = this.policy.ppoUpdate(batch, {
+        epochs: this.ppoEpochs,
+        minibatch: this.ppoMinibatch,
+      });
+      console.log(`[PPO] flush steps=${stats.steps} updates=${stats.updates} approxKL=${stats.approxKl.toFixed(6)}`);
+      if (!force) break;
+      if (this.rollout.length < this.minRolloutToUpdate) break;
+    }
   }
 }

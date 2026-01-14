@@ -227,6 +227,14 @@ export class OnePointEpisodeRunner {
 
       let result = null;
       try {
+    // --- minimal shaping state: serve/return only (PPO-friendly) ---
+    const NET_X = 216; // court half (432/2)
+    const isP2ServeAtStart = !!this.game.isPlayer2Serve;
+    const learningServing = (this.learningPlayer === 1) ? !isP2ServeAtStart : isP2ServeAtStart;
+    let serveCrossedNet = false;
+    let sawBallOnMySide = false; // for return shaping when receiving
+    let returnCrossedNet = false;
+
         while (true) {
       // round가 아니면 학습 프레임 카운트/trace 누적 안 하고 진행만
       if (this.game.state !== this.game.round) {
@@ -279,6 +287,53 @@ export class OnePointEpisodeRunner {
       const nextObs2 = this.game.getObservation(2);
       const nextObs = (this.learningPlayer === 1) ? nextObs1 : nextObs2;
 
+      // === minimal shaping: serve/return only ===
+      // Uses raw ball x (0..432). Reward is small and does not replace terminal +/-1.
+      let shapingReward = 0;
+      try {
+        const bx0 = obs?.raw?.ball?.x;
+        const bx1 = nextObs?.raw?.ball?.x;
+        if (typeof bx0 === 'number' && typeof bx1 === 'number') {
+          // Serve success: when serving, first time the ball crosses the net into opponent side
+          if (learningServing && !serveCrossedNet) {
+            const crossed = (this.learningPlayer === 1) ? (bx0 <= NET_X && bx1 > NET_X) : (bx0 >= NET_X && bx1 < NET_X);
+            if (crossed) {
+              serveCrossedNet = true;
+              shapingReward += 0.10;
+            }
+          }
+
+          // Return success: when receiving, first time we send the ball back across the net
+          if (!learningServing) {
+            const onMySide = (this.learningPlayer === 1) ? (bx1 < NET_X) : (bx1 > NET_X);
+            if (onMySide) sawBallOnMySide = true;
+            if (sawBallOnMySide && !returnCrossedNet) {
+              const crossedBack = (this.learningPlayer === 1) ? (bx0 <= NET_X && bx1 > NET_X) : (bx0 >= NET_X && bx1 < NET_X);
+              if (crossedBack) {
+                returnCrossedNet = true;
+                shapingReward += 0.10;
+              }
+            }
+          }
+        }
+      } catch (_) {
+        // ignore shaping errors
+      }
+
+      // Attach shaping to roundEvents so builder reward function can use it.
+      if (ev && typeof ev === 'object') {
+        ev.shapingReward = shapingReward;
+      }
+
+      // Terminal shaping penalties (serve/return failure) are attached on the terminal frame.
+      const scoredByNow = (ev && typeof ev.scoredBy === 'number') ? ev.scoredBy : ((ev && typeof ev.scored === 'number') ? ev.scored : 0);
+      if ((scoredByNow === 1 || scoredByNow === 2) && ev && typeof ev === 'object') {
+        let terminalShaping = 0;
+        if (learningServing && !serveCrossedNet && scoredByNow !== this.learningPlayer) terminalShaping -= 0.10;
+        if (!learningServing && sawBallOnMySide && !returnCrossedNet && scoredByNow !== this.learningPlayer) terminalShaping -= 0.10;
+        if (terminalShaping !== 0) ev.terminalShapingReward = terminalShaping;
+      }
+
       // trace 포맷: trainer._buildPointReplay가 기대하는 형태(t.obs.p1/p2)
       if (trace.length < this.maxTraceFrames) {
         trace.push({
@@ -290,12 +345,17 @@ export class OnePointEpisodeRunner {
       }
 
       // builder step (reward는 builder가 roundEvents로 내부 계산)
+      const decisionInfo = (hasChooseInput && agent && agent.lastDecision)
+        ? { logp: agent.lastDecision.logp ?? 0, value: agent.lastDecision.value ?? 0 }
+        : null;
+
       builder.addStep({
         t: frames,
         obs,
         action: hasChooseInput ? inputTuple : (aLearn | 0),
         nextObs,
         done: false,
+        info: decisionInfo,
         roundEvents: ev,
       });
 

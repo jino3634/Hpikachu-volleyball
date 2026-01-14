@@ -232,7 +232,10 @@ class Ball {
     this.initializeForNewRound(isPlayer2Serve);
     /** @type {number} x coord of expected landing point */
     this.expectedLandingPointX = 0; // 0x40
-    /**
+    
+    /** @type {number} frames until expected landing (approx) */
+    this.expectedLandingFrames = 0;
+/**
      * ball rotation frame number selector
      * During the period where it continues to be 5, hyper ball glitch occur.
      * @type {number} 0, 1, 2, 3, 4 or 5
@@ -785,7 +788,9 @@ function calculateExpectedLandingPointXFor(ball) {
     copyBall.yVelocity += 1;
   }
   ball.expectedLandingPointX = copyBall.x;
+  ball.expectedLandingFrames = loopCounter;
 }
+
 
 /**
  * FUN_00402360

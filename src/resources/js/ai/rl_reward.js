@@ -20,5 +20,10 @@ export function computeSparseReward(roundEvents, learningPlayer) {
   if (scored !== 1 && scored !== 2) return 0;
 
   // learningPlayer가 득점했으면 +1, 아니면 -1
-  return scored === learningPlayer ? 50 : -50;
+  let r = scored === learningPlayer ? 1 : -1;
+
+  // minimal shaping (serve/return) from episode_runner
+  if (typeof roundEvents.shapingReward === 'number') r += roundEvents.shapingReward;
+  if (typeof roundEvents.terminalShapingReward === 'number') r += roundEvents.terminalShapingReward;
+  return r;
 }

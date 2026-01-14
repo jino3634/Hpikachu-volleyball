@@ -112,14 +112,7 @@ export class EpisodeBuilder {
 
     // === reward redistribution over all frames (win/loss credit assignment) ===
     if (this.scoredBy !== null && this.scoredBy !== undefined) {
-      const T = this.transitions.length;
-      const sign = (this.scoredBy === this.learningPlayer) ? 1 : -1;
-      const R = 50;
-      const gamma = 0.995;
-      for (let i = 0; i < T; i++) {
-        const t = T - 1 - i;
-        this.transitions[i].reward = sign * R * Math.pow(gamma, t);
-      }
+      // PPO core uses terminal sparse reward; keep per-step rewards as-is (no redistribution)
     }
 
     return {
