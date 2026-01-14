@@ -65,6 +65,20 @@ function logProbFromProbs(probs, idx) {
   return Math.log(p);
 }
 
+function entropyFromProbs(p) {
+  let e = 0;
+  for (let i = 0; i < p.length; i++) {
+    const v = p[i];
+    if (v > 0) e += -v * Math.log(v);
+  }
+  return e;
+}
+function maxProb(p) {
+  let m = 0;
+  for (let i = 0; i < p.length; i++) if (p[i] > m) m = p[i];
+  return m;
+}
+
 function mapClassToXDir(ax) {
   // 0->-1, 1->0, 2->+1
   return (ax === 0) ? -1 : (ax === 2 ? 1 : 0);
@@ -116,6 +130,34 @@ export class PpoPolicyV1 {
       forcedIdleDiving: 0,
       powerHitSampled: 0,
     };
+    // Extended diagnostics (rolling; reset by Trainer after each flush)
+    this.debug.featStats = null; // lazily initialized in buildFeatures()
+    this.debug.actionStats = {
+      n: 0,
+      entX: 0, entY: 0, entP: 0,
+      maxX: 0, maxY: 0, maxP: 0,
+      axCounts: [0,0,0],
+      ayCounts: [0,0,0],
+      apCounts: [0,0],
+      powerHitTotal: 0,
+      powerHitNearBall: 0,
+    };
+    this.debug.lastUpdate = null; // {policyLoss,valueLoss,clipFrac,gradNorm,wNorm,advMean,advStd,retMean,retStd,rewMean,rewStd}
+
+    // Extended diagnostics (rolling; reset by Trainer after each flush)
+    this.debug.featStats = null; // lazily initialized in buildFeatures()
+    this.debug.actionStats = {
+      n: 0,
+      entX: 0, entY: 0, entP: 0,
+      maxX: 0, maxY: 0, maxP: 0,
+      axCounts: [0,0,0],
+      ayCounts: [0,0,0],
+      apCounts: [0,0],
+      powerHitTotal: 0,
+      powerHitNearBall: 0,
+    };
+    this.debug.lastUpdate = null; // {policyLoss,valueLoss,clipFrac,gradNorm,wNorm,advMean,advStd,retMean,retStd,rewMean,rewStd}
+
 this.hidden1 = Math.max(1, (opts.hidden1 ?? 64) | 0);
     this.hidden2 = Math.max(1, (opts.hidden2 ?? 64) | 0);
     this.activation = (opts.activation === 'linear') ? 'linear' : 'tanh';
@@ -296,6 +338,26 @@ this.hidden1 = Math.max(1, (opts.hidden1 ?? 64) | 0);
       }
     }
     if (invalid) this.debug.invalidFeatureSteps++;
+
+    // Rolling feature statistics (raw; helpful to detect saturation / scaling issues)
+    // Structure: { n, min[], max[], sum[], sumsq[] }
+    if (!this.debug.featStats) {
+      const min = new Float64Array(this.featureLen);
+      const max = new Float64Array(this.featureLen);
+      const sum = new Float64Array(this.featureLen);
+      const sumsq = new Float64Array(this.featureLen);
+      for (let i = 0; i < this.featureLen; i++) { min[i] = Infinity; max[i] = -Infinity; sum[i] = 0; sumsq[i] = 0; }
+      this.debug.featStats = { n: 0, min, max, sum, sumsq };
+    }
+    const fs = this.debug.featStats;
+    fs.n++;
+    for (let i = 0; i < this.featureLen; i++) {
+      const v = f[i];
+      if (v < fs.min[i]) fs.min[i] = v;
+      if (v > fs.max[i]) fs.max[i] = v;
+      fs.sum[i] += v;
+      fs.sumsq[i] += v * v;
+    }
     return f;
   }
 
@@ -463,6 +525,30 @@ this.hidden1 = Math.max(1, (opts.hidden1 ?? 64) | 0);
     }
 
     const { px, py, pp, value } = this.evaluate(obs, playerIndex);
+    const recordActionStats = (ax, ay, ap) => {
+      const as = this.debug.actionStats;
+      as.n++;
+      as.entX += entropyFromProbs(px);
+      as.entY += entropyFromProbs(py);
+      as.entP += entropyFromProbs(pp);
+      as.maxX += maxProb(px);
+      as.maxY += maxProb(py);
+      as.maxP += maxProb(pp);
+      as.axCounts[ax] = (as.axCounts[ax] ?? 0) + 1;
+      as.ayCounts[ay] = (as.ayCounts[ay] ?? 0) + 1;
+      as.apCounts[ap] = (as.apCounts[ap] ?? 0) + 1;
+
+      if (ap === 1) {
+        as.powerHitTotal++;
+        const meX = Number((obs?.me ?? {}).x ?? 0);
+        const meY = Number((obs?.me ?? {}).y ?? 0);
+        const ballX = Number((obs?.ball ?? {}).x ?? 0);
+        const ballY = Number((obs?.ball ?? {}).y ?? 0);
+        const near = (Math.abs(ballX - meX) <= 90) && (Math.abs(ballY - meY) <= 90);
+        if (near) as.powerHitNearBall++;
+      }
+    };
+
 
     // epsilon random exploration (still valid)
     if (!deterministic && epsRand > 0 && Math.random() < epsRand) {
@@ -475,6 +561,7 @@ this.hidden1 = Math.max(1, (opts.hidden1 ?? 64) | 0);
       const ap = powerHit ? 1 : 0;
 
       if (ap === 1) this.debug.powerHitSampled++;
+      recordActionStats(ax, ay, ap);
 
     const logp = logProbFromProbs(px, ax) + logProbFromProbs(py, ay) + logProbFromProbs(pp, ap);
       return {
@@ -514,6 +601,7 @@ this.hidden1 = Math.max(1, (opts.hidden1 ?? 64) | 0);
     const action = { xDirection: mapClassToXDir(ax), yDirection: mapClassToYDir(ay), powerHit: ap ? 1 : 0 };
     // diagnostics: count sampled power-hit actions (main policy path)
     if (ap === 1) this.debug.powerHitSampled++;
+    recordActionStats(ax, ay, ap);
     return { action, logp, value, meta: { ax, ay, ap, forcedIdle: skipLearn, reason: (skipLearn ? (isLying ? 'lying' : 'diving') : null) } };
   }
 
@@ -577,7 +665,8 @@ this.hidden1 = Math.max(1, (opts.hidden1 ?? 64) | 0);
     const epochs = Math.max(1, (opts.epochs ?? 4) | 0);
     const mb = Math.max(8, (opts.minibatch ?? 256) | 0);
 
-    let stats = { steps: batch.length, updates: 0, approxKl: 0 };
+    this._vSum=0; this._rSum=0; this._vSum2=0; this._rSum2=0; this._vrCount=0; this._advPos=0; this._advNeg=0; this._advZero=0;
+    let stats = { steps: batch.length, updates: 0, approxKl: 0, policyLoss: 0, valueLoss: 0, clipFrac: 0, gradNorm: 0, wNorm: 0, advMean: 0, advStd: 0, retMean: 0, retStd: 0, rewMean: 0, rewStd: 0, vrCorr: 0 };
 
     for (let ep = 0; ep < epochs; ep++) {
       // shuffle indices
@@ -596,18 +685,36 @@ this.hidden1 = Math.max(1, (opts.hidden1 ?? 64) | 0);
         const g = this._zeroGrads();
 
         let klSum = 0;
+
+        // minibatch metrics
+        let pLoss = 0;
+        let vLoss = 0;
+        let clipCount = 0;
+        let advSum = 0, advSum2 = 0;
+        let retSum = 0, retSum2 = 0;
+        let rewSum = 0, rewSum2 = 0;
+
         for (const id of slice) {
           const it = batch[id];
           const obs = it.obs;
           const action = it.action;
           const oldLogp = Number(it.oldLogp ?? 0);
           const adv = Number(it.adv ?? 0);
+          if (adv > 0) this._advPos++; else if (adv < 0) this._advNeg++; else this._advZero++;
           const ret = Number(it.ret ?? 0);
 
           const evalNow = this.logpValue(obs, it.playerIndex ?? 1, action);
           const logp = evalNow.logp;
           const v = evalNow.value;
+          this._vSum += v; this._vSum2 += v*v; this._rSum += ret; this._rSum2 += ret*ret; this._vrCount++;
           const ratio = Math.exp(clip(logp - oldLogp, -10, 10));
+
+          // Accumulate advantage/return/reward stats
+          advSum += adv; advSum2 += adv * adv;
+          retSum += ret; retSum2 += ret * ret;
+          const rwd = Number(it.reward ?? 0);
+          rewSum += rwd; rewSum2 += rwd * rwd;
+
 
           // PPO clipped objective: L = -min(ratio*adv, clip(ratio)*adv)
           const clipEps = this.clipEps;
@@ -616,6 +723,19 @@ this.hidden1 = Math.max(1, (opts.hidden1 ?? 64) | 0);
           // determine if gradient flows
           let dL_dlogp = 0;
           const useClipped = (adv >= 0 && ratio > 1 + clipEps) || (adv < 0 && ratio < 1 - clipEps);
+
+          // Policy loss (for logging): -min(ratio*adv, clippedRatio*adv)
+          const unclippedObj = ratio * adv;
+          const clippedObj = rClipped * adv;
+          const chosenObj = (unclippedObj < clippedObj) ? unclippedObj : clippedObj;
+          pLoss += -chosenObj;
+
+          // Value loss (for logging): 0.5*(v-ret)^2
+          const vErr = (v - ret);
+          vLoss += 0.5 * vErr * vErr;
+
+          if (Math.abs(ratio - rClipped) > 1e-12) clipCount++;
+
           if (!useClipped) {
             // L = -ratio*adv => dL/dlogp = -ratio*adv
             dL_dlogp = -ratio * adv;
@@ -637,13 +757,116 @@ this.hidden1 = Math.max(1, (opts.hidden1 ?? 64) | 0);
         const scale = 1 / Math.max(1, slice.length);
         this._applyGrads(g, scale);
 
+        // finalize minibatch metrics
+        const nS = Math.max(1, slice.length);
+        const advMean = advSum / nS;
+        const retMean = retSum / nS;
+        const rewMean = rewSum / nS;
+        const advVar = Math.max(0, advSum2 / nS - advMean * advMean);
+        const retVar = Math.max(0, retSum2 / nS - retMean * retMean);
+        const rewVar = Math.max(0, rewSum2 / nS - rewMean * rewMean);
+        const advStd = Math.sqrt(advVar);
+        const retStd = Math.sqrt(retVar);
+        const rewStd = Math.sqrt(rewVar);
+
+        const gradNorm = this._l2Grads(g) * (1 / Math.max(1e-12, nS)); // scaled similarly to apply step
+        const wNorm = this._l2Weights();
+
+        stats.policyLoss += pLoss / nS;
+        stats.valueLoss += vLoss / nS;
+        stats.clipFrac += clipCount / nS;
+        stats.advMean += advMean;
+        stats.advStd += advStd;
+        stats.retMean += retMean;
+        stats.retStd += retStd;
+        stats.rewMean += rewMean;
+        stats.rewStd += rewStd;
+        stats.gradNorm += gradNorm;
+        stats.wNorm += wNorm;
+
         stats.updates++;
         stats.approxKl += klSum / Math.max(1, slice.length);
       }
     }
 
     stats.approxKl /= Math.max(1, stats.updates);
+    // average extra metrics across updates
+    const u = Math.max(1, stats.updates);
+    stats.policyLoss /= u;
+    stats.valueLoss /= u;
+    stats.clipFrac /= u;
+    stats.gradNorm /= u;
+    stats.wNorm /= u;
+    stats.advMean /= u;
+    stats.advStd /= u;
+    stats.retMean /= u;
+    stats.retStd /= u;
+    stats.rewMean /= u;
+    stats.rewStd /= u;
+
+    this.debug.lastUpdate = {
+      policyLoss: stats.policyLoss,
+      valueLoss: stats.valueLoss,
+      clipFrac: stats.clipFrac,
+      gradNorm: stats.gradNorm,
+      wNorm: stats.wNorm,
+      advMean: stats.advMean,
+      advStd: stats.advStd,
+      retMean: stats.retMean,
+      retStd: stats.retStd,
+      rewMean: stats.rewMean,
+      rewStd: stats.rewStd,
+    };
+
+    
+    // value-return correlation
+    let corr = 0;
+    if (this._vrCount > 1) {
+      const cov = (this._vrSum - (this._vSum * this._rSum) / this._vrCount) / this._vrCount;
+      const vVar = Math.max(1e-12, this._vSum2 / this._vrCount - (this._vSum / this._vrCount) ** 2);
+      const rVar = Math.max(1e-12, this._rSum2 / this._vrCount - (this._rSum / this._vrCount) ** 2);
+      corr = cov / Math.sqrt(vVar * rVar);
+    }
+    stats.vrCorr = corr;
+    stats.advPos = this._advPos; stats.advNeg = this._advNeg; stats.advZero = this._advZero;
+
     return stats;
+  }
+
+  _l2Weights() {
+    let s = 0;
+    const accArr = (arr) => { for (let i = 0; i < arr.length; i++) { const v = arr[i]; s += v * v; } };
+    for (let i = 0; i < this.hidden1; i++) accArr(this.W1[i]);
+    accArr(this.b1);
+    for (let i = 0; i < this.hidden2; i++) accArr(this.W2[i]);
+    accArr(this.b2);
+    for (let i = 0; i < 3; i++) accArr(this.Wx[i]);
+    accArr(this.bx);
+    for (let i = 0; i < 3; i++) accArr(this.Wy[i]);
+    accArr(this.by);
+    for (let i = 0; i < 2; i++) accArr(this.Wp[i]);
+    accArr(this.bp);
+    accArr(this.Wv);
+    s += this.bv * this.bv;
+    return Math.sqrt(s);
+  }
+
+  _l2Grads(g) {
+    let s = 0;
+    const accArr = (arr) => { for (let i = 0; i < arr.length; i++) { const v = arr[i]; s += v * v; } };
+    for (let i = 0; i < g.dW1.length; i++) accArr(g.dW1[i]);
+    accArr(g.db1);
+    for (let i = 0; i < g.dW2.length; i++) accArr(g.dW2[i]);
+    accArr(g.db2);
+    for (let i = 0; i < g.dWx.length; i++) accArr(g.dWx[i]);
+    accArr(g.dbx);
+    for (let i = 0; i < g.dWy.length; i++) accArr(g.dWy[i]);
+    accArr(g.dby);
+    for (let i = 0; i < g.dWp.length; i++) accArr(g.dWp[i]);
+    accArr(g.dbp);
+    accArr(g.dWv);
+    s += g.dbv * g.dbv;
+    return Math.sqrt(s);
   }
 
   _zeroGrads() {

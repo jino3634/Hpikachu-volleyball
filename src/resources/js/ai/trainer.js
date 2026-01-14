@@ -139,6 +139,7 @@ export class Trainer {
 
     // PPO rollout settings
     this.rollout = [];
+    this.learnDiag = { episodes: 0, transitions: 0, skippedNoInfo: 0, skippedBadFields: 0, stateLearn: { canAct:0, air:0, ground:0, diving:0, lying:0 } };
     this.rolloutSteps = 2048;
     this.minRolloutToUpdate = 512; // flush threshold for remaining rollout steps
 
@@ -619,13 +620,27 @@ export class Trainer {
 
         if (canLearn) {
           const transitions = res.episode.transitions ?? [];
+          this.learnDiag.episodes++;
+          this.learnDiag.transitions += transitions.length;
           for (const tr of transitions) {
             const info = tr.info ?? {};
             // For PPO we need old log-prob and value from the moment we acted.
-            if (typeof info.logp !== 'number' || typeof info.value !== 'number') continue;
+            if (!info) { this.learnDiag.skippedNoInfo++; continue; }
+             if (typeof info.logp !== 'number' || typeof info.value !== 'number') { this.learnDiag.skippedBadFields++; continue; }
 
-            this.rollout.push({
-              obs: tr.obs ?? null,
+            const me = tr.obs?.me ?? {};
+             const st = Number(me.state ?? 0);
+             const isLying = !!me.isLying || st === 4;
+             const isDiving = !!me.isDiving || st === 3;
+             const isAir = (me.isAir !== undefined) ? !!me.isAir : (st === 1 || st === 2);
+             const canAct = (me.canAct !== undefined) ? !!me.canAct : (!isLying && !isDiving);
+             if (canAct) this.learnDiag.stateLearn.canAct++;
+             if (isAir) this.learnDiag.stateLearn.air++;
+             if (!isAir && canAct) this.learnDiag.stateLearn.ground++;
+             if (isDiving) this.learnDiag.stateLearn.diving++;
+             if (isLying) this.learnDiag.stateLearn.lying++;
+             this.rollout.push({
+               obs: tr.obs ?? null,
               action: tr.action ?? null,
               reward: Number(tr.reward ?? 0),
               done: !!tr.done,
@@ -648,9 +663,54 @@ export class Trainer {
             });
 
             console.log(`[PPO] steps=${stats.steps} updates=${stats.updates} approxKL=${stats.approxKl.toFixed(6)}`);
+            if (stats && typeof stats.policyLoss === 'number') {
+              console.log(`[PPO-LOSS] policyLoss=${stats.policyLoss.toFixed(6)} valueLoss=${stats.valueLoss.toFixed(6)} clipFrac=${stats.clipFrac.toFixed(4)} gradNorm=${stats.gradNorm.toFixed(6)} wNorm=${stats.wNorm.toFixed(3)}`);
+              if (stats.vrCorr !== undefined) console.log(`[VALUE-DIAG] corr=${stats.vrCorr.toFixed(4)}`);
+            if (stats.advPos !== undefined) console.log(`[ADV-SIGN] pos=${stats.advPos} neg=${stats.advNeg} zero=${stats.advZero}`);
+            console.log(`[PPO-ADV] advMean=${stats.advMean.toFixed(6)} advStd=${stats.advStd.toFixed(6)} retMean=${stats.retMean.toFixed(6)} retStd=${stats.retStd.toFixed(6)} rewMean=${stats.rewMean.toFixed(6)} rewStd=${stats.rewStd.toFixed(6)}`);
+            }
+            if (this.learnDiag) {
+              const total = Math.max(1, this.learnDiag.transitions);
+              
+            if (this.learnDiag && this.learnDiag.stateLearn) {
+              const s = this.learnDiag.stateLearn;
+              console.log(`[STATE-LEARN] canAct=${s.canAct} ground=${s.ground} air=${s.air} diving=${s.diving} lying=${s.lying}`);
+              this.learnDiag.stateLearn = { canAct:0, air:0, ground:0, diving:0, lying:0 };
+            }
+
+            console.log(`[LEARN-DIAG] episodes=${this.learnDiag.episodes} transitions=${this.learnDiag.transitions} pushed=${this.rollout.length} skippedNoInfo=${this.learnDiag.skippedNoInfo} skippedBadFields=${this.learnDiag.skippedBadFields}`);
+              // reset per flush
+              this.learnDiag.episodes = 0;
+              this.learnDiag.transitions = 0;
+              this.learnDiag.skippedNoInfo = 0;
+              this.learnDiag.skippedBadFields = 0;
+            }
+
           // Diagnostics
           if (this.policy && this.policy.debug) {
             console.log(`[PPO-DIAG] nanFeatures=${this.policy.debug.nanFeatures} invalidSteps=${this.policy.debug.invalidFeatureSteps} forcedIdle=${this.policy.debug.forcedIdle} (noAct=${this.policy.debug.forcedIdleNoAct}, lying=${this.policy.debug.forcedIdleLying}, diving=${this.policy.debug.forcedIdleDiving}) powerHitSampled=${this.policy.debug.powerHitSampled}`);
+            // Additional rolling diagnostics from policy
+            const as = this.policy.debug.actionStats;
+            if (as && as.n > 0) {
+              const n = as.n;
+              const ap1 = (as.apCounts?.[1] ?? 0);
+              const phNear = (as.powerHitNearBall ?? 0);
+              const phTot = Math.max(1, (as.powerHitTotal ?? ap1));
+              console.log(`[PPO-ACTION] n=${n} entX=${(as.entX/n).toFixed(4)} entY=${(as.entY/n).toFixed(4)} entP=${(as.entP/n).toFixed(4)} maxX=${(as.maxX/n).toFixed(4)} maxY=${(as.maxY/n).toFixed(4)} maxP=${(as.maxP/n).toFixed(4)} ap1Rate=${(ap1/n).toFixed(4)} powerHitNearBallRate=${(phNear/phTot).toFixed(4)} ax=${JSON.stringify(as.axCounts)} ay=${JSON.stringify(as.ayCounts)} ap=${JSON.stringify(as.apCounts)}`);
+            }
+            const fs = this.policy.debug.featStats;
+            if (fs && fs.n > 0) {
+              const n = fs.n;
+              const pick = (i) => {
+                const mean = fs.sum[i] / n;
+                const varr = Math.max(0, fs.sumsq[i] / n - mean * mean);
+                const std = Math.sqrt(varr);
+                return { i, min: fs.min[i], max: fs.max[i], mean, std };
+              };
+              const keys = [0,1,2,8,9,10,14,15,16,17,18,19]; // core spatial features
+              const rows = keys.filter(i => i < this.policy.featureLen).map(pick);
+              console.log(`[FEAT-DIAG] n=${n} ` + rows.map(r => `f${r.i}[min=${r.min.toFixed(2)},max=${r.max.toFixed(2)},mean=${r.mean.toFixed(2)},std=${r.std.toFixed(2)}]`).join(' '));
+            }
             // reset rolling diagnostics per flush
             this.policy.debug.nanFeatures = 0;
             this.policy.debug.invalidFeatureSteps = 0;
@@ -659,9 +719,28 @@ export class Trainer {
             this.policy.debug.forcedIdleLying = 0;
             this.policy.debug.forcedIdleDiving = 0;
             this.policy.debug.powerHitSampled = 0;
+            if (this.policy.debug.actionStats) {
+              this.policy.debug.actionStats.n = 0;
+              this.policy.debug.actionStats.entX = 0;
+              this.policy.debug.actionStats.entY = 0;
+              this.policy.debug.actionStats.entP = 0;
+              this.policy.debug.actionStats.maxX = 0;
+              this.policy.debug.actionStats.maxY = 0;
+              this.policy.debug.actionStats.maxP = 0;
+              this.policy.debug.actionStats.axCounts = [0,0,0];
+              this.policy.debug.actionStats.ayCounts = [0,0,0];
+              this.policy.debug.actionStats.apCounts = [0,0];
+              this.policy.debug.actionStats.powerHitTotal = 0;
+              this.policy.debug.actionStats.powerHitNearBall = 0;
+            }
+            this.policy.debug.featStats = null;
+            this.policy.debug.lastUpdate = null;
+
           }
           if (this.game && this.game.debugStats) {
             console.log(`[GAME-DIAG] decisions=${this.game.debugStats.decisions} forcedIdle=${this.game.debugStats.forcedIdle} powerHitReq=${this.game.debugStats.powerHitRequested} powerHitApplied=${this.game.debugStats.powerHitApplied}`);
+              const req = this.game.debugStats.powerHitRequested; const app = this.game.debugStats.powerHitApplied;
+              if (req > 0) console.log(`[ACTION-EFFECTIVE] powerHitAppliedRate=${(app/req).toFixed(4)}`);
             this.game.debugStats.decisions = 0;
             this.game.debugStats.forcedIdle = 0;
             this.game.debugStats.powerHitRequested = 0;
@@ -939,8 +1018,44 @@ _buildPointReplay(res) {
         minibatch: this.ppoMinibatch,
       });
       console.log(`[PPO] flush steps=${stats.steps} updates=${stats.updates} approxKL=${stats.approxKl.toFixed(6)}`);
+            if (stats && typeof stats.policyLoss === 'number') {
+              console.log(`[PPO-LOSS] policyLoss=${stats.policyLoss.toFixed(6)} valueLoss=${stats.valueLoss.toFixed(6)} clipFrac=${stats.clipFrac.toFixed(4)} gradNorm=${stats.gradNorm.toFixed(6)} wNorm=${stats.wNorm.toFixed(3)}`);
+              console.log(`[PPO-ADV] advMean=${stats.advMean.toFixed(6)} advStd=${stats.advStd.toFixed(6)} retMean=${stats.retMean.toFixed(6)} retStd=${stats.retStd.toFixed(6)} rewMean=${stats.rewMean.toFixed(6)} rewStd=${stats.rewStd.toFixed(6)}`);
+            }
+            if (this.learnDiag) {
+              const total = Math.max(1, this.learnDiag.transitions);
+              console.log(`[LEARN-DIAG] episodes=${this.learnDiag.episodes} transitions=${this.learnDiag.transitions} pushed=${this.rollout.length} skippedNoInfo=${this.learnDiag.skippedNoInfo} skippedBadFields=${this.learnDiag.skippedBadFields}`);
+              // reset per flush
+              this.learnDiag.episodes = 0;
+              this.learnDiag.transitions = 0;
+              this.learnDiag.skippedNoInfo = 0;
+              this.learnDiag.skippedBadFields = 0;
+            }
+
       if (this.policy && this.policy.debug) {
         console.log(`[PPO-DIAG] nanFeatures=${this.policy.debug.nanFeatures} invalidSteps=${this.policy.debug.invalidFeatureSteps} forcedIdle=${this.policy.debug.forcedIdle} (noAct=${this.policy.debug.forcedIdleNoAct}, lying=${this.policy.debug.forcedIdleLying}, diving=${this.policy.debug.forcedIdleDiving}) powerHitSampled=${this.policy.debug.powerHitSampled}`);
+            // Additional rolling diagnostics from policy
+            const as = this.policy.debug.actionStats;
+            if (as && as.n > 0) {
+              const n = as.n;
+              const ap1 = (as.apCounts?.[1] ?? 0);
+              const phNear = (as.powerHitNearBall ?? 0);
+              const phTot = Math.max(1, (as.powerHitTotal ?? ap1));
+              console.log(`[PPO-ACTION] n=${n} entX=${(as.entX/n).toFixed(4)} entY=${(as.entY/n).toFixed(4)} entP=${(as.entP/n).toFixed(4)} maxX=${(as.maxX/n).toFixed(4)} maxY=${(as.maxY/n).toFixed(4)} maxP=${(as.maxP/n).toFixed(4)} ap1Rate=${(ap1/n).toFixed(4)} powerHitNearBallRate=${(phNear/phTot).toFixed(4)} ax=${JSON.stringify(as.axCounts)} ay=${JSON.stringify(as.ayCounts)} ap=${JSON.stringify(as.apCounts)}`);
+            }
+            const fs = this.policy.debug.featStats;
+            if (fs && fs.n > 0) {
+              const n = fs.n;
+              const pick = (i) => {
+                const mean = fs.sum[i] / n;
+                const varr = Math.max(0, fs.sumsq[i] / n - mean * mean);
+                const std = Math.sqrt(varr);
+                return { i, min: fs.min[i], max: fs.max[i], mean, std };
+              };
+              const keys = [0,1,2,8,9,10,14,15,16,17,18,19]; // core spatial features
+              const rows = keys.filter(i => i < this.policy.featureLen).map(pick);
+              console.log(`[FEAT-DIAG] n=${n} ` + rows.map(r => `f${r.i}[min=${r.min.toFixed(2)},max=${r.max.toFixed(2)},mean=${r.mean.toFixed(2)},std=${r.std.toFixed(2)}]`).join(' '));
+            }
         this.policy.debug.nanFeatures = 0;
         this.policy.debug.invalidFeatureSteps = 0;
         this.policy.debug.forcedIdle = 0;
@@ -948,6 +1063,23 @@ _buildPointReplay(res) {
         this.policy.debug.forcedIdleLying = 0;
         this.policy.debug.forcedIdleDiving = 0;
         this.policy.debug.powerHitSampled = 0;
+            if (this.policy.debug.actionStats) {
+              this.policy.debug.actionStats.n = 0;
+              this.policy.debug.actionStats.entX = 0;
+              this.policy.debug.actionStats.entY = 0;
+              this.policy.debug.actionStats.entP = 0;
+              this.policy.debug.actionStats.maxX = 0;
+              this.policy.debug.actionStats.maxY = 0;
+              this.policy.debug.actionStats.maxP = 0;
+              this.policy.debug.actionStats.axCounts = [0,0,0];
+              this.policy.debug.actionStats.ayCounts = [0,0,0];
+              this.policy.debug.actionStats.apCounts = [0,0];
+              this.policy.debug.actionStats.powerHitTotal = 0;
+              this.policy.debug.actionStats.powerHitNearBall = 0;
+            }
+            this.policy.debug.featStats = null;
+            this.policy.debug.lastUpdate = null;
+
       }
       if (this.game && this.game.debugStats) {
         console.log(`[GAME-DIAG] decisions=${this.game.debugStats.decisions} forcedIdle=${this.game.debugStats.forcedIdle} powerHitReq=${this.game.debugStats.powerHitRequested} powerHitApplied=${this.game.debugStats.powerHitApplied}`);
