@@ -264,7 +264,7 @@ try {
 
       // If cannot act (lying/diving/etc), skip *decision sampling itself*.
       // (obs.me.canAct is produced by getObservation() and is 0 when state > 3)
-      const canAct = !(obs && obs.me && obs.me.canAct === 0);
+      const canAct = !(obs && obs.me && obs.me.canAct === 0) && !((obs && obs.me && obs.me.isDiving) || (obs && obs.me && obs.me.isLying));
 
       epDiag.framesTotal++;
       if (!canAct) epDiag.framesCanActFalse++;

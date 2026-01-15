@@ -129,6 +129,7 @@ export class PpoPolicyV1 {
       forcedIdleLying: 0,
       forcedIdleDiving: 0,
       powerHitSampled: 0,
+      powerMasked: 0,
     };
     // Extended diagnostics (rolling; reset by Trainer after each flush)
     this.debug.featStats = null; // lazily initialized in buildFeatures()
@@ -471,6 +472,18 @@ this.hidden1 = Math.max(1, (opts.hidden1 ?? 64) | 0);
   const isDiving = !!me.isDiving || state === 3;
   const canAct = (me.canAct !== undefined) ? !!me.canAct : (!isLying && !isDiving);
   const isAir = (me.isAir !== undefined) ? !!me.isAir : (state === 1 || state === 2);
+    const ball = obs?.ball ? obs.ball : {};
+    const meX = Number(me.x ?? 0);
+    const meY = Number(me.y ?? 0);
+    const ballX = Number(ball.x ?? 0);
+    const ballY = Number(ball.y ?? 0);
+    const dx = Math.abs(ballX - meX);
+    const dy = Math.abs(ballY - meY);
+    const timeToLand = Number(ball.timeToLand ?? 1); // normalized (0..1)
+    // Power-hit gate: only allow when airborne AND close to ball AND landing is soon.
+    // This aggressively reduces dive/forced-idle loops so PPO can actually learn.
+    const allowPowerHit = !!isAir && (dx <= 55) && (dy <= 55) && (timeToLand <= 0.55);
+
 
   // If cannot act at all, force IDLE effectively.
   if (!canAct) {
@@ -587,15 +600,26 @@ this.hidden1 = Math.max(1, (opts.hidden1 ?? 64) | 0);
         const meY = Number((obs?.me ?? {}).y ?? 0);
         const ballX = Number((obs?.ball ?? {}).x ?? 0);
         const ballY = Number((obs?.ball ?? {}).y ?? 0);
-        const near = (Math.abs(ballX - meX) <= 90) && (Math.abs(ballY - meY) <= 90);
+        const near = (Math.abs(ballX - meX) <= 0.30) && (Math.abs(ballY - meY) <= 0.50);
         if (near) as.powerHitNearBall++;
       }
     };
 
+// Power-hit gate (obs is normalized: x/y in [-1,1], timeToLand in [0,1])
+const ballN = obs?.ball ?? {};
+const dxN = Math.abs(Number(ballN.x ?? 0) - Number(me.x ?? 0));
+const dyN = Math.abs(Number(ballN.y ?? 0) - Number(me.y ?? 0));
+const tLandN = Number(ballN.timeToLand ?? 1);
+// Allow power only when airborne and ball is close and landing soon.
+// Thresholds are tuned for normalized coordinates:
+//   dx <= ~0.30  (~55px horizontally), dy <= ~0.50 (~63px vertically), timeToLand <= 0.55
+const allowPowerHit = (!!isAir) && (dxN <= 0.30) && (dyN <= 0.50) && (tLandN <= 0.55);
+
+
 
     // epsilon random exploration (still valid)
     if (!deterministic && epsRand > 0 && Math.random() < epsRand) {
-      const powerHit = (Math.random() < 0.5) ? 1 : 0;
+      const powerHit = (allowPowerHit && (Math.random() < 0.5)) ? 1 : 0;
       let axChoices = [0, 1, 2];
       if (!isAir && powerHit === 1) axChoices = [0, 2];
       const ayChoices = (!isAir) ? [0, 1, 2] : [0, 1, 2];
@@ -639,6 +663,7 @@ this.hidden1 = Math.max(1, (opts.hidden1 ?? 64) | 0);
       }
       ay = best;
       ap = (pp[1] > pp[0]) ? 1 : 0;
+      if (ap === 1 && !allowPowerHit) { ap = 0; this.debug.powerMasked++; }
       // If ground and power=1, forbid x=0 (class 1) to avoid invalid/forced-idle dive.
       if (!isAir && ap === 1 && ax === 1) {
         if (this.debug.maskStats) { this.debug.maskStats.xZeroMaskedCount++; this.debug.maskStats.xZeroMaskedMass += (px[1] ?? 0); }
@@ -647,6 +672,7 @@ this.hidden1 = Math.max(1, (opts.hidden1 ?? 64) | 0);
       }
     } else {
       ap = sampleCategorical(pp);
+      if (ap === 1 && !allowPowerHit) { ap = 0; this.debug.powerMasked++; }
       // if ground and power=1, mask x=0
       if (!isAir && ap === 1) {
         const px2 = new Float32Array(px);
@@ -659,7 +685,8 @@ this.hidden1 = Math.max(1, (opts.hidden1 ?? 64) | 0);
         ax = sampleCategorical(px);
       }
       // y-direction mask: on ground forbid y=-1 (class 0) to avoid dive-loop.
-      if (!isAir) {
+      if (isAir) {
+        // In air: forbid y=-1 (jump) to avoid double-jump.
         if (this.debug.maskStats) { this.debug.maskStats.yNegMaskedCount++; this.debug.maskStats.yNegMaskedMass += (py[0] ?? 0); }
         const py2 = new Float32Array(py);
         py2[0] = 0;
