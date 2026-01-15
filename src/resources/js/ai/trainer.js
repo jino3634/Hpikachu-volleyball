@@ -894,7 +894,14 @@ export class Trainer {
 
           // Diagnostics
           if (this.policy && this.policy.debug) {
-            logDebug(`[PPO-DIAG] nanFeatures=${this.policy.debug.nanFeatures} invalidSteps=${this.policy.debug.invalidFeatureSteps} forcedIdle=${this.policy.debug.forcedIdle} (noAct=${this.policy.debug.forcedIdleNoAct}, lying=${this.policy.debug.forcedIdleLying}, diving=${this.policy.debug.forcedIdleDiving}) powerHitSampled=${this.policy.debug.powerHitSampled} powerMasked=${this.policy.debug.powerMasked}`);
+            {
+            const pg = this.policy.debug.powerGate || {};
+            const gateReq = (pg.requested ?? 0);
+            const gateAllow = (pg.allowed ?? 0);
+            const gateBlocked = gateReq - gateAllow;
+            const avg = (sum, cnt, digits=3) => (cnt ? (sum / cnt).toFixed(digits) : 'NA');
+            logDebug(`[PPO-DIAG] nanFeatures=${this.policy.debug.nanFeatures} invalidSteps=${this.policy.debug.invalidFeatureSteps} forcedIdle=${this.policy.debug.forcedIdle} (noAct=${this.policy.debug.forcedIdleNoAct}, lying=${this.policy.debug.forcedIdleLying}, diving=${this.policy.debug.forcedIdleDiving}) powerHitReq=${this.policy.debug.powerHitSampled} powerMasked=${this.policy.debug.powerMasked} gateReq=${gateReq} gateAllow=${gateAllow} gateNotAir=${pg.blockedNotAir ?? 0} gateDX=${pg.blockedDX ?? 0} gateDY=${pg.blockedDY ?? 0} gateTTL=${pg.blockedTTL ?? 0} gateBlocked=${gateBlocked} gateAvgReqDX=${avg(pg.sumDX_req ?? 0, pg.count_req ?? 0, 3)} gateAvgReqDY=${avg(pg.sumDY_req ?? 0, pg.count_req ?? 0, 3)} gateAvgReqTTL=${avg(pg.sumTTL_req ?? 0, pg.count_req ?? 0, 3)} gateAvgAllowDX=${avg(pg.sumDX_allow ?? 0, pg.count_allow ?? 0, 3)} gateAvgAllowDY=${avg(pg.sumDY_allow ?? 0, pg.count_allow ?? 0, 3)} gateAvgAllowTTL=${avg(pg.sumTTL_allow ?? 0, pg.count_allow ?? 0, 3)} gateAvgBlockDX=${avg(pg.sumDX_block ?? 0, pg.count_block ?? 0, 3)} gateAvgBlockDY=${avg(pg.sumDY_block ?? 0, pg.count_block ?? 0, 3)} gateAvgBlockTTL=${avg(pg.sumTTL_block ?? 0, pg.count_block ?? 0, 3)}`);
+          }
             // Additional rolling diagnostics from policy
             const as = this.policy.debug.actionStats;
             if (as && as.n > 0) {
@@ -930,6 +937,15 @@ export class Trainer {
             this.policy.debug.forcedIdleLying = 0;
             this.policy.debug.forcedIdleDiving = 0;
             this.policy.debug.powerHitSampled = 0;
+            this.policy.debug.powerMasked = 0;
+            if (this.policy.debug.powerGate) {
+              this.policy.debug.powerGate.requested = 0;
+              this.policy.debug.powerGate.allowed = 0;
+              this.policy.debug.powerGate.blockedNotAir = 0;
+              this.policy.debug.powerGate.blockedDX = 0;
+              this.policy.debug.powerGate.blockedDY = 0;
+              this.policy.debug.powerGate.blockedTTL = 0;
+            }
             if (this.policy.debug.actionStats) {
               this.policy.debug.actionStats.n = 0;
               this.policy.debug.actionStats.entX = 0;
@@ -1286,7 +1302,7 @@ _buildPointReplay(res) {
             }
 
       if (this.policy && this.policy.debug) {
-        logDebug(`[PPO-DIAG] nanFeatures=${this.policy.debug.nanFeatures} invalidSteps=${this.policy.debug.invalidFeatureSteps} forcedIdle=${this.policy.debug.forcedIdle} (noAct=${this.policy.debug.forcedIdleNoAct}, lying=${this.policy.debug.forcedIdleLying}, diving=${this.policy.debug.forcedIdleDiving}) powerHitSampled=${this.policy.debug.powerHitSampled} powerMasked=${this.policy.debug.powerMasked}`);
+        logDebug(`[PPO-DIAG] nanFeatures=${this.policy.debug.nanFeatures} invalidSteps=${this.policy.debug.invalidFeatureSteps} forcedIdle=${this.policy.debug.forcedIdle} (noAct=${this.policy.debug.forcedIdleNoAct}, lying=${this.policy.debug.forcedIdleLying}, diving=${this.policy.debug.forcedIdleDiving}) powerHitSampled=${this.policy.debug.powerHitSampled} powerMasked=${this.policy.debug.powerMasked} gateReq=${this.policy.debug.powerGate?.requested ?? 0} gateAllow=${this.policy.debug.powerGate?.allowed ?? 0} gateNAir=${this.policy.debug.powerGate?.blockedNotAir ?? 0} gateDX=${this.policy.debug.powerGate?.blockedDX ?? 0} gateDY=${this.policy.debug.powerGate?.blockedDY ?? 0} gateTTL=${this.policy.debug.powerGate?.blockedTTL ?? 0}`);
             // Additional rolling diagnostics from policy
             const as = this.policy.debug.actionStats;
             if (as && as.n > 0) {

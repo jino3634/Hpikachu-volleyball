@@ -130,6 +130,24 @@ export class PpoPolicyV1 {
       forcedIdleDiving: 0,
       powerHitSampled: 0,
       powerMasked: 0,
+      powerGate: {
+        // counts
+        requested: 0,       // power=1 sampled/selected (before gating)
+        allowed: 0,         // power=1 actually applied
+        blockedNotAir: 0,
+        blockedDX: 0,
+        blockedDY: 0,
+        blockedTTL: 0,
+
+        // raw attempt stats (requested)
+        sumDX_req: 0, sumDY_req: 0, sumTTL_req: 0, count_req: 0,
+
+        // allowed stats
+        sumDX_allow: 0, sumDY_allow: 0, sumTTL_allow: 0, count_allow: 0,
+
+        // blocked stats
+        sumDX_block: 0, sumDY_block: 0, sumTTL_block: 0, count_block: 0,
+      },
     };
     // Extended diagnostics (rolling; reset by Trainer after each flush)
     this.debug.featStats = null; // lazily initialized in buildFeatures()
@@ -482,7 +500,10 @@ this.hidden1 = Math.max(1, (opts.hidden1 ?? 64) | 0);
     const timeToLand = Number(ball.timeToLand ?? 1); // normalized (0..1)
     // Power-hit gate: only allow when airborne AND close to ball AND landing is soon.
     // This aggressively reduces dive/forced-idle loops so PPO can actually learn.
-    const allowPowerHit = !!isAir && (dx <= 55) && (dy <= 55) && (timeToLand <= 0.55);
+    const dxOk = (dx <= 55);
+    const dyOk = (dy <= 55);
+    const ttlOk = (timeToLand <= 0.55);
+    const allowPowerHit = !!isAir && dxOk && dyOk && ttlOk;
 
 
   // If cannot act at all, force IDLE effectively.
@@ -627,7 +648,27 @@ const allowPowerHit = (!!isAir) && (dxN <= 0.30) && (dyN <= 0.50) && (tLandN <= 
       const ay = ayChoices[(Math.random() * ayChoices.length) | 0];
       const ap = powerHit ? 1 : 0;
 
-      if (ap === 1) this.debug.powerHitSampled++;
+      if (ap === 1) {
+        this.debug.powerHitSampled++; // requested power-hit (pre-gate)
+        if (this.debug && this.debug.powerGate) {
+          const pg = this.debug.powerGate;
+          const dxv = (typeof dx === "number" ? dx : 0);
+          const dyv = (typeof dy === "number" ? dy : 0);
+          const ttlv = (typeof timeToLand === "number" ? timeToLand : 0);
+          pg.requested++;
+          pg.sumDX_req += dxv; pg.sumDY_req += dyv; pg.sumTTL_req += ttlv; pg.count_req++;
+          if (allowPowerHit) {
+            pg.allowed++;
+            pg.sumDX_allow += dxv; pg.sumDY_allow += dyv; pg.sumTTL_allow += ttlv; pg.count_allow++;
+          } else {
+            pg.sumDX_block += dxv; pg.sumDY_block += dyv; pg.sumTTL_block += ttlv; pg.count_block++;
+            if (!isAir) pg.blockedNotAir++;
+            if (typeof dxOk !== 'undefined' && !dxOk) pg.blockedDX++;
+            if (typeof dyOk !== 'undefined' && !dyOk) pg.blockedDY++;
+            if (typeof ttlOk !== 'undefined' && !ttlOk) pg.blockedTTL++;
+          }
+        }
+      }
       recordActionStats(ax, ay, ap);
 
 
@@ -664,7 +705,7 @@ const allowPowerHit = (!!isAir) && (dxN <= 0.30) && (dyN <= 0.50) && (tLandN <= 
       ay = best;
       ap = (pp[1] > pp[0]) ? 1 : 0;
       if (ap === 1 && !allowPowerHit) { ap = 0; this.debug.powerMasked++; }
-      // If ground and power=1, forbid x=0 (class 1) to avoid invalid/forced-idle dive.
+// If ground and power=1, forbid x=0 (class 1) to avoid invalid/forced-idle dive.
       if (!isAir && ap === 1 && ax === 1) {
         if (this.debug.maskStats) { this.debug.maskStats.xZeroMaskedCount++; this.debug.maskStats.xZeroMaskedMass += (px[1] ?? 0); }
         ax = (px[2] > px[0]) ? 2 : 0;
@@ -673,7 +714,7 @@ const allowPowerHit = (!!isAir) && (dxN <= 0.30) && (dyN <= 0.50) && (tLandN <= 
     } else {
       ap = sampleCategorical(pp);
       if (ap === 1 && !allowPowerHit) { ap = 0; this.debug.powerMasked++; }
-      // if ground and power=1, mask x=0
+// if ground and power=1, mask x=0
       if (!isAir && ap === 1) {
         const px2 = new Float32Array(px);
         if (this.debug.maskStats) { this.debug.maskStats.xZeroMaskedCount++; this.debug.maskStats.xZeroMaskedMass += (px[1] ?? 0); }
@@ -709,7 +750,27 @@ const allowPowerHit = (!!isAir) && (dxN <= 0.30) && (dyN <= 0.50) && (tLandN <= 
     const logp = logProbFromProbs(px, ax) + logProbFromProbs(py, ay) + logProbFromProbs(pp, ap);
     const action = { xDirection: mapClassToXDir(ax), yDirection: mapClassToYDir(ay), powerHit: ap ? 1 : 0 };
     // diagnostics: count sampled power-hit actions (main policy path)
-    if (ap === 1) this.debug.powerHitSampled++;
+    if (ap === 1) {
+        this.debug.powerHitSampled++; // requested power-hit (pre-gate)
+        if (this.debug && this.debug.powerGate) {
+          const pg = this.debug.powerGate;
+          const dxv = (typeof dx === "number" ? dx : 0);
+          const dyv = (typeof dy === "number" ? dy : 0);
+          const ttlv = (typeof timeToLand === "number" ? timeToLand : 0);
+          pg.requested++;
+          pg.sumDX_req += dxv; pg.sumDY_req += dyv; pg.sumTTL_req += ttlv; pg.count_req++;
+          if (allowPowerHit) {
+            pg.allowed++;
+            pg.sumDX_allow += dxv; pg.sumDY_allow += dyv; pg.sumTTL_allow += ttlv; pg.count_allow++;
+          } else {
+            pg.sumDX_block += dxv; pg.sumDY_block += dyv; pg.sumTTL_block += ttlv; pg.count_block++;
+            if (!isAir) pg.blockedNotAir++;
+            if (typeof dxOk !== 'undefined' && !dxOk) pg.blockedDX++;
+            if (typeof dyOk !== 'undefined' && !dyOk) pg.blockedDY++;
+            if (typeof ttlOk !== 'undefined' && !ttlOk) pg.blockedTTL++;
+          }
+        }
+      }
     recordActionStats(ax, ay, ap);
     return { action, logp, value, meta: { ax, ay, ap, forcedIdle: skipLearn, reason: (skipLearn ? (isLying ? 'lying' : 'diving') : null) } };
   }

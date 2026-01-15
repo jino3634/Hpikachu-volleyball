@@ -262,6 +262,12 @@ try {
       const obs2 = this.game.getObservation(2);
       const obs = (this.learningPlayer === 1) ? obs1 : obs2;
 
+      // Reset trace buffer at start of a round (frames==0)
+      if (this._traceEnabled && frames === 0) {
+        this._traceBuf = [];
+      }
+
+
       // If cannot act (lying/diving/etc), skip *decision sampling itself*.
       // (obs.me.canAct is produced by getObservation() and is 0 when state > 3)
       const canAct = !(obs && obs.me && obs.me.canAct === 0) && !((obs && obs.me && obs.me.isDiving) || (obs && obs.me && obs.me.isLying));
@@ -392,6 +398,36 @@ try {
           }
         : null;
 
+      // Collect per-frame trace (only last N frames). Dumped on point end.
+      if (this._traceEnabled) {
+        const me = obs?.me ?? {};
+        const ball = obs?.ball ?? {};
+        const meta = agent?.lastDecision?.meta ?? null;
+        this._traceBuf.push({
+          t: frames,
+          me: {
+            state: me.state,
+            canAct: me.canAct,
+            isAir: (me.isAir !== undefined ? me.isAir : null),
+            isDiving: (me.isDiving !== undefined ? me.isDiving : null),
+            isLying: (me.isLying !== undefined ? me.isLying : null),
+            x: me.x, y: me.y, vx: me.vx, vy: me.vy
+          },
+          ball: {
+            x: ball.x, y: ball.y, vx: ball.vx, vy: ball.vy,
+            timeToLand: ball.timeToLand, landingX: ball.landingX
+          },
+          action: inputTuple,
+          meta: meta ? {
+            ax: meta.ax, ay: meta.ay, ap: meta.ap,
+            allowPowerHit: meta.allowPowerHit,
+            dx: meta.dx, dy: meta.dy, timeToLand: meta.timeToLand,
+            forcedIdle: meta.forcedIdle, reason: meta.reason
+          } : null,
+        });
+        if (this._traceBuf.length > this._traceMax) this._traceBuf.shift();
+      }
+
       // PPO requires decisionInfo (logp/value). If missing => skip creating a transition.
       if (!decisionInfo) {
         // canAct=false OR hasChooseInput=false OR lastDecision missing
@@ -428,6 +464,19 @@ try {
         : ((ev && typeof ev.scored === 'number') ? ev.scored : 0);
       if (scoredBy === 1 || scoredBy === 2) {
         const loser = (scoredBy === 1) ? 2 : 1;
+      if (this._traceEnabled) {
+        const didLearningWin = (scoredBy === this.learningPlayer);
+        const key = didLearningWin ? 'win' : 'loss';
+        if ((this._traceDumps[key] ?? 0) < 1) {
+          this._traceDumps[key] = (this._traceDumps[key] ?? 0) + 1;
+          const lr = ev?.loseReason ?? ev?.reason ?? null;
+          console.log(`[TRACE-POINT] ${key.toUpperCase()} frames=${frames} scoredBy=${scoredBy} learning=${this.learningPlayer} loseReason=${lr}`);
+          for (const row of this._traceBuf) {
+            console.log(`[TRACE-FRAME] ${JSON.stringify(row)}`);
+          }
+        }
+      }
+
 
         builder.finalize({
           scoredBy,
