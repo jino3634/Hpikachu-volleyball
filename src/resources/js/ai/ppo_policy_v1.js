@@ -629,15 +629,15 @@ obsStats: {
     };
 
 
-   // Power-hit gate (obs is normalized: x/y in [-1,1], timeToLand in [0,1])
-   const ballN = obs?.ball ?? {};
-   const dxN = Math.abs(Number(ballN.x ?? 0) - Number(me.x ?? 0));
-   const dyN = Math.abs(Number(ballN.y ?? 0) - Number(me.y ?? 0));
-   const tLandN = Number(ballN.timeToLand ?? 1);
-   // Allow power only when airborne and ball is close and landing soon.
-   // Thresholds are tuned for normalized coordinates:
-   //   dx <= ~0.30  (~55px horizontally), dy <= ~0.50 (~63px vertically), timeToLand <= 0.55
-   const allowPowerHit = (dxN <= 0.30) && (dyN <= 0.50) && (tLandN <= 0.55);
+// Power-hit gate (obs is normalized: x/y in [-1,1], timeToLand in [0,1])
+const ballN = obs?.ball ?? {};
+const dxN = Math.abs(Number(ballN.x ?? 0) - Number(me.x ?? 0));
+const dyN = Math.abs(Number(ballN.y ?? 0) - Number(me.y ?? 0));
+const tLandN = Number(ballN.timeToLand ?? 1);
+// Allow power only when airborne and ball is close and landing soon.
+// Thresholds are tuned for normalized coordinates:
+//   dx <= ~0.30  (~55px horizontally), dy <= ~0.50 (~63px vertically), timeToLand <= 0.55
+const allowPowerHit = !!isAir && (dxN <= 0.30) && (dyN <= 0.50) && (tLandN <= 0.55);
 
 
     // epsilon random exploration (still valid)
@@ -652,10 +652,6 @@ obsStats: {
 
       // powerHit gate
       if (!allowPowerHit) ap = 0;
-      // 지상 + 파워면 x=중립 금지 (epsilon에서도 보정)
-      if (!isAir && ap === 1 && ax === 1) {
-        ax = (Math.random() < 0.5) ? 0 : 2;
-      }
 
       const powerHit = ap ? 1 : 0;
 
@@ -814,7 +810,7 @@ obsStats: {
     const dxN = Math.abs(Number(ballN.x ?? 0) - Number(me.x ?? 0));
     const dyN = Math.abs(Number(ballN.y ?? 0) - Number(me.y ?? 0));
     const tLandN = Number(ballN.timeToLand ?? 1);
-    const allowPowerHit = (dxN <= 0.30) && (dyN <= 0.50) && (tLandN <= 0.55);
+    const allowPowerHit = (dxN <= 0.30) && (dyN <= 0.50) && (tLandN <= 0.55) && !!isAir;
 
     const a = (typeof action === 'number') ? { xDirection: 0, yDirection: 0, powerHit: 0 } : action;
     const ax = mapXDirToClass(Number(a.xDirection ?? 0));
