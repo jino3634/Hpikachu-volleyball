@@ -258,6 +258,9 @@ export class OnePointEpisodeRunner {
         let serveCrossedNet = false;
         let sawBallOnMySide = false; // for return shaping when receiving
         let returnCrossedNet = false;
+        let saveEligible = true;      // save 보상을 받을 수 있는 상태인가?
+        let dangerArmed = false;      // “위기 공”을 감지해서 보상 대기중인가?
+        let prevLastTouch = 0;        // lastTouch 변화 감지용
 
         while (true) {
           // ✅ 전체 stepLogic 안전장치: round가 아니어도 증가
@@ -388,7 +391,7 @@ export class OnePointEpisodeRunner {
                   : (bx0 >= NET_X && bx1 < NET_X);
                 if (crossed) {
                   serveCrossedNet = true;
-                  shapingReward += 0.10;
+                  shapingReward += 0.30;
                 }
               }
 
@@ -402,7 +405,7 @@ export class OnePointEpisodeRunner {
                     : (bx0 >= NET_X && bx1 < NET_X);
                   if (crossedBack) {
                     returnCrossedNet = true;
-                    shapingReward += 0.10;
+                    shapingReward += 0.30;
                   }
                 }
               }
@@ -410,6 +413,49 @@ export class OnePointEpisodeRunner {
           } catch (_) {
             // ignore shaping errors
           }
+
+          // === defensive save shaping (B) ===
+          // flip 기준: 내 코트는 항상 왼쪽, landingX < 0 이면 내 코트에 떨어질 예정
+          try {
+            const ball = this.game.physics.ball;
+            const lastTouch = ball?.lastTouch | 0;
+
+            // 플립 관측값 사용: nextObs.ball.x / nextObs.ball.landingX 는 이미 "내가 왼쪽" 기준
+            const ballX = nextObs?.ball?.x;         // [-1..1]
+            const landingX = nextObs?.ball?.landingX; // [-1..1]
+
+            const me = this.learningPlayer;           // 1 or 2
+            const opp = (me === 1) ? 2 : 1;
+
+            // ✅ 재무장 조건: 공이 상대 코트(오른쪽, x>0)에 있고, 상대가 1회 이상 터치했으면
+            if (!saveEligible) {
+              if (lastTouch === opp && typeof ballX === 'number' && ballX > 0) {
+                saveEligible = true;
+                dangerArmed = false;
+              }
+            }
+
+            // ✅ 위기 감지(armed): 상대가 마지막으로 친 공이고, landingX가 내 코트(왼쪽, <0)
+            if (saveEligible && !dangerArmed) {
+              if (lastTouch === opp && typeof landingX === 'number' && landingX < 0) {
+                dangerArmed = true;
+              }
+            }
+
+            // ✅ 해소(보상 지급): 위기 상태에서 lastTouch가 “나”로 바뀌는 순간 1회
+            if (dangerArmed) {
+              if (prevLastTouch !== me && lastTouch === me) {
+                shapingReward += 0.20;     // R_save
+                dangerArmed = false;
+                saveEligible = false;      // 잠금: 상대가 다시 공격권 잡을 때까지
+              }
+            }
+
+            prevLastTouch = lastTouch;
+          } catch (_) {
+            // ignore
+          }
+
 
           // Attach shaping to roundEvents so builder reward function can use it.
           if (ev && typeof ev === 'object') {

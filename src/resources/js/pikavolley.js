@@ -6,6 +6,7 @@ import { GROUND_HALF_WIDTH, PikaPhysics } from './physics.js';
 import { MenuView, GameView, FadeInOut, IntroView } from './view.js';
 import { PikaKeyboard } from './keyboard.js';
 import { PikaAudio } from './audio.js';
+import { TouchTracker } from './ai/touch_tracker.js';
 
 /** @typedef {import('@pixi/display').Container} Container */
 /** @typedef {import('@pixi/loaders').LoaderResource} LoaderResource */
@@ -39,6 +40,7 @@ export class PikachuVolleyball {
 
     this.audio = new PikaAudio(resources);
     this.physics = new PikaPhysics(true, true);
+    this.touchTracker = new TouchTracker();
     this.keyboardArray = [
       new PikaKeyboard('KeyD', 'KeyG', 'KeyR', 'KeyV', 'KeyZ', 'KeyF'), // for player1
       new PikaKeyboard(
@@ -49,21 +51,6 @@ export class PikachuVolleyball {
         'Enter'
       ),
     ];
-
-    // Debug stats for training diagnostics (safe to ignore in normal gameplay)
-    this.debugStats = {
-      decisions: 0,
-      forcedIdle: 0,
-      powerHitRequested: 0,
-      powerHitApplied: 0,
-    };
-
-    // Hold powerHit for N frames within a decision interval (default: 2 = full interval)
-    // You can override by setting globalThis.__PPO_POWERHIT_HOLD_FRAMES (e.g., 1 to revert).
-    const holdCfg = (typeof globalThis !== 'undefined') ? globalThis.__PPO_POWERHIT_HOLD_FRAMES : undefined;
-    this.powerHitHoldFrames = (typeof holdCfg === 'number' && isFinite(holdCfg) && holdCfg >= 1) ? (holdCfg | 0) : 2;
-
-
 
     /** @type {number} game fps */
     this.normalFPS = 25;
@@ -94,13 +81,6 @@ export class PikachuVolleyball {
 
     /** @type {number} frame counter */
     this.frameCounter = 0;
-
-    /**
-     * Optional hook for external tools (trainer, recorder, etc.).
-     * Called after each physics step if set.
-     * @type {null | ((info: any) => void)}
-     */
-    this.onAfterPhysicsFrame = null;
     /** @type {Object.<string,number>} total number of frames for each game state */
     this.frameTotal = {
       intro: 165,
@@ -141,12 +121,8 @@ export class PikachuVolleyball {
     this.controlMode = 'builtin'; // 'builtin' | 'external'
     this.decisionInterval = 2;
     this._decisionPhase = 0;
-    // legacy: actionId(0..9)
     this._heldActionP1 = 0;
     this._heldActionP2 = 0;
-    // preferred: input tuple { xDirection, yDirection, powerHit }
-    this._heldInputP1 = { xDirection: 0, yDirection: 0, powerHit: 0 };
-    this._heldInputP2 = { xDirection: 0, yDirection: 0, powerHit: 0 };
 
     this._prevExternalRoundLike = false;
 
@@ -174,66 +150,38 @@ export class PikachuVolleyball {
     );
   }
 
-  _actionIdToInputTuple(actionId) {
-    // NOTE:
-    // - This mapping is for backward compatibility (actionId-based agents).
-    // - Keep it consistent with src/resources/js/ai/agents.js ACTION enum (0..14).
-    // - New agents should output {xDirection, yDirection, powerHit} directly.
+  _applyActionToKeyboard(kb, actionId, phaseInDecisionInterval, playerIndex) {
     let x = 0, y = 0, p = 0;
-    switch (actionId | 0) {
-      case 0: break;                         // IDLE
-      case 1: x = -1; break;                 // LEFT
-      case 2: x = 1; break;                  // RIGHT
-      case 3: y = -1; break;                 // JUMP
-      case 4: x = -1; y = -1; break;         // JUMP_LEFT
-      case 5: x = 1; y = -1; break;          // JUMP_RIGHT
 
+    switch (actionId) {
+      case 0: break;                 // IDLE
+      case 1: x = -1; break;         // LEFT
+      case 2: x = 1; break;          // RIGHT
+      case 3: y = -1; break;         // JUMP
+      case 4: x = -1; y = -1; break; // JUMP_LEFT
+      case 5: x = 1; y = -1; break;  // JUMP_RIGHT
+
+      // POWER 계열 (powerHit는 1프레임 트리거)
       case 6: p = 1; break;                  // POWER_NEUTRAL
       case 7: x = -1; p = 1; break;          // POWER_LEFT
       case 8: x = 1; p = 1; break;           // POWER_RIGHT
-
-      case 9: y = -1; p = 1; break;          // POWER_UP
-      case 10: x = -1; y = -1; p = 1; break; // POWER_UP_LEFT
-      case 11: x = 1; y = -1; p = 1; break;  // POWER_UP_RIGHT
-
-      case 12: y = 1; p = 1; break;          // POWER_DOWN (air only)
-      case 13: x = -1; y = 1; p = 1; break;  // POWER_DOWN_LEFT
-      case 14: x = 1; y = 1; p = 1; break;   // POWER_DOWN_RIGHT
+      case 9: y = 1; p = 1; break;           // POWER_DOWN (공중에서만 의미)
       default: break;
     }
-    return { xDirection: x, yDirection: y, powerHit: p };
-  }
 
-  _applyInputToKeyboard(kb, inputTuple, phaseInDecisionInterval, playerIndex) {
-    // Normalize
-    let x = (inputTuple && typeof inputTuple.xDirection === 'number') ? (inputTuple.xDirection | 0) : 0;
-    let y = (inputTuple && typeof inputTuple.yDirection === 'number') ? (inputTuple.yDirection | 0) : 0;
-    let p = (inputTuple && typeof inputTuple.powerHit === 'number') ? (inputTuple.powerHit | 0) : 0;
-
-    // powerHit trigger can be held for multiple frames within a decision interval
-    const holdFrames = (typeof this.powerHitHoldFrames === 'number' && this.powerHitHoldFrames >= 1) ? this.powerHitHoldFrames : 1;
-    if (p === 1 && phaseInDecisionInterval >= holdFrames) {
+    // ✅ powerHit는 decision 구간의 "첫 프레임(phase=0)"에만 발생시키기
+    if (p === 1 && phaseInDecisionInterval !== 0) {
       p = 0;
     }
 
-    // Count applied powerHit triggers (after holding/masking)
-    if (p === 1 && this.debugStats) {
-      this.debugStats.powerHitApplied++;
-    }
-// POWER_DOWN style (y=+1) is only meaningful in air
-    if (y === 1) {
+    // ✅ POWER_DOWN은 공중에서만 의미: 지상이면 DOWN 제거
+    if (actionId === 9) {
       const player = this.physics[`player${playerIndex}`];
-      const isAir = player.y < 244; // physics.js: PLAYER_TOUCHING_GROUND_Y_COORD = 244
+      const isAir = player.y < 244; // physics.js의 PLAYER_TOUCHING_GROUND_Y_COORD = 244
       if (!isAir) y = 0;
     }
 
     kb.setOverrideInput(x, y, p);
-  }
-
-  // Backward-compatible wrapper
-  _applyActionToKeyboard(kb, actionId, phaseInDecisionInterval, playerIndex) {
-    const tup = this._actionIdToInputTuple(actionId);
-    this._applyInputToKeyboard(kb, tup, phaseInDecisionInterval, playerIndex);
   }
 
   /**
@@ -279,67 +227,26 @@ export class PikachuVolleyball {
 
       if (phase === 0) {
         // ✅ externalEnabled인 쪽만 chooseAction 수행
-        if (this.externalEnabledP1 && this.agent1 && (typeof this.agent1.chooseInput === 'function' || typeof this.agent1.chooseAction === 'function')) {
+        if (this.externalEnabledP1 && this.agent1 && typeof this.agent1.chooseAction === 'function') {
           const obs1 = this.getObservation(1);
-          // Prefer tuple-based agent API when available
-          if (typeof this.agent1.chooseInput === 'function') {
-            this._heldInputP1 = this.agent1.chooseInput(obs1, 1, this) || { xDirection: 0, yDirection: 0, powerHit: 0 };
-          } else {
-            // Backward-compatible: some agents expect (obs, playerIndex, game),
-            // others expect raw physics only. Try obs first, then fallback to physics.
-            let a1;
-            try {
-              a1 = this.agent1.chooseAction(obs1, 1, this);
-            } catch (_) {
-              a1 = undefined;
-            }
-            if (typeof a1 !== 'number') {
-              try {
-                a1 = this.agent1.chooseAction(this.physics, 1, this);
-              } catch (_) {
-                a1 = 0;
-              }
-            }
-            this._heldActionP1 = (a1 | 0);
-            this._heldInputP1 = this._actionIdToInputTuple(this._heldActionP1);
-          }
+          this._heldActionP1 = (this.agent1.chooseAction(obs1, 1, this) | 0);
         }
-        if (this.externalEnabledP2 && this.agent2 && (typeof this.agent2.chooseInput === 'function' || typeof this.agent2.chooseAction === 'function')) {
+        if (this.externalEnabledP2 && this.agent2 && typeof this.agent2.chooseAction === 'function') {
           const obs2 = this.getObservation(2);
-          if (typeof this.agent2.chooseInput === 'function') {
-            this._heldInputP2 = this.agent2.chooseInput(obs2, 2, this) || { xDirection: 0, yDirection: 0, powerHit: 0 };
-          } else {
-            // Backward-compatible: some agents expect (obs, playerIndex, game),
-            // others expect raw physics only. Try obs first, then fallback to physics.
-            let a2;
-            try {
-              a2 = this.agent2.chooseAction(obs2, 2, this);
-            } catch (_) {
-              a2 = undefined;
-            }
-            if (typeof a2 !== 'number') {
-              try {
-                a2 = this.agent2.chooseAction(this.physics, 2, this);
-              } catch (_) {
-                a2 = 0;
-              }
-            }
-            this._heldActionP2 = (a2 | 0);
-            this._heldInputP2 = this._actionIdToInputTuple(this._heldActionP2);
-          }
+          this._heldActionP2 = (this.agent2.chooseAction(obs2, 2, this) | 0);
         }
       }
 
       // ✅ externalEnabled인 쪽만 override 주입
       if (this.externalEnabledP1) {
-        this._applyInputToKeyboard(this.keyboardArray[0], this._heldInputP1, phase, 1);
+        this._applyActionToKeyboard(this.keyboardArray[0], this._heldActionP1, phase, 1);
       } else {
         // builtin/사람 입력이 쓰도록 override만 제거
         this.keyboardArray[0].clearOverrideInput();
       }
 
       if (this.externalEnabledP2) {
-        this._applyInputToKeyboard(this.keyboardArray[1], this._heldInputP2, phase, 2);
+        this._applyActionToKeyboard(this.keyboardArray[1], this._heldActionP2, phase, 2);
       } else {
         this.keyboardArray[1].clearOverrideInput();
       }
@@ -531,6 +438,8 @@ export class PikachuVolleyball {
       this.physics.player1.initializeForNewRound();
       this.physics.player2.initializeForNewRound();
       this.physics.ball.initializeForNewRound(this.isPlayer2Serve);
+
+      this.touchTracker.resetPoint();
     }
 
     this.frameCounter++;
@@ -613,31 +522,10 @@ export class PikachuVolleyball {
       this.keyboardArray
     );
 
-    // Optional frame hook: used for imitation dataset collection.
-    // NOTE: keyboardArray may be mutated by physics (builtin AI path).
-    if (typeof this.onAfterPhysicsFrame === 'function') {
-      try {
-        this.onAfterPhysicsFrame({
-          frame: this.totalFrame ?? this.frameCounter ?? 0,
-          scores: [this.scores?.[0] ?? 0, this.scores?.[1] ?? 0],
-          inputP1: {
-            xDirection: this.keyboardArray?.[0]?.xDirection ?? 0,
-            yDirection: this.keyboardArray?.[0]?.yDirection ?? 0,
-            powerHit: this.keyboardArray?.[0]?.powerHit ?? 0,
-          },
-          inputP2: {
-            xDirection: this.keyboardArray?.[1]?.xDirection ?? 0,
-            yDirection: this.keyboardArray?.[1]?.yDirection ?? 0,
-            powerHit: this.keyboardArray?.[1]?.powerHit ?? 0,
-          },
-          obsP1: this.getObservation ? this.getObservation(1) : null,
-          obsP2: this.getObservation ? this.getObservation(2) : null,
-          stateName: (this.state === this.round) ? 'round' : 'non_round',
-        });
-      } catch (e) {
-        // ignore hook errors
-      }
-    }
+    // ✅ 바로 여기
+    this.touchTracker.observePhysics(this.physics);
+    this.touchTracker.commitFrame();
+
 
     if (this.gameEnded === true) {
       this.frameCounter++;
@@ -817,6 +705,9 @@ export class PikachuVolleyball {
       this.physics.player1.initializeForNewRound();
       this.physics.player2.initializeForNewRound();
       this.physics.ball.initializeForNewRound(this.isPlayer2Serve);
+
+      // ✅ 포인트 시작마다 lastTouch 초기화
+      this.touchTracker.resetPoint();
     }
 
     this.frameCounter++;
@@ -860,6 +751,7 @@ export class PikachuVolleyball {
   }
 
   playSoundEffect() {
+    if (window.__PV_TRAINING_MUTE__) return; // ✅ 학습 중 사운드 완전 차단
     const audio = this.audio;
     for (let i = 0; i < 2; i++) {
       const player = this.physics[`player${i + 1}`];
@@ -947,24 +839,11 @@ export class PikachuVolleyball {
   setExternalActions(p1ActionId, p2ActionId) {
     this._heldActionP1 = (p1ActionId | 0);
     this._heldActionP2 = (p2ActionId | 0);
-    this._heldInputP1 = this._actionIdToInputTuple(this._heldActionP1);
-    this._heldInputP2 = this._actionIdToInputTuple(this._heldActionP2);
-  }
-
-  /**
-   * 외부에서 입력 튜플을 직접 주입(추천)
-   * @param {{xDirection:number,yDirection:number,powerHit:number}} p1Input
-   * @param {{xDirection:number,yDirection:number,powerHit:number}} p2Input
-   */
-  setExternalInputs(p1Input, p2Input) {
-    this._heldInputP1 = p1Input || { xDirection: 0, yDirection: 0, powerHit: 0 };
-    this._heldInputP2 = p2Input || { xDirection: 0, yDirection: 0, powerHit: 0 };
   }
 
   /**
    * 외부 에이전트 연결
-   * agent는 chooseInput(obs, playerIndex, game) 또는 chooseAction(...)을 제공하면 됨.
-   * chooseAction은 (obs, playerIndex, game) 또는 (physics, playerIndex, game) 형태를 모두 허용한다.
+   * agent는 chooseAction(obs, playerIndex, game) 메서드만 있으면 됨.
    */
   setAgents(agent1, agent2) {
     this.agent1 = agent1;
@@ -979,9 +858,7 @@ export class PikachuVolleyball {
     const opp = this.physics[`player${playerIndex === 1 ? 2 : 1}`];
     const b = this.physics.ball;
 
-    // --- Observation post-processing (player-centric, learning-friendly) ---
-    // Keep raw snapshot for debugging/compat.
-    const raw = {
+    return {
       me: {
         x: me.x, y: me.y,
         yV: me.yVelocity,
@@ -1003,96 +880,12 @@ export class PikachuVolleyball {
         x: b.x, y: b.y,
         xV: b.xVelocity, yV: b.yVelocity,
         expectedX: b.expectedLandingPointX,
-        
-        timeToLand: b.expectedLandingFrames,
-isPowerHit: b.isPowerHit ? 1 : 0,
+        isPowerHit: b.isPowerHit ? 1 : 0,
       },
-    };
-
-    // Court constants (from physics.js): GROUND_WIDTH=432, BALL_TOUCHING_GROUND_Y_COORD=252
-    const W = 432;
-    const H = 252;
-
-    const clamp = (v, lo, hi) => (v < lo ? lo : (v > hi ? hi : v));
-    const norm01 = (v, max) => (max <= 0 ? 0 : (v / max));
-    const norm11 = (v, max) => (norm01(v, max) * 2 - 1);
-
-    // Flip to make the observation always "me is on the left".
-    const needFlip = Boolean(raw.me.isP2);
-    const flipX = (x) => (W - x);
-    const xTo = (x) => (needFlip ? flipX(x) : x);
-    const xVTo = (xv) => (needFlip ? -xv : xv);
-
-    // Normalize positions to [-1, 1]
-    const nx = (x) => norm11(clamp(x, 0, W), W);
-    const ny = (y) => norm11(clamp(y, 0, H), H);
-
-    // Velocity clipping (empirical-safe ranges based on physics.js assignments)
-    // - ball.xV can spike from hits, keep a wide clip
-    // - y velocities are generally smaller
-    const clipBallXV = 160;
-    const clipBallYV = 60;
-    const clipPlayerYV = 25;
-    const nv = (v, clip) => (clip <= 0 ? 0 : (clamp(v, -clip, clip) / clip));
-
-    const meIsLying = (raw.me.state === 4 && (raw.me.lying|0) > 0) ? 1 : 0;
-    const meIsDiving = raw.me.state === 3 ? 1 : 0;
-    const meIsAir = (raw.me.state === 1 || raw.me.state === 2 || raw.me.state === 3) ? 1 : 0;
-const meCanAct = (raw.me.state <= 3) ? 1 : 0;
-
-    const oppIsLying = (raw.opp.state === 4 && (raw.opp.lying|0) > 0) ? 1 : 0;
-    const oppIsAir = (raw.opp.state === 1 || raw.opp.state === 2 || raw.opp.state === 3) ? 1 : 0;
-// Build processed obs while keeping original field names.
-    const meP = {
-      x: nx(xTo(raw.me.x)),
-      y: ny(raw.me.y),
-      yV: nv(raw.me.yV, clipPlayerYV),
-      state: raw.me.state,
-      divingDir: raw.me.divingDir,
-      lying: raw.me.lying,
-      isP2: 0, // after flipping, "me" is always treated as left-side
-      bold: raw.me.bold,
-      isAir: meIsAir,
-      isDiving: meIsDiving,
-      isLying: meIsLying,
-      canAct: meCanAct,
-    };
-
-    const oppP = {
-      x: nx(xTo(raw.opp.x)),
-      y: ny(raw.opp.y),
-      yV: nv(raw.opp.yV, clipPlayerYV),
-      state: raw.opp.state,
-      divingDir: raw.opp.divingDir,
-      lying: raw.opp.lying,
-      isP2: 1, // opponent is always right-side in this player-centric view
-      isAir: oppIsAir,
-      isLying: oppIsLying,
-    };
-
-    const ballP = {
-      x: nx(xTo(raw.ball.x)),
-      y: ny(raw.ball.y),
-      xV: nv(xVTo(raw.ball.xV), clipBallXV),
-      yV: nv(raw.ball.yV, clipBallYV),
-      expectedX: nx(xTo(raw.ball.expectedX)),
-      
-      landingX: nx(xTo(raw.ball.expectedX)),
-      timeToLand: Math.max(0, Math.min(1, (raw.ball.timeToLand ?? 0) / 180)),
-isPowerHit: raw.ball.isPowerHit,
-    };
-
-    return {
-      me: meP,
-      opp: oppP,
-      ball: ballP,
-      // keep high-level flags as-is (do NOT flip scores/serve flags here)
       scores: [this.scores[0], this.scores[1]],
       isPlayer2Serve: this.isPlayer2Serve ? 1 : 0,
       roundEnded: this.roundEnded ? 1 : 0,
       gameEnded: this.gameEnded ? 1 : 0,
-      // raw snapshot for debugging/backward-compat usage
-      raw,
     };
   }
 
