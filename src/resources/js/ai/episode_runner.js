@@ -69,50 +69,17 @@ export class OnePointEpisodeRunner {
       this.game.setExternalInputs(p1Input, p2Input);
       return;
     }
-
     // Fallback to actionId injection if tuple API is missing
+    // (Older versions may only support actionId.)
     if (typeof this.game.setExternalActions === 'function') {
-      const tupleToActionId = (inp) => {
-        if (!inp) return 0;
-
-        // already actionId?
-        if (typeof inp.actionId === 'number') return (inp.actionId | 0);
-
-        const x = (inp.xDirection | 0);   // -1,0,1
-        const y = (inp.yDirection | 0);   // -1,0,1
-        const p = inp.powerHit ? 1 : 0;   // 0/1
-
-        // Match pikavolley.js _applyActionToKeyboard mapping
-        if (p === 1) {
-          if (y === 1) return 9;         // POWER_DOWN
-          if (x === -1) return 7;        // POWER_LEFT
-          if (x === 1) return 8;         // POWER_RIGHT
-          return 6;                      // POWER_NEUTRAL
-        }
-
-        if (y === -1) {
-          if (x === -1) return 4;        // JUMP_LEFT
-          if (x === 1) return 5;         // JUMP_RIGHT
-          return 3;                      // JUMP
-        }
-
-        if (x === -1) return 1;          // LEFT
-        if (x === 1) return 2;           // RIGHT
-        return 0;                        // IDLE
-      };
-
-      const p1Action = tupleToActionId(p1Input);
-      const p2Action = tupleToActionId(p2Input);
+      const p1Action = p1Input?.actionId ?? 0;
+      const p2Action = p2Input?.actionId ?? 0;
       this.game.setExternalActions(p1Action, p2Action);
       return;
     }
-
-    // (older fallback remains)
-    if (typeof this.game.setAgents === 'function') {
-      // no-op here
-    }
+    this.game._heldActionP1 = p1Input?.actionId ?? 0;
+    this.game._heldActionP2 = p2Input?.actionId ?? 0;
   }
-
 
   _getStateName() {
     try {
