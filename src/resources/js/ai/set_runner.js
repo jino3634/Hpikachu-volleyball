@@ -84,8 +84,18 @@ export class OneSetRunner {
     while (frames < this.maxFrames) {
       // optional trace snapshot
       if (this._trace) {
-        const obs1 = this.game.getObservation ? this.game.getObservation(1) : null;
-        const obs2 = this.game.getObservation ? this.game.getObservation(2) : null;
+        const obs1 = this.game.getObservation
+          ? (this.game.getObservationNormalized
+              ? this.game.getObservationNormalized(1)
+              : this.game.getObservation(1))
+          : null;
+
+        const obs2 = this.game.getObservation
+          ? (this.game.getObservationNormalized
+              ? this.game.getObservationNormalized(2)
+              : this.game.getObservation(2))
+          : null;
+
         this._trace.push({
           frame: frames,
           scores: [this.game.scores?.[0] ?? 0, this.game.scores?.[1] ?? 0],

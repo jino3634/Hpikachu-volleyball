@@ -337,10 +337,17 @@ export class OnePointEpisodeRunner {
 
           this.game._lastRoundEvents = null;
 
-          // obs(learningPlayer 기준)
-          const obs1 = this.game.getObservation(1);
-          const obs2 = this.game.getObservation(2);
+          // obs(learningPlayer 기준) - 학습용은 정규화 관측을 우선 사용
+          const obs1 = this.game.getObservationNormalized
+            ? this.game.getObservationNormalized(1)
+            : this.game.getObservation(1);
+
+          const obs2 = this.game.getObservationNormalized
+            ? this.game.getObservationNormalized(2)
+            : this.game.getObservation(2);
+
           const obs = (this.learningPlayer === 1) ? obs1 : obs2;
+
 
           // Reset trace buffer at start of a round (frames==0)
           if (this._traceEnabled && frames === 0) {
@@ -405,9 +412,15 @@ export class OnePointEpisodeRunner {
             ? stepRet
             : (this.game._lastRoundEvents ?? null);
 
-          // nextObs
-          const nextObs1 = this.game.getObservation(1);
-          const nextObs2 = this.game.getObservation(2);
+          // nextObs - 학습용은 정규화 관측을 우선 사용
+          const nextObs1 = this.game.getObservationNormalized
+            ? this.game.getObservationNormalized(1)
+            : this.game.getObservation(1);
+
+          const nextObs2 = this.game.getObservationNormalized
+            ? this.game.getObservationNormalized(2)
+            : this.game.getObservation(2);
+
           const nextObs = (this.learningPlayer === 1) ? nextObs1 : nextObs2;
 
           // === minimal shaping: serve/return only ===

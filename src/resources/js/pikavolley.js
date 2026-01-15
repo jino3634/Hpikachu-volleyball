@@ -902,6 +902,55 @@ export class PikachuVolleyball {
     };
   }
 
+  getObservationNormalized(playerIndex) {
+    // raw(픽셀) 관측은 그대로 유지하고, 학습용으로만 정규화 버전을 만든다.
+    const raw = this.getObservation(playerIndex);
+
+    // physics.js에 export된 건 GROUND_HALF_WIDTH뿐이라 여기서 계산
+    const GROUND_WIDTH = GROUND_HALF_WIDTH * 2; // 432
+    const GROUND_HEIGHT = 304;
+
+    const nx = (x) => (x / GROUND_WIDTH) * 2 - 1;  // 0..432 -> -1..1
+    const ny = (y) => (y / GROUND_HEIGHT) * 2 - 1; // 0..304 -> -1..1
+
+    const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+    const nv = (v, scale) => clamp(v / scale, -1, 1);
+
+    return {
+      // ✅ 기존 코드 호환을 위해 raw를 붙여둔다 (episode_runner에서 obs.raw 참조함)
+      raw,
+
+      me: {
+        ...raw.me,
+        x: nx(raw.me.x),
+        y: ny(raw.me.y),
+        yV: nv(raw.me.yV, 20),
+      },
+      opp: {
+        ...raw.opp,
+        x: nx(raw.opp.x),
+        y: ny(raw.opp.y),
+        yV: nv(raw.opp.yV, 20),
+      },
+      ball: {
+        ...raw.ball,
+        x: nx(raw.ball.x),
+        y: ny(raw.ball.y),
+        xV: nv(raw.ball.xV, 25),
+        yV: nv(raw.ball.yV, 35),
+        expectedX: nx(raw.ball.expectedX),
+      },
+
+      // 나머지 플래그/스코어는 그대로
+      scores: raw.scores,
+      isPlayer2Serve: raw.isPlayer2Serve,
+      roundEnded: raw.roundEnded,
+      gameEnded: raw.gameEnded,
+    };
+  }
+
+
+
   restart() {
     this.frameCounter = 0;
     this.noInputFrameCounter = 0;
