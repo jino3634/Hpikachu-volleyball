@@ -467,41 +467,39 @@ obsStats: {
    * @param {any} obs
    * @returns {{px:Float32Array, py:Float32Array, pp:Float32Array}}
    */
-  _maskedProbs(logitsX, logitsY, logitsP, obs) {
+_maskedProbs(logitsX, logitsY, logitsP, obs) {
   const me = obs?.me ?? {};
   const state = Number(me.state ?? 0);
   const isLying = !!me.isLying || state === 4;
   const isDiving = !!me.isDiving || state === 3;
   const canAct = (me.canAct !== undefined) ? !!me.canAct : (!isLying && !isDiving);
   const isAir = (me.isAir !== undefined) ? !!me.isAir : (state === 1 || state === 2);
-    const ball = obs?.ball ? obs.ball : {};
-    const meX = Number(me.x ?? 0);
-    const meY = Number(me.y ?? 0);
-    const ballX = Number(ball.x ?? 0);
-    const ballY = Number(ball.y ?? 0);
-    const dx = Math.abs(ballX - meX);
-    const dy = Math.abs(ballY - meY);
-    const timeToLand = Number(ball.timeToLand ?? 1); 
-// --- Obs sanity accumulation (detect constant/zeroed observations) ---
-{
-  const os = this.debug.obsStats;
-  os.count++;
-  os.sumAbsMeX += Math.abs(meX);
-  os.sumAbsMeY += Math.abs(meY);
-  os.sumAbsBallX += Math.abs(ballX);
-  os.sumAbsBallY += Math.abs(ballY);
-  os.sumAbsDx += (typeof dx === 'number' ? dx : 0);
-  os.sumAbsDy += (typeof dy === 'number' ? dy : 0);
-}
 
-// normalized (0..1)
-    // Power-hit gate: only allow when airborne AND close to ball AND landing is soon.
-    // This aggressively reduces dive/forced-idle loops so PPO can actually learn.
-    const dxOk = (dx <= 55);
-    const dyOk = (dy <= 55);
-    const ttlOk = (timeToLand <= 0.55);
-    const allowPowerHit = !!isAir && dxOk && dyOk && ttlOk;
+  const ball = obs?.ball ? obs.ball : {};
+  const meX = Number(me.x ?? 0);
+  const meY = Number(me.y ?? 0);
+  const ballX = Number(ball.x ?? 0);
+  const ballY = Number(ball.y ?? 0);
+  const dx = Math.abs(ballX - meX);
+  const dy = Math.abs(ballY - meY);
 
+  // NOTE: 너 코드에서는 ball.timeToLand를 쓰고 있는데,
+  // 이 함수에서는 더 이상 timeToLand / dxOk / dyOk gate를 쓰지 않으니 제거해도 됨.
+  // const timeToLand = Number(ball.timeToLand ?? 1);
+  // --- 정정 버전(만약 나중에 진단/로그에 쓰고 싶다면) ---
+  const timeToLand = Number(me.timeToLand ?? 1); // ✅ 플레이어 착지까지 남은 시간(일반적으로 me에 있음)
+
+  // --- Obs sanity accumulation (detect constant/zeroed observations) ---
+  {
+    const os = this.debug.obsStats;
+    os.count++;
+    os.sumAbsMeX += Math.abs(meX);
+    os.sumAbsMeY += Math.abs(meY);
+    os.sumAbsBallX += Math.abs(ballX);
+    os.sumAbsBallY += Math.abs(ballY);
+    os.sumAbsDx += (typeof dx === 'number' ? dx : 0);
+    os.sumAbsDy += (typeof dy === 'number' ? dy : 0);
+  }
 
   // If cannot act at all, force IDLE effectively.
   if (!canAct) {
@@ -521,35 +519,19 @@ obsStats: {
     my[2] = -1e9;
   }
 
-  // Soft mask for transient states. Inputs may be ignored by the game, so we:
-  // - Do NOT hard-force IDLE here (keeps gradients / exploration alive)
-  // - Heavily bias toward IDLE / no-power to avoid garbage actions
-  if (isLying) {
-    // Strongly prefer IDLE
-    mx[0] -= 6; mx[2] -= 6; // x: reduce left/right
-    my[0] -= 6; my[2] -= 6; // y: reduce jump/down (down already forbidden on ground)
-    mp[1] -= 6;             // powerHit=1 discouraged
-  } else if (isDiving) {
-    // Prefer continuing dive direction (if known), otherwise IDLE-ish.
-    const dd = Number(me.divingDir ?? 0); // -1,0,1 typically
-    if (dd < 0) { mx[0] += 2; mx[1] -= 2; mx[2] -= 2; }
-    else if (dd > 0) { mx[2] += 2; mx[1] -= 2; mx[0] -= 2; }
-    else { mx[1] += 2; mx[0] -= 2; mx[2] -= 2; }
-
-    // While diving, avoid spamming jump/down and power.
-    my[0] -= 4; my[2] -= 4;
-    mp[1] -= 4;
-  }
-
-  // powerHit=1 logits를 막아서 evaluate()의 pp가 gate와 일치하게 함
-  if (!allowPowerHit) {
+  // ✅ 우리가 합의한 하드 금지 규칙(소프트 억제 없음):
+  // - lying 또는 diving 상태에서는 powerHit=1을 하드 금지
+  // - 그 외(지상/공중 포함)는 powerHit 완전 허용
+  if (isLying || isDiving) {
     mp[1] = -1e9;
   }
+
   const px0 = softmax(mx);
   const py0 = softmax(my);
   const pp0 = softmax(mp);
   return { px: px0, py: py0, pp: pp0 };
 }
+
 
   /**
    * Evaluate: compute action distribution + value for obs.
@@ -569,264 +551,144 @@ obsStats: {
    * @param {1|2} playerIndex
    * @param {{deterministic?:boolean, epsilon?:number}} [opts]
    */
-  act(obs, playerIndex, opts = {}) {
-    const deterministic = !!opts.deterministic;
-    const epsRand = Number(opts.epsilon ?? 0);
+act(obs, playerIndex, opts = {}) {
+  const deterministic = !!opts.deterministic;
+  const epsRand = Number(opts.epsilon ?? 0);
 
-    const me = obs?.me ?? {};
-    const state = Number(me.state ?? 0);
-    const isLying = !!me.isLying || state === 4;
-    const isDiving = !!me.isDiving || state === 3;
-    const canAct = (me.canAct !== undefined) ? !!me.canAct : (!isLying && !isDiving);
-    const isAir = (me.isAir !== undefined) ? !!me.isAir : (state === 1 || state === 2);
+  const me = obs?.me ?? {};
+  const state = Number(me.state ?? 0);
+  const isLying = !!me.isLying || state === 4;
+  const isDiving = !!me.isDiving || state === 3;
+  const canAct = (me.canAct !== undefined) ? !!me.canAct : (!isLying && !isDiving);
+  const isAir = (me.isAir !== undefined) ? !!me.isAir : (state === 1 || state === 2);
 
-    if (!canAct) {
-      // Truly cannot act: force IDLE and skip learning.
-      this.debug.forcedIdle++;
-      this.debug.forcedIdleNoAct++;
-      return {
-        action: { xDirection: 0, yDirection: 0, powerHit: 0 },
-        logp: 0,
-        value: 0,
-        meta: { forcedIdle: true, reason: 'noAct' },
-      };
-    }
-
-    // Diving / lying: do not force IDLE. Apply soft mask later.
-    // Mark as forcedIdle for learning-skip (episode_builder will skip these steps).
-    const skipLearn = (isLying || isDiving);
-    if (skipLearn) {
-      this.debug.forcedIdle++;
-      if (isLying) this.debug.forcedIdleLying++;
-      if (isDiving) this.debug.forcedIdleDiving++;
-    }
-
-    const { px, py, pp, value } = this.evaluate(obs, playerIndex);
-    if (this.debug.maskStats) this.debug.maskStats.n++;
-    const as = this.debug.actionStats;
-    const recordActionStats = (pxEff, pyEff, ppEff, ax, ay, ap) => {
-      as.n++;
-      as.entX += entropyFromProbs(pxEff);
-      as.entY += entropyFromProbs(pyEff);
-      as.entP += entropyFromProbs(ppEff);
-      as.maxX += maxProb(pxEff);
-      as.maxY += maxProb(pyEff);
-      as.maxP += maxProb(ppEff);
-
-      as.axCounts[ax] = (as.axCounts[ax] ?? 0) + 1;
-      as.ayCounts[ay] = (as.ayCounts[ay] ?? 0) + 1;
-      as.apCounts[ap] = (as.apCounts[ap] ?? 0) + 1;
-
-      if (ap === 1) {
-        as.powerHitTotal++;
-        const meX0 = Number((obs?.me ?? {}).x ?? 0);
-        const meY0 = Number((obs?.me ?? {}).y ?? 0);
-        const ballX0 = Number((obs?.ball ?? {}).x ?? 0);
-        const ballY0 = Number((obs?.ball ?? {}).y ?? 0);
-        const near = (Math.abs(ballX0 - meX0) <= 0.30) && (Math.abs(ballY0 - meY0) <= 0.50);
-        if (near) as.powerHitNearBall++;
-      }
+  if (!canAct) {
+    // Truly cannot act: force IDLE and skip learning.
+    this.debug.forcedIdle++;
+    this.debug.forcedIdleNoAct++;
+    return {
+      action: { xDirection: 0, yDirection: 0, powerHit: 0 },
+      logp: 0,
+      value: 0,
+      meta: { forcedIdle: true, reason: 'noAct' },
     };
-
-
-// Power-hit gate (obs is normalized: x/y in [-1,1], timeToLand in [0,1])
-const ballN = obs?.ball ?? {};
-const dxN = Math.abs(Number(ballN.x ?? 0) - Number(me.x ?? 0));
-const dyN = Math.abs(Number(ballN.y ?? 0) - Number(me.y ?? 0));
-const tLandN = Number(ballN.timeToLand ?? 1);
-// Allow power only when airborne and ball is close and landing soon.
-// Thresholds are tuned for normalized coordinates:
-//   dx <= ~0.30  (~55px horizontally), dy <= ~0.50 (~63px vertically), timeToLand <= 0.55
-const allowPowerHit = !!isAir && (dxN <= 0.30) && (dyN <= 0.50) && (tLandN <= 0.55);
-
-
-    // epsilon random exploration (still valid)
-    if (!deterministic && epsRand > 0 && Math.random() < epsRand) {
-      // 0) epsilon 랜덤 액션 먼저 결정 (유효성 최소 보장)
-      let ax = (Math.random() * 3) | 0; // 0..2
-      let ay = (Math.random() * 3) | 0; // 0..2
-      let ap = (Math.random() < 0.5) ? 1 : 0;
-
-      // 공중에서는 y=-1(클래스0) 금지(네 정책과 동일)
-      if (isAir && ay === 0) ay = 1;
-
-      // powerHit gate
-      if (!allowPowerHit) ap = 0;
-
-      const powerHit = ap ? 1 : 0;
-
-      // 1) logp 계산용 eff 분포 구성(메인 경로와 일치)
-      const ppEff = (!allowPowerHit) ? [1, 0] : (() => {
-        const a0 = clamp01(pp[0] ?? 0);
-        const b0 = clamp01(pp[1] ?? 0);
-        const s0 = a0 + b0;
-        return (s0 > 1e-12) ? [a0 / s0, b0 / s0] : [0.5, 0.5];
-      })();
-
-      const pxEff = (() => {
-        const a0 = clamp01(px[0] ?? 0), b0 = clamp01(px[1] ?? 0), c0 = clamp01(px[2] ?? 0);
-        if (!isAir && ap === 1) return renorm3(a0, 0, c0);
-        const s0 = a0 + b0 + c0;
-        return (s0 > 1e-12) ? [a0 / s0, b0 / s0, c0 / s0] : [1/3, 1/3, 1/3];
-      })();
-
-      const pyEff = (() => {
-        const a0 = clamp01(py[0] ?? 0), b0 = clamp01(py[1] ?? 0), c0 = clamp01(py[2] ?? 0);
-        if (isAir) {
-          const s0 = b0 + c0;
-          return (s0 > 1e-12) ? [0, b0 / s0, c0 / s0] : [0, 0.5, 0.5];
-        }
-        const s0 = a0 + b0 + c0;
-        return (s0 > 1e-12) ? [a0 / s0, b0 / s0, c0 / s0] : [1/3, 1/3, 1/3];
-      })();
-
-      // 2) 이제 안전하게 기록/로그확률 계산 가능
-      recordActionStats(pxEff, pyEff, ppEff, ax, ay, ap);
-      const logp =
-        logProbFromProbs(pxEff, ax) +
-        logProbFromProbs(pyEff, ay) +
-        logProbFromProbs(ppEff, ap);
-
-      return {
-        action: { xDirection: mapClassToXDir(ax), yDirection: mapClassToYDir(ay), powerHit },
-        logp,
-        value,
-        meta: { epsRandom: true, ax, ay, ap, forcedIdle: skipLearn, reason: (skipLearn ? (isLying ? 'lying' : 'diving') : null) },
-      };
-    }
-
-
-    // deterministic = argmax, else sample (with conditional masks applied consistently to sampling + logp)
-    let ax = 1, ay = 1, ap = 0;
-
-    // Power gate probabilities (keep ground power for dive)
-    const ppEff = (!allowPowerHit) ? [1, 0] : (() => {
-      const a = clamp01(pp[0] ?? 0);
-      const b = clamp01(pp[1] ?? 0);
-      const s = a + b;
-      return (s > 1e-12) ? [a / s, b / s] : [0.5, 0.5];
-    })();
-
-    // 1) sample/choose ap first
-    if (deterministic) {
-      ap = (ppEff[1] > ppEff[0]) ? 1 : 0;
-    } else {
-      ap = sampleCategorical(ppEff);
-      if (ap === 1 && !allowPowerHit) { ap = 0; this.debug.powerMasked++; }
-    }
-
-    // 2) conditional X distribution: if ground && ap==1 => forbid x=0 (class 1)
-    const pxEff = (() => {
-      const a = clamp01(px[0] ?? 0);
-      const b = clamp01(px[1] ?? 0);
-      const c = clamp01(px[2] ?? 0);
-      if (!isAir && ap === 1) {
-        if (this.debug.maskStats) { this.debug.maskStats.xZeroMaskedCount++; this.debug.maskStats.xZeroMaskedMass += (px[1] ?? 0); }
-        return renorm3(a, 0, c);
-      }
-      const s = a + b + c;
-      return (s > 1e-12) ? [a / s, b / s, c / s] : [1/3, 1/3, 1/3];
-    })();
-
-    if (deterministic) {
-      ax = (pxEff[1] >= pxEff[0] && pxEff[1] >= pxEff[2]) ? 1 : ((pxEff[2] > pxEff[0]) ? 2 : 0);
-      if (!isAir && ap === 1 && ax === 1 && this.debug.maskStats) this.debug.maskStats.illegalXSampledPrevented++;
-    } else {
-      ax = sampleCategorical(pxEff);
-      if (!isAir && ap === 1 && ax === 1 && this.debug.maskStats) this.debug.maskStats.illegalXSampledPrevented++;
-    }
-
-    // 3) Y distribution (keep current behavior: if air forbid y=-1 to avoid double-jump)
-    const pyEff = (() => {
-      const a = clamp01(py[0] ?? 0);
-      const b = clamp01(py[1] ?? 0);
-      const c = clamp01(py[2] ?? 0);
-      if (isAir) {
-        if (this.debug.maskStats) { this.debug.maskStats.yNegMaskedCount++; this.debug.maskStats.yNegMaskedMass += (py[0] ?? 0); }
-        const s = b + c;
-        return (s > 1e-12) ? [0, b / s, c / s] : [0, 0.5, 0.5];
-      }
-      const s = a + b + c;
-      return (s > 1e-12) ? [a / s, b / s, c / s] : [1/3, 1/3, 1/3];
-    })();
-
-    if (deterministic) {
-      ay = (pyEff[1] >= pyEff[0] && pyEff[1] >= pyEff[2]) ? 1 : ((pyEff[2] > pyEff[0]) ? 2 : 0);
-      if (isAir && ay === 0 && this.debug.maskStats) this.debug.maskStats.illegalYSampledPrevented++;
-    } else {
-      ay = sampleCategorical(pyEff);
-      if (isAir && ay === 0 && this.debug.maskStats) this.debug.maskStats.illegalYSampledPrevented++;
-    }
-
-    if (this.debug.maskStats) {
-      if (!isAir) this.debug.maskStats.groundN++; else this.debug.maskStats.airN++;
-      const yc = this.debug.maskStats.yChosenCounts;
-      yc[ay] = (yc[ay] ?? 0) + 1;
-    }
-    const logp = logProbFromProbs(pxEff, ax) + logProbFromProbs(pyEff, ay) + logProbFromProbs(ppEff, ap);
-    const action = { xDirection: mapClassToXDir(ax), yDirection: mapClassToYDir(ay), powerHit: ap ? 1 : 0 };
-    // diagnostics: count sampled power-hit actions (main policy path)
-    if (ap === 1) {
-        this.debug.powerHitSampled++; // requested power-hit (pre-gate)
-        if (this.debug && this.debug.powerGate) {
-          const pg = this.debug.powerGate;
-          const dxv = dxN;
-          const dyv = dyN;
-          const ttlv = tLandN;
-
-          pg.requested++;
-          pg.sumDX_req += dxv; pg.sumDY_req += dyv; pg.sumTTL_req += ttlv; pg.count_req++;
-
-          if (allowPowerHit) {
-            pg.allowed++;
-            pg.sumDX_allow += dxv; pg.sumDY_allow += dyv; pg.sumTTL_allow += ttlv; pg.count_allow++;
-          } else {
-            pg.sumDX_block += dxv; pg.sumDY_block += dyv; pg.sumTTL_block += ttlv; pg.count_block++;
-            if (!isAir) pg.blockedNotAir++;
-            if (dxN > 0.30) pg.blockedDX++;
-            if (dyN > 0.50) pg.blockedDY++;
-            if (tLandN > 0.55) pg.blockedTTL++;
-          }
-
-        }
-      }
-    recordActionStats(pxEff, pyEff, ppEff, ax, ay, ap);
-    return { action, logp, value, meta: { ax, ay, ap, forcedIdle: skipLearn, reason: (skipLearn ? (isLying ? 'lying' : 'diving') : null) } };
   }
 
-  /**
-   * Compute log-prob and value under current params for a given (obs, action).
-   * @param {any} obs
-   * @param {1|2} playerIndex
-   * @param {{xDirection:number,yDirection:number,powerHit:number}|number} action
-   */
-  logpValue(obs, playerIndex, action) {
-    const me = obs?.me ?? {};
-    const state = Number(me.state ?? 0);
-    const isAir = (me.isAir !== undefined) ? !!me.isAir : (state === 1 || state === 2);
+  // Diving / lying: do not force IDLE. Apply soft mask later.
+  // Mark as forcedIdle for learning-skip (episode_builder will skip these steps).
+  const skipLearn = (isLying || isDiving);
+  if (skipLearn) {
+    this.debug.forcedIdle++;
+    if (isLying) this.debug.forcedIdleLying++;
+    if (isDiving) this.debug.forcedIdleDiving++;
+  }
 
-    // act()와 동일한 power-hit gate(정규화 관측)
-    const ballN = obs?.ball ?? {};
-    const dxN = Math.abs(Number(ballN.x ?? 0) - Number(me.x ?? 0));
-    const dyN = Math.abs(Number(ballN.y ?? 0) - Number(me.y ?? 0));
-    const tLandN = Number(ballN.timeToLand ?? 1);
-    const allowPowerHit = (dxN <= 0.30) && (dyN <= 0.50) && (tLandN <= 0.55) && !!isAir;
+  const { px, py, pp, value } = this.evaluate(obs, playerIndex);
+  if (this.debug.maskStats) this.debug.maskStats.n++;
+  const as = this.debug.actionStats;
+  const recordActionStats = (pxEff, pyEff, ppEff, ax, ay, ap) => {
+    as.n++;
+    as.entX += entropyFromProbs(pxEff);
+    as.entY += entropyFromProbs(pyEff);
+    as.entP += entropyFromProbs(ppEff);
+    as.maxX += maxProb(pxEff);
+    as.maxY += maxProb(pyEff);
+    as.maxP += maxProb(ppEff);
 
-    const a = (typeof action === 'number') ? { xDirection: 0, yDirection: 0, powerHit: 0 } : action;
-    const ax = mapXDirToClass(Number(a.xDirection ?? 0));
-    const ay = mapYDirToClass(Number(a.yDirection ?? 0));
-    const ap = Number(a.powerHit ?? 0) ? 1 : 0;
+    as.axCounts[ax] = (as.axCounts[ax] ?? 0) + 1;
+    as.ayCounts[ay] = (as.ayCounts[ay] ?? 0) + 1;
+    as.apCounts[ap] = (as.apCounts[ap] ?? 0) + 1;
 
-    const { px, py, pp, value } = this.evaluate(obs, playerIndex);
+    // ✅ (보완 2) act(): powerGate 디버그 블록을 새 allowPowerHit 정의(=lying/diving만 금지)에 맞게 "최소 수정"
+    //
+    // 기존 powerGate 블록의 blockedNotAir / blockedDX / blockedDY / blockedTTL 는 의미가 깨졌으니,
+    // 아래처럼 "blockedLying / blockedDiving"만 집계하게 바꿔.
+    // (필드가 없을 수 있으니 0 초기화도 안전하게 포함)
 
+    if (ap === 1) {
+      this.debug.powerHitSampled++;
+
+      if (this.debug && this.debug.powerGate) {
+        const pg = this.debug.powerGate;
+
+        // 안전 초기화(없으면 생성)
+        pg.requested = pg.requested ?? 0;
+        pg.allowed = pg.allowed ?? 0;
+        pg.blockedLying = pg.blockedLying ?? 0;
+        pg.blockedDiving = pg.blockedDiving ?? 0;
+
+        // 기존 통계가 남아있어도 무방(원하면 지워도 됨)
+        pg.sumDX_req = pg.sumDX_req ?? 0;
+        pg.sumDY_req = pg.sumDY_req ?? 0;
+        pg.sumTTL_req = pg.sumTTL_req ?? 0;
+        pg.count_req = pg.count_req ?? 0;
+
+        pg.sumDX_allow = pg.sumDX_allow ?? 0;
+        pg.sumDY_allow = pg.sumDY_allow ?? 0;
+        pg.sumTTL_allow = pg.sumTTL_allow ?? 0;
+        pg.count_allow = pg.count_allow ?? 0;
+
+        pg.sumDX_block = pg.sumDX_block ?? 0;
+        pg.sumDY_block = pg.sumDY_block ?? 0;
+        pg.sumTTL_block = pg.sumTTL_block ?? 0;
+        pg.count_block = pg.count_block ?? 0;
+
+        // 집계(여기서 dxN/dyN/tLandN는 이미 위에서 계산해둔 값 그대로 사용)
+        pg.requested++;
+        pg.sumDX_req += dxN; pg.sumDY_req += dyN; pg.sumTTL_req += tLandN; pg.count_req++;
+
+        if (allowPowerHit) {
+          pg.allowed++;
+          pg.sumDX_allow += dxN; pg.sumDY_allow += dyN; pg.sumTTL_allow += tLandN; pg.count_allow++;
+        } else {
+          // allowPowerHit=false는 이제 (isLying||isDiving) 뿐
+          pg.sumDX_block += dxN; pg.sumDY_block += dyN; pg.sumTTL_block += tLandN; pg.count_block++;
+          if (isLying) pg.blockedLying++;
+          if (isDiving) pg.blockedDiving++;
+        }
+      }
+    }
+
+  };
+
+  // ✅ Power-hit gate 제거(소프트 억제/근접/TTL gate 전부 제거)
+  // ✅ 하드 금지 조건은 오직 lying/diving
+  const allowPowerHit = !(isLying || isDiving);
+
+  // (아래 dxN/dyN/tLandN는 기존 디버그/통계에서 쓰이므로 "남겨도 됨")
+  // powerGate 디버그는 기존 allowPowerHit(근접+TTL) 기준을 전제로 만들어졌으니,
+  // 이 버전에서는 의미가 바뀐다. (원하면 아래 디버그 블록도 같이 정리해야 함)
+  const ballN = obs?.ball ?? {};
+  const dxN = Math.abs(Number(ballN.x ?? 0) - Number(me.x ?? 0));
+  const dyN = Math.abs(Number(ballN.y ?? 0) - Number(me.y ?? 0));
+  const tLandN = Number(ballN.timeToLand ?? 1);
+
+  // epsilon random exploration (still valid)
+  if (!deterministic && epsRand > 0 && Math.random() < epsRand) {
+    // 0) epsilon 랜덤 액션 먼저 결정 (유효성 최소 보장)
+    let ax = (Math.random() * 3) | 0; // 0..2
+    let ay = (Math.random() * 3) | 0; // 0..2
+    let ap = (Math.random() < 0.5) ? 1 : 0;
+
+    // 공중에서는 y=-1(클래스0) 금지(네 정책과 동일)
+    if (isAir && ay === 0) ay = 1;
+
+    // ✅ powerHit gate: lying/diving일 때만 막기
+    if (!allowPowerHit) ap = 0;
+
+    const powerHit = ap ? 1 : 0;
+
+    // 1) logp 계산용 eff 분포 구성(메인 경로와 일치)
     const ppEff = (!allowPowerHit) ? [1, 0] : (() => {
-      const a0 = clamp01(pp[0] ?? 0), b0 = clamp01(pp[1] ?? 0);
+      const a0 = clamp01(pp[0] ?? 0);
+      const b0 = clamp01(pp[1] ?? 0);
       const s0 = a0 + b0;
       return (s0 > 1e-12) ? [a0 / s0, b0 / s0] : [0.5, 0.5];
     })();
 
     const pxEff = (() => {
       const a0 = clamp01(px[0] ?? 0), b0 = clamp01(px[1] ?? 0), c0 = clamp01(px[2] ?? 0);
+      // ✅ 지상 powerHit=1 & x=0 하드 금지(이미 너가 채택한 룰)
       if (!isAir && ap === 1) return renorm3(a0, 0, c0);
       const s0 = a0 + b0 + c0;
       return (s0 > 1e-12) ? [a0 / s0, b0 / s0, c0 / s0] : [1/3, 1/3, 1/3];
@@ -842,9 +704,192 @@ const allowPowerHit = !!isAir && (dxN <= 0.30) && (dyN <= 0.50) && (tLandN <= 0.
       return (s0 > 1e-12) ? [a0 / s0, b0 / s0, c0 / s0] : [1/3, 1/3, 1/3];
     })();
 
-    const logp = logProbFromProbs(pxEff, ax) + logProbFromProbs(pyEff, ay) + logProbFromProbs(ppEff, ap);
-    return { logp, value, px, py, pp };
+    // 2) 이제 안전하게 기록/로그확률 계산 가능
+    recordActionStats(pxEff, pyEff, ppEff, ax, ay, ap);
+    const logp =
+      logProbFromProbs(pxEff, ax) +
+      logProbFromProbs(pyEff, ay) +
+      logProbFromProbs(ppEff, ap);
+
+    return {
+      action: { xDirection: mapClassToXDir(ax), yDirection: mapClassToYDir(ay), powerHit },
+      logp,
+      value,
+      meta: { epsRandom: true, ax, ay, ap, forcedIdle: skipLearn, reason: (skipLearn ? (isLying ? 'lying' : 'diving') : null) },
+    };
   }
+
+  // deterministic = argmax, else sample (with conditional masks applied consistently to sampling + logp)
+  let ax = 1, ay = 1, ap = 0;
+
+  // ✅ Power gate probabilities: 이제 lying/diving일 때만 [1,0]
+  const ppEff = (!allowPowerHit) ? [1, 0] : (() => {
+    const a = clamp01(pp[0] ?? 0);
+    const b = clamp01(pp[1] ?? 0);
+    const s = a + b;
+    return (s > 1e-12) ? [a / s, b / s] : [0.5, 0.5];
+  })();
+
+  // 1) sample/choose ap first
+  if (deterministic) {
+    ap = (ppEff[1] > ppEff[0]) ? 1 : 0;
+  } else {
+    ap = sampleCategorical(ppEff);
+    // ✅ 사실상 allowPowerHit=false일 때는 ppEff=[1,0]이라 ap=1이 안 나오지만 안전장치 유지
+    if (ap === 1 && !allowPowerHit) { ap = 0; this.debug.powerMasked++; }
+  }
+
+  // 2) conditional X distribution: if ground && ap==1 => forbid x=0 (class 1)
+  const pxEff = (() => {
+    const a = clamp01(px[0] ?? 0);
+    const b = clamp01(px[1] ?? 0);
+    const c = clamp01(px[2] ?? 0);
+    if (!isAir && ap === 1) {
+      if (this.debug.maskStats) { this.debug.maskStats.xZeroMaskedCount++; this.debug.maskStats.xZeroMaskedMass += (px[1] ?? 0); }
+      return renorm3(a, 0, c);
+    }
+    const s = a + b + c;
+    return (s > 1e-12) ? [a / s, b / s, c / s] : [1/3, 1/3, 1/3];
+  })();
+
+  if (deterministic) {
+    ax = (pxEff[1] >= pxEff[0] && pxEff[1] >= pxEff[2]) ? 1 : ((pxEff[2] > pxEff[0]) ? 2 : 0);
+    if (!isAir && ap === 1 && ax === 1 && this.debug.maskStats) this.debug.maskStats.illegalXSampledPrevented++;
+  } else {
+    ax = sampleCategorical(pxEff);
+    if (!isAir && ap === 1 && ax === 1 && this.debug.maskStats) this.debug.maskStats.illegalXSampledPrevented++;
+  }
+
+  // 3) Y distribution (keep current behavior: if air forbid y=-1 to avoid double-jump)
+  const pyEff = (() => {
+    const a = clamp01(py[0] ?? 0);
+    const b = clamp01(py[1] ?? 0);
+    const c = clamp01(py[2] ?? 0);
+    if (isAir) {
+      if (this.debug.maskStats) { this.debug.maskStats.yNegMaskedCount++; this.debug.maskStats.yNegMaskedMass += (py[0] ?? 0); }
+      const s = b + c;
+      return (s > 1e-12) ? [0, b / s, c / s] : [0, 0.5, 0.5];
+    }
+    const s = a + b + c;
+    return (s > 1e-12) ? [a / s, b / s, c / s] : [1/3, 1/3, 1/3];
+  })();
+
+  if (deterministic) {
+    ay = (pyEff[1] >= pyEff[0] && pyEff[1] >= pyEff[2]) ? 1 : ((pyEff[2] > pyEff[0]) ? 2 : 0);
+    if (isAir && ay === 0 && this.debug.maskStats) this.debug.maskStats.illegalYSampledPrevented++;
+  } else {
+    ay = sampleCategorical(pyEff);
+    if (isAir && ay === 0 && this.debug.maskStats) this.debug.maskStats.illegalYSampledPrevented++;
+  }
+
+  if (this.debug.maskStats) {
+    if (!isAir) this.debug.maskStats.groundN++; else this.debug.maskStats.airN++;
+    const yc = this.debug.maskStats.yChosenCounts;
+    yc[ay] = (yc[ay] ?? 0) + 1;
+  }
+
+  const logp = logProbFromProbs(pxEff, ax) + logProbFromProbs(pyEff, ay) + logProbFromProbs(ppEff, ap);
+  const action = { xDirection: mapClassToXDir(ax), yDirection: mapClassToYDir(ay), powerHit: ap ? 1 : 0 };
+
+  // diagnostics: count sampled power-hit actions (main policy path)
+  if (ap === 1) {
+    this.debug.powerHitSampled++; // requested power-hit (pre-gate)
+
+    // NOTE: 기존 powerGate 디버그는 "근접+TTL+공중" gate를 전제로 함.
+    // 지금은 allowPowerHit 의미가 "lying/diving이 아님"으로 바뀌었으니,
+    // 아래 블록은 숫자 해석이 달라진다. (원하면 통째로 제거해도 됨)
+    if (this.debug && this.debug.powerGate) {
+      const pg = this.debug.powerGate;
+      const dxv = dxN;
+      const dyv = dyN;
+      const ttlv = tLandN;
+
+      pg.requested++;
+      pg.sumDX_req += dxv; pg.sumDY_req += dyv; pg.sumTTL_req += ttlv; pg.count_req++;
+
+      if (allowPowerHit) {
+        pg.allowed++;
+        pg.sumDX_allow += dxv; pg.sumDY_allow += dyv; pg.sumTTL_allow += ttlv; pg.count_allow++;
+      } else {
+        pg.sumDX_block += dxv; pg.sumDY_block += dyv; pg.sumTTL_block += ttlv; pg.count_block++;
+        // blockedNotAir/dx/dy/ttl 등은 더 이상 의미 없음(원하면 지워라)
+      }
+    }
+  }
+
+  recordActionStats(pxEff, pyEff, ppEff, ax, ay, ap);
+  return { action, logp, value, meta: { ax, ay, ap, forcedIdle: skipLearn, reason: (skipLearn ? (isLying ? 'lying' : 'diving') : null) } };
+}
+
+
+  /**
+   * Compute log-prob and value under current params for a given (obs, action).
+   * @param {any} obs
+   * @param {1|2} playerIndex
+   * @param {{xDirection:number,yDirection:number,powerHit:number}|number} action
+   */
+logpValue(obs, playerIndex, action) {
+  const me = obs?.me ?? {};
+  const state = Number(me.state ?? 0);
+  const isLying = !!me.isLying || state === 4;
+  const isDiving = !!me.isDiving || state === 3;
+  const isAir = (me.isAir !== undefined) ? !!me.isAir : (state === 1 || state === 2);
+
+  // ✅ act()와 동일한 규칙:
+  // - powerHit 하드 금지는 오직 lying/diving
+  // - 지상/공중, 근접/TTL 조건으로는 막지 않음
+  const allowPowerHit = !(isLying || isDiving);
+
+  // (dxN/dyN/tLandN는 더 이상 gate에 쓰지 않으므로 삭제해도 됨)
+  // const ballN = obs?.ball ?? {};
+  // const dxN = Math.abs(Number(ballN.x ?? 0) - Number(me.x ?? 0));
+  // const dyN = Math.abs(Number(ballN.y ?? 0) - Number(me.y ?? 0));
+  // const tLandN = Number(ballN.timeToLand ?? 1);
+
+  const a = (typeof action === 'number')
+    ? { xDirection: 0, yDirection: 0, powerHit: 0 }
+    : action;
+
+  const ax = mapXDirToClass(Number(a.xDirection ?? 0));
+  const ay = mapYDirToClass(Number(a.yDirection ?? 0));
+  const ap = Number(a.powerHit ?? 0) ? 1 : 0;
+
+  const { px, py, pp, value } = this.evaluate(obs, playerIndex);
+
+  // ✅ allowPowerHit=false(=lying/diving)일 때만 powerHit=1을 확률 0으로 처리
+  const ppEff = (!allowPowerHit) ? [1, 0] : (() => {
+    const a0 = clamp01(pp[0] ?? 0), b0 = clamp01(pp[1] ?? 0);
+    const s0 = a0 + b0;
+    return (s0 > 1e-12) ? [a0 / s0, b0 / s0] : [0.5, 0.5];
+  })();
+
+  const pxEff = (() => {
+    const a0 = clamp01(px[0] ?? 0), b0 = clamp01(px[1] ?? 0), c0 = clamp01(px[2] ?? 0);
+    // ✅ 지상 powerHit=1 & x=0 하드 금지(네가 채택한 룰 유지)
+    if (!isAir && ap === 1) return renorm3(a0, 0, c0);
+    const s0 = a0 + b0 + c0;
+    return (s0 > 1e-12) ? [a0 / s0, b0 / s0, c0 / s0] : [1/3, 1/3, 1/3];
+  })();
+
+  const pyEff = (() => {
+    const a0 = clamp01(py[0] ?? 0), b0 = clamp01(py[1] ?? 0), c0 = clamp01(py[2] ?? 0);
+    // ✅ 기존 정책 유지: 공중에서는 y=-1(클래스0) 금지
+    if (isAir) {
+      const s0 = b0 + c0;
+      return (s0 > 1e-12) ? [0, b0 / s0, c0 / s0] : [0, 0.5, 0.5];
+    }
+    const s0 = a0 + b0 + c0;
+    return (s0 > 1e-12) ? [a0 / s0, b0 / s0, c0 / s0] : [1/3, 1/3, 1/3];
+  })();
+
+  const logp =
+    logProbFromProbs(pxEff, ax) +
+    logProbFromProbs(pyEff, ay) +
+    logProbFromProbs(ppEff, ap);
+
+  return { logp, value, px, py, pp };
+}
+
 
 
   /**
