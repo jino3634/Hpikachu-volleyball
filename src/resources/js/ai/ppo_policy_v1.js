@@ -486,8 +486,8 @@ _maskedProbs(logitsX, logitsY, logitsP, obs) {
   // NOTE: 너 코드에서는 ball.timeToLand를 쓰고 있는데,
   // 이 함수에서는 더 이상 timeToLand / dxOk / dyOk gate를 쓰지 않으니 제거해도 됨.
   // const timeToLand = Number(ball.timeToLand ?? 1);
-  // --- 정정 버전(만약 나중에 진단/로그에 쓰고 싶다면) ---
-  const timeToLand = Number(me.timeToLand ?? 1); // ✅ 플레이어 착지까지 남은 시간(일반적으로 me에 있음)
+  // timeToLand는 ball에 들어온다(정규화 관측에서 채워줌)
+  const timeToLand = Number(ball.timeToLand ?? 1);
 
   // --- Obs sanity accumulation (detect constant/zeroed observations) ---
   {

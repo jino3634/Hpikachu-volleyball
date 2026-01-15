@@ -903,21 +903,37 @@ export class PikachuVolleyball {
   }
 
   getObservationNormalized(playerIndex) {
-    // raw(픽셀) 관측은 그대로 유지하고, 학습용으로만 정규화 버전을 만든다.
-    const raw = this.getObservation(playerIndex);
+    // raw(픽셀) 관측
+    const raw0 = this.getObservation(playerIndex);
 
-    // physics.js에 export된 건 GROUND_HALF_WIDTH뿐이라 여기서 계산
+    // physics에서 TTL 계산에 필요한 값 취득
+    const b = this.physics.ball;
+
+    // expectedLandingFrames(프레임)를 0..1로 정규화
+    // 120프레임 ≈ 2초(60fps 기준). 너무 크면 1로 클램프됨.
+    const clamp01 = (v) => Math.max(0, Math.min(1, v));
+    const timeToLand = clamp01(Number(b.expectedLandingFrames ?? 0) / 120);
+
+    // raw에도 TTL/landingX를 넣어 두면 obs.raw 참조하는 코드에서도 편함(픽셀X는 유지)
+    const raw = {
+      ...raw0,
+      ball: {
+        ...raw0.ball,
+        landingX: Number(raw0.ball.expectedX ?? 0),
+        timeToLand,
+      },
+    };
+
     const GROUND_WIDTH = GROUND_HALF_WIDTH * 2; // 432
     const GROUND_HEIGHT = 304;
 
     const nx = (x) => (x / GROUND_WIDTH) * 2 - 1;  // 0..432 -> -1..1
     const ny = (y) => (y / GROUND_HEIGHT) * 2 - 1; // 0..304 -> -1..1
 
-    const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+    const clamp = (v, a, b2) => Math.max(a, Math.min(b2, v));
     const nv = (v, scale) => clamp(v / scale, -1, 1);
 
     return {
-      // ✅ 기존 코드 호환을 위해 raw를 붙여둔다 (episode_runner에서 obs.raw 참조함)
       raw,
 
       me: {
@@ -939,15 +955,17 @@ export class PikachuVolleyball {
         xV: nv(raw.ball.xV, 25),
         yV: nv(raw.ball.yV, 35),
         expectedX: nx(raw.ball.expectedX),
+        landingX: nx(raw.ball.landingX),
+        timeToLand, // ✅ 이제 obs.ball.timeToLand가 항상 존재
       },
 
-      // 나머지 플래그/스코어는 그대로
       scores: raw.scores,
       isPlayer2Serve: raw.isPlayer2Serve,
       roundEnded: raw.roundEnded,
       gameEnded: raw.gameEnded,
     };
   }
+
 
 
 
