@@ -140,7 +140,27 @@ export class Trainer {
 
     // PPO rollout settings
     this.rollout = [];
-    this.learnDiag = { episodes: 0, transitions: 0, skippedNoInfo: 0, skippedBadFields: 0, stateLearn: { canAct:0, air:0, ground:0, diving:0, lying:0 } };
+    this.learnDiag = {
+      episodes: 0,
+      transitions: 0,
+      // how many transitions were actually pushed into rollout buffer
+      pushedSteps: 0,
+      // how many steps were consumed into PPO batches
+      consumedSteps: 0,
+      skippedNoInfo: 0,
+      skippedBadFields: 0,
+
+      // episode_runner diag aggregate
+      ep_framesTotal: 0,
+      ep_framesCanActFalse: 0,
+      ep_framesDecisionSampled: 0,
+      ep_framesLegacyAction: 0,
+      ep_stepsAdded: 0,
+      ep_stepsSkippedNoDecisionInfo: 0,
+      ep_stepsSkippedForcedIdle: 0,
+
+      stateLearn: { canAct:0, air:0, ground:0, diving:0, lying:0 },
+    };
     this.rolloutSteps = 2048;
     this.minRolloutToUpdate = 512; // flush threshold for remaining rollout steps
 
@@ -710,6 +730,37 @@ export class Trainer {
 
         if (canLearn) {
           const transitions = res.episode.transitions ?? [];
+
+          // Track how many steps we actually push for THIS point (helps diagnose “why pushed is tiny”).
+          const rolloutLenBeforePoint = this.rollout.length;
+          let pushedThisPoint = 0;
+          let okInfoThisPoint = 0;
+          
+
+          // Pull episode-runner diagnostics if present
+          const epAny = /** @type {any} */ (res.episode);
+          const d = epAny?.diag;
+          if (d && this.learnDiag) {
+            this.learnDiag.ep_framesTotal += (d.framesTotal | 0);
+            this.learnDiag.ep_framesCanActFalse += (d.framesCanActFalse | 0);
+            this.learnDiag.ep_framesDecisionSampled += (d.framesDecisionSampled | 0);
+            this.learnDiag.ep_framesLegacyAction += (d.framesLegacyAction | 0);
+            this.learnDiag.ep_stepsAdded += (d.stepsAdded | 0);
+            this.learnDiag.ep_stepsSkippedNoDecisionInfo += (d.stepsSkippedNoDecisionInfo | 0);
+            this.learnDiag.ep_stepsSkippedForcedIdle += (d.stepsSkippedForcedIdle | 0);
+          }
+
+          // Spot-check: transitions length vs episode_runner stepsAdded (helps detect builder issues)
+          if (d && typeof d.stepsAdded === 'number') {
+            const ta = transitions.length | 0;
+            const sa = d.stepsAdded | 0;
+            if (ta > 0) {
+              const ratio = sa / Math.max(1, ta);
+              if (ratio < 0.95 || ratio > 1.05) {
+                logDebug(`[EP-MISMATCH] ep=${this.totalEpisodes} transitions=${ta} stepsAdded=${sa} ratio=${ratio.toFixed(4)}`);
+              }
+            }
+          }
           this.learnDiag.episodes++;
           this.learnDiag.transitions += transitions.length;
             let skippedNoInfo = 0;
@@ -718,6 +769,8 @@ export class Trainer {
             const info = tr.info; // keep null/undefined as-is
             if (!info) { skippedNoInfo++; continue; }
             if (typeof info.logp !== 'number' || typeof info.value !== 'number') { skippedBadFields++; continue; }
+
+            okInfoThisPoint++;
 
             const me = tr.obs?.me ?? {};
              const st = Number(me.state ?? 0);
@@ -739,11 +792,30 @@ export class Trainer {
               value: Number(info.value ?? 0),
               playerIndex: this.learningPlayer,
             });
+            pushedThisPoint++;
+            this.learnDiag.pushedSteps++;
           }
+
+          const rolloutLenAfterPoint = this.rollout.length;
+          // Always log when pushed is unexpectedly small compared to info-ok transitions.
+          // This should only happen if transitions themselves are tiny or filtered upstream.
+          if (okInfoThisPoint > 0 && pushedThisPoint <= 5) {
+            logDebug(
+              `[POINT-PUSH] ep=${this.totalEpisodes} trans=${transitions.length} okInfo=${okInfoThisPoint} pushed=${pushedThisPoint} skippedNoInfo=${skippedNoInfo} skippedBadFields=${skippedBadFields} rolloutLen=${rolloutLenBeforePoint}->${rolloutLenAfterPoint}`
+            );
+          }
+
+          // accumulate skip counters
+          this.learnDiag.skippedNoInfo += skippedNoInfo;
+          this.learnDiag.skippedBadFields += skippedBadFields;
 
           // update when enough rollout steps are collected
           while (this.rollout.length >= this.rolloutSteps) {
+            const rolloutLenBeforeBatch = this.rollout.length;
             const batch = this.rollout.splice(0, this.rolloutSteps);
+            this.learnDiag.consumedSteps += batch.length;
+            const rolloutLenAfterBatch = this.rollout.length;
+            logDebug(`[BATCH-CONSUME] batch=${batch.length} rolloutLen=${rolloutLenBeforeBatch}->${rolloutLenAfterBatch} pushedStepsSinceFlush=${this.learnDiag.pushedSteps} consumedStepsSinceFlush=${this.learnDiag.consumedSteps}`);
 
             // compute GAE + returns
             this.policy.computeGAE(batch);
@@ -769,12 +841,55 @@ export class Trainer {
               this.learnDiag.stateLearn = { canAct:0, air:0, ground:0, diving:0, lying:0 };
             }
 
-            logDebug(`[LEARN-DIAG] episodes=${this.learnDiag.episodes} transitions=${this.learnDiag.transitions} pushed=${this.rollout.length} skippedNoInfo=${this.learnDiag.skippedNoInfo} skippedBadFields=${this.learnDiag.skippedBadFields}`);
+            const rolloutLenNow = this.rollout.length;
+            const transitions = Math.max(1, this.learnDiag.transitions);
+            // NOTE: rolloutLenNow is *remaining* after batch consumption, not total added.
+            const pushedRate = rolloutLenNow / transitions;
+                          const badRate = this.learnDiag.skippedBadFields / transitions;
+                          const noInfoRate = this.learnDiag.skippedNoInfo / transitions;
+
+                          logDebug(`[LEARN-DIAG] episodes=${this.learnDiag.episodes} transitions=${this.learnDiag.transitions} rolloutLen=${rolloutLenNow} pushedSteps=${this.learnDiag.pushedSteps} consumedSteps=${this.learnDiag.consumedSteps} skippedNoInfo=${this.learnDiag.skippedNoInfo} skippedBadFields=${this.learnDiag.skippedBadFields}`);
+                          logDebug(`[LEARN-RATE] rolloutLenPerTransition=${pushedRate.toFixed(4)} noInfoRate=${noInfoRate.toFixed(4)} badFieldRate=${badRate.toFixed(4)}`);
+                          if (this.learnDiag.pushedSteps > 0) {
+                            logDebug(`[LEARN-FLOW] pushedSteps=${this.learnDiag.pushedSteps} consumedSteps=${this.learnDiag.consumedSteps} leftoverRollout=${rolloutLenNow} consumedRate=${(this.learnDiag.consumedSteps/this.learnDiag.pushedSteps).toFixed(4)}`);
+                          }
+
+                          // Episode-runner side diagnostics
+                          const epFramesTotal = Math.max(1, this.learnDiag.ep_framesTotal);
+                          logDebug(`[EP-DIAG] framesTotal=${this.learnDiag.ep_framesTotal} canActFalse=${this.learnDiag.ep_framesCanActFalse} decisionSampled=${this.learnDiag.ep_framesDecisionSampled} legacyAction=${this.learnDiag.ep_framesLegacyAction}`);
+                          logDebug(`[EP-DIAG] stepsAdded=${this.learnDiag.ep_stepsAdded} skippedNoDecisionInfo=${this.learnDiag.ep_stepsSkippedNoDecisionInfo} skippedForcedIdle=${this.learnDiag.ep_stepsSkippedForcedIdle}`);
+                          logDebug(`[EP-RATE] canActFalseRate=${(this.learnDiag.ep_framesCanActFalse/epFramesTotal).toFixed(4)} decisionSampledRate=${(this.learnDiag.ep_framesDecisionSampled/epFramesTotal).toFixed(4)} stepsAddedPerFrame=${(this.learnDiag.ep_stepsAdded/epFramesTotal).toFixed(6)}`);
+
+                          // reset per flush
+                          this.learnDiag.episodes = 0;
+                          this.learnDiag.transitions = 0;
+                          this.learnDiag.pushedSteps = 0;
+                          this.learnDiag.consumedSteps = 0;
+                          this.learnDiag.skippedNoInfo = 0;
+                          this.learnDiag.skippedBadFields = 0;
+
+                          this.learnDiag.ep_framesTotal = 0;
+                          this.learnDiag.ep_framesCanActFalse = 0;
+                          this.learnDiag.ep_framesDecisionSampled = 0;
+                          this.learnDiag.ep_framesLegacyAction = 0;
+                          this.learnDiag.ep_stepsAdded = 0;
+                          this.learnDiag.ep_stepsSkippedNoDecisionInfo = 0;
+                          this.learnDiag.ep_stepsSkippedForcedIdle = 0;
               // reset per flush
               this.learnDiag.episodes = 0;
               this.learnDiag.transitions = 0;
+              this.learnDiag.pushedSteps = 0;
+              this.learnDiag.consumedSteps = 0;
               this.learnDiag.skippedNoInfo = 0;
               this.learnDiag.skippedBadFields = 0;
+
+              this.learnDiag.ep_framesTotal = 0;
+              this.learnDiag.ep_framesCanActFalse = 0;
+              this.learnDiag.ep_framesDecisionSampled = 0;
+              this.learnDiag.ep_framesLegacyAction = 0;
+              this.learnDiag.ep_stepsAdded = 0;
+              this.learnDiag.ep_stepsSkippedNoDecisionInfo = 0;
+              this.learnDiag.ep_stepsSkippedForcedIdle = 0;
             }
 
           // Diagnostics
@@ -788,6 +903,11 @@ export class Trainer {
               const phNear = (as.powerHitNearBall ?? 0);
               const phTot = Math.max(1, (as.powerHitTotal ?? ap1));
               logDebug(`[PPO-ACTION] n=${n} entX=${(as.entX/n).toFixed(4)} entY=${(as.entY/n).toFixed(4)} entP=${(as.entP/n).toFixed(4)} maxX=${(as.maxX/n).toFixed(4)} maxY=${(as.maxY/n).toFixed(4)} maxP=${(as.maxP/n).toFixed(4)} ap1Rate=${(ap1/n).toFixed(4)} powerHitNearBallRate=${(phNear/phTot).toFixed(4)} ax=${JSON.stringify(as.axCounts)} ay=${JSON.stringify(as.ayCounts)} ap=${JSON.stringify(as.apCounts)}`);
+              const ms = this.policy.debug.maskStats;
+              if (ms && ms.n > 0) {
+                const nms = Math.max(1, ms.n);
+                logDebug(`[ACTION-MASK] n=${ms.n} groundN=${ms.groundN} airN=${ms.airN} yChosen=${JSON.stringify(ms.yChosenCounts)} yNegMaskedCount=${ms.yNegMaskedCount} yNegMaskedMassAvg=${(ms.yNegMaskedMass/nms).toFixed(6)} xZeroMaskedCount=${ms.xZeroMaskedCount} xZeroMaskedMassAvg=${(ms.xZeroMaskedMass/nms).toFixed(6)} illegalYPrevented=${ms.illegalYSampledPrevented} illegalXPrevented=${ms.illegalXSampledPrevented}`);
+              }
             }
             const fs = this.policy.debug.featStats;
             if (fs && fs.n > 0) {
@@ -823,6 +943,18 @@ export class Trainer {
               this.policy.debug.actionStats.apCounts = [0,0];
               this.policy.debug.actionStats.powerHitTotal = 0;
               this.policy.debug.actionStats.powerHitNearBall = 0;
+            }
+            if (this.policy.debug.maskStats) {
+              this.policy.debug.maskStats.n = 0;
+              this.policy.debug.maskStats.groundN = 0;
+              this.policy.debug.maskStats.airN = 0;
+              this.policy.debug.maskStats.yChosenCounts = [0,0,0];
+              this.policy.debug.maskStats.yNegMaskedMass = 0;
+              this.policy.debug.maskStats.yNegMaskedCount = 0;
+              this.policy.debug.maskStats.xZeroMaskedMass = 0;
+              this.policy.debug.maskStats.xZeroMaskedCount = 0;
+              this.policy.debug.maskStats.illegalYSampledPrevented = 0;
+              this.policy.debug.maskStats.illegalXSampledPrevented = 0;
             }
             this.policy.debug.featStats = null;
             this.policy.debug.lastUpdate = null;
@@ -1118,7 +1250,34 @@ _buildPointReplay(res) {
             }
             if (this.learnDiag) {
               const total = Math.max(1, this.learnDiag.transitions);
-              logDebug(`[LEARN-DIAG] episodes=${this.learnDiag.episodes} transitions=${this.learnDiag.transitions} pushed=${this.rollout.length} skippedNoInfo=${this.learnDiag.skippedNoInfo} skippedBadFields=${this.learnDiag.skippedBadFields}`);
+              const pushed = this.rollout.length;
+                            const transitions = Math.max(1, this.learnDiag.transitions);
+                            const pushedRate = pushed / transitions;
+                            const badRate = this.learnDiag.skippedBadFields / transitions;
+                            const noInfoRate = this.learnDiag.skippedNoInfo / transitions;
+
+                            logDebug(`[LEARN-DIAG] episodes=${this.learnDiag.episodes} transitions=${this.learnDiag.transitions} pushed=${pushed} skippedNoInfo=${this.learnDiag.skippedNoInfo} skippedBadFields=${this.learnDiag.skippedBadFields}`);
+                            logDebug(`[LEARN-RATE] pushedRate=${pushedRate.toFixed(4)} noInfoRate=${noInfoRate.toFixed(4)} badFieldRate=${badRate.toFixed(4)}`);
+
+                            // Episode-runner side diagnostics
+                            const epFramesTotal = Math.max(1, this.learnDiag.ep_framesTotal);
+                            logDebug(`[EP-DIAG] framesTotal=${this.learnDiag.ep_framesTotal} canActFalse=${this.learnDiag.ep_framesCanActFalse} decisionSampled=${this.learnDiag.ep_framesDecisionSampled} legacyAction=${this.learnDiag.ep_framesLegacyAction}`);
+                            logDebug(`[EP-DIAG] stepsAdded=${this.learnDiag.ep_stepsAdded} skippedNoDecisionInfo=${this.learnDiag.ep_stepsSkippedNoDecisionInfo} skippedForcedIdle=${this.learnDiag.ep_stepsSkippedForcedIdle}`);
+                            logDebug(`[EP-RATE] canActFalseRate=${(this.learnDiag.ep_framesCanActFalse/epFramesTotal).toFixed(4)} decisionSampledRate=${(this.learnDiag.ep_framesDecisionSampled/epFramesTotal).toFixed(4)} stepsAddedPerFrame=${(this.learnDiag.ep_stepsAdded/epFramesTotal).toFixed(6)}`);
+
+                            // reset per flush
+                            this.learnDiag.episodes = 0;
+                            this.learnDiag.transitions = 0;
+                            this.learnDiag.skippedNoInfo = 0;
+                            this.learnDiag.skippedBadFields = 0;
+
+                            this.learnDiag.ep_framesTotal = 0;
+                            this.learnDiag.ep_framesCanActFalse = 0;
+                            this.learnDiag.ep_framesDecisionSampled = 0;
+                            this.learnDiag.ep_framesLegacyAction = 0;
+                            this.learnDiag.ep_stepsAdded = 0;
+                            this.learnDiag.ep_stepsSkippedNoDecisionInfo = 0;
+                            this.learnDiag.ep_stepsSkippedForcedIdle = 0;
               // reset per flush
               this.learnDiag.episodes = 0;
               this.learnDiag.transitions = 0;
@@ -1170,6 +1329,18 @@ _buildPointReplay(res) {
               this.policy.debug.actionStats.apCounts = [0,0];
               this.policy.debug.actionStats.powerHitTotal = 0;
               this.policy.debug.actionStats.powerHitNearBall = 0;
+            }
+            if (this.policy.debug.maskStats) {
+              this.policy.debug.maskStats.n = 0;
+              this.policy.debug.maskStats.groundN = 0;
+              this.policy.debug.maskStats.airN = 0;
+              this.policy.debug.maskStats.yChosenCounts = [0,0,0];
+              this.policy.debug.maskStats.yNegMaskedMass = 0;
+              this.policy.debug.maskStats.yNegMaskedCount = 0;
+              this.policy.debug.maskStats.xZeroMaskedMass = 0;
+              this.policy.debug.maskStats.xZeroMaskedCount = 0;
+              this.policy.debug.maskStats.illegalYSampledPrevented = 0;
+              this.policy.debug.maskStats.illegalXSampledPrevented = 0;
             }
             this.policy.debug.featStats = null;
             this.policy.debug.lastUpdate = null;

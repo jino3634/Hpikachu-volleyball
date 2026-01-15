@@ -345,7 +345,8 @@ export class TuplePolicyV1 {
     if (Math.random() < this.epsilon) {
       const powerHit = randChoice([0, 1]);
       const xClasses = (!isAir && powerHit === 1) ? [0, 2] : [0, 1, 2];
-      const yClasses = (!isAir) ? [0, 1] : [0, 1, 2];
+      // On ground forbid y=-1 (class 0) to avoid dive-loop; allow {0,+1}
+      const yClasses = (!isAir) ? [1, 2] : [0, 1, 2];
       const ax = randChoice(xClasses);
       const ay = randChoice(yClasses);
       return {
@@ -380,10 +381,11 @@ export class TuplePolicyV1 {
     // sample y with ground mask (forbid +1)
     let ay = 0;
     if (!isAir) {
-      const a0 = py[0], a1 = py[1];
-      const s = a0 + a1;
+      // On ground forbid y=-1 (class 0); sample among {class1(0), class2(+1)}
+      const a1 = py[1], a2 = py[2];
+      const s = a1 + a2;
       const r = Math.random() * (s > 0 ? s : 1);
-      ay = (r < a0) ? 0 : 1;
+      ay = (r < a1) ? 1 : 2;
     } else {
       ay = sampleCategorical(py);
     }

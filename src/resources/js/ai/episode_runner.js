@@ -182,7 +182,19 @@ export class OnePointEpisodeRunner {
     const trace = [];
     let frames = 0;
 
-    try {
+    
+
+    // Episode-level diagnostics (for learning pipeline sanity)
+    const epDiag = {
+      framesTotal: 0,
+      framesCanActFalse: 0,         // canAct=false => decision sampling skipped
+      framesDecisionSampled: 0,     // agent.chooseInput/chooseAction actually called
+      framesLegacyAction: 0,        // chooseAction (non-tuple) path used
+      stepsAdded: 0,                // builder.addStep executed
+      stepsSkippedNoDecisionInfo: 0,// canAct=true & hasChooseInput=true but no decisionInfo
+      stepsSkippedForcedIdle: 0,    // decisionInfo.forcedIdle => skipped
+    };
+try {
       // 0) round 진입 강제(메뉴/intro 스킵)
       const ok = this._forceEnterRoundNoMenu();
       if (!ok) {
@@ -254,6 +266,9 @@ export class OnePointEpisodeRunner {
       // (obs.me.canAct is produced by getObservation() and is 0 when state > 3)
       const canAct = !(obs && obs.me && obs.me.canAct === 0);
 
+      epDiag.framesTotal++;
+      if (!canAct) epDiag.framesCanActFalse++;
+
       // action: prefer tuple-based API
       let aLearn = 0;
       let inputTuple = { xDirection: 0, yDirection: 0, powerHit: 0 };
@@ -261,8 +276,11 @@ export class OnePointEpisodeRunner {
       if (canAct) {
         try {
           if (hasChooseInput) {
+            epDiag.framesDecisionSampled++;
             inputTuple = agent.chooseInput(obs, this.learningPlayer, this.game) || inputTuple;
           } else {
+            epDiag.framesDecisionSampled++;
+            epDiag.framesLegacyAction++;
             // Backward-compatible: some agents implement chooseAction(obs, playerIndex, game),
             // others implement chooseAction(physics, playerIndex, game). Try obs first, then physics.
             try {
@@ -374,24 +392,24 @@ export class OnePointEpisodeRunner {
           }
         : null;
 
-      // 1) no decisionInfo => cannot be used by PPO, so skip creating a transition
+      // PPO requires decisionInfo (logp/value). If missing => skip creating a transition.
       if (!decisionInfo) {
-        // (optional) you can count it: skippedNoDecisionInfo++
+        // canAct=false OR hasChooseInput=false OR lastDecision missing
+        // For PPO we only care about the “tuple + lastDecision” path.
+        if (canAct && hasChooseInput) epDiag.stepsSkippedNoDecisionInfo++;
+      } else if (decisionInfo.forcedIdle) {
+        epDiag.stepsSkippedForcedIdle++;
       } else {
-        // 2) forcedIdle => skip (reason-agnostic)
-        const skip = !!decisionInfo.forcedIdle;
-
-        if (!skip) {
-          builder.addStep({
-            t: frames,
-            obs,
-            action: inputTuple,     // PPO path should be tuple-based
-            nextObs,
-            done: false,
-            info: decisionInfo,     // always non-null here
-            roundEvents: ev,
-          });
-        }
+        builder.addStep({
+          t: frames,
+          obs,
+          action: inputTuple,     // PPO path should be tuple-based
+          nextObs,
+          done: false,
+          info: decisionInfo,     // always non-null here
+          roundEvents: ev,
+        });
+        epDiag.stepsAdded++;
       }
 
       // Note: when canAct=false, decisionInfo=null, and we also never sampled action.
@@ -418,7 +436,9 @@ export class OnePointEpisodeRunner {
         });
 
         const episode = builder.toEpisode();
-        result = {
+        
+        if (episode && typeof episode === 'object') episode.diag = epDiag;
+result = {
           ok: true,
           scoredBy,
           loser,
@@ -426,6 +446,7 @@ export class OnePointEpisodeRunner {
           frames,
           trace,
           episode,
+          diag: epDiag,
         };
         break;
       }
@@ -448,7 +469,9 @@ builder.finalize({
           loseReason: 'HARD_SAFETY',
         });
         const episode = builder.toEpisode();
-        result = {
+        
+        if (episode && typeof episode === 'object') episode.diag = epDiag;
+result = {
           ok: false,
           scoredBy: 0,
           loser: 0,
@@ -456,6 +479,7 @@ builder.finalize({
           frames,
           trace,
           episode,
+          diag: epDiag,
         };
         break;
       }

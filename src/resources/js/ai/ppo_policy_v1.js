@@ -142,6 +142,27 @@ export class PpoPolicyV1 {
       powerHitTotal: 0,
       powerHitNearBall: 0,
     };
+
+    this.debug.maskStats = {
+      n: 0,
+
+      // environment split
+      groundN: 0,
+      airN: 0,
+
+      // chosen y class counts (after masking)
+      yChosenCounts: [0,0,0], // classes 0(-1),1(0),2(+1)
+
+      // mass removed by masks (sum of prob mass masked away)
+      yNegMaskedMass: 0,
+      yNegMaskedCount: 0,
+      xZeroMaskedMass: 0,
+      xZeroMaskedCount: 0,
+
+      // how often final sampled action would have been illegal without renorm (diagnostic; should stay 0)
+      illegalYSampledPrevented: 0,
+      illegalXSampledPrevented: 0,
+    };
     this.debug.lastUpdate = null; // {policyLoss,valueLoss,clipFrac,gradNorm,wNorm,advMean,advStd,retMean,retStd,rewMean,rewStd}
 
     // Extended diagnostics (rolling; reset by Trainer after each flush)
@@ -155,6 +176,27 @@ export class PpoPolicyV1 {
       apCounts: [0,0],
       powerHitTotal: 0,
       powerHitNearBall: 0,
+    };
+
+    this.debug.maskStats = {
+      n: 0,
+
+      // environment split
+      groundN: 0,
+      airN: 0,
+
+      // chosen y class counts (after masking)
+      yChosenCounts: [0,0,0], // classes 0(-1),1(0),2(+1)
+
+      // mass removed by masks (sum of prob mass masked away)
+      yNegMaskedMass: 0,
+      yNegMaskedCount: 0,
+      xZeroMaskedMass: 0,
+      xZeroMaskedCount: 0,
+
+      // how often final sampled action would have been illegal without renorm (diagnostic; should stay 0)
+      illegalYSampledPrevented: 0,
+      illegalXSampledPrevented: 0,
     };
     this.debug.lastUpdate = null; // {policyLoss,valueLoss,clipFrac,gradNorm,wNorm,advMean,advStd,retMean,retStd,rewMean,rewStd}
 
@@ -525,6 +567,7 @@ this.hidden1 = Math.max(1, (opts.hidden1 ?? 64) | 0);
     }
 
     const { px, py, pp, value } = this.evaluate(obs, playerIndex);
+    if (this.debug.maskStats) this.debug.maskStats.n++;
     const recordActionStats = (ax, ay, ap) => {
       const as = this.debug.actionStats;
       as.n++;
@@ -563,6 +606,12 @@ this.hidden1 = Math.max(1, (opts.hidden1 ?? 64) | 0);
       if (ap === 1) this.debug.powerHitSampled++;
       recordActionStats(ax, ay, ap);
 
+
+    if (this.debug.maskStats) {
+      if (!isAir) this.debug.maskStats.groundN++; else this.debug.maskStats.airN++;
+      const yc = this.debug.maskStats.yChosenCounts;
+      yc[ay] = (yc[ay] ?? 0) + 1;
+    }
     const logp = logProbFromProbs(px, ax) + logProbFromProbs(py, ay) + logProbFromProbs(pp, ap);
       return {
         action: { xDirection: mapClassToXDir(ax), yDirection: mapClassToYDir(ay), powerHit },
@@ -578,15 +627,30 @@ this.hidden1 = Math.max(1, (opts.hidden1 ?? 64) | 0);
       let best = 0, bestv = -Infinity;
       for (let i = 0; i < 3; i++) { if (px[i] > bestv) { bestv = px[i]; best = i; } }
       ax = best;
-      best = 0; bestv = -Infinity;
-      for (let i = 0; i < 3; i++) { if (py[i] > bestv) { bestv = py[i]; best = i; } }
+      bestv = -Infinity;
+      if (!isAir) {
+        // On ground: forbid y=-1 (class 0) to avoid dive-loop.
+        best = 1;
+        if (this.debug.maskStats) { this.debug.maskStats.yNegMaskedCount++; this.debug.maskStats.yNegMaskedMass += (py[0] ?? 0); }
+        for (let i = 1; i < 3; i++) { if (py[i] > bestv) { bestv = py[i]; best = i; } }
+      } else {
+        best = 0;
+        for (let i = 0; i < 3; i++) { if (py[i] > bestv) { bestv = py[i]; best = i; } }
+      }
       ay = best;
       ap = (pp[1] > pp[0]) ? 1 : 0;
+      // If ground and power=1, forbid x=0 (class 1) to avoid invalid/forced-idle dive.
+      if (!isAir && ap === 1 && ax === 1) {
+        if (this.debug.maskStats) { this.debug.maskStats.xZeroMaskedCount++; this.debug.maskStats.xZeroMaskedMass += (px[1] ?? 0); }
+        ax = (px[2] > px[0]) ? 2 : 0;
+        if (ax === 1 && this.debug.maskStats) this.debug.maskStats.illegalXSampledPrevented++;
+      }
     } else {
       ap = sampleCategorical(pp);
       // if ground and power=1, mask x=0
       if (!isAir && ap === 1) {
         const px2 = new Float32Array(px);
+        if (this.debug.maskStats) { this.debug.maskStats.xZeroMaskedCount++; this.debug.maskStats.xZeroMaskedMass += (px[1] ?? 0); }
         px2[1] = 0;
         const s = px2[0] + px2[2];
         if (s > 0) { px2[0] /= s; px2[2] /= s; }
@@ -594,9 +658,27 @@ this.hidden1 = Math.max(1, (opts.hidden1 ?? 64) | 0);
       } else {
         ax = sampleCategorical(px);
       }
-      ay = sampleCategorical(py);
+      // y-direction mask: on ground forbid y=-1 (class 0) to avoid dive-loop.
+      if (!isAir) {
+        if (this.debug.maskStats) { this.debug.maskStats.yNegMaskedCount++; this.debug.maskStats.yNegMaskedMass += (py[0] ?? 0); }
+        const py2 = new Float32Array(py);
+        py2[0] = 0;
+        const sY = py2[1] + py2[2];
+        if (sY > 0) { py2[1] /= sY; py2[2] /= sY; }
+        else { py2[1] = 0.5; py2[2] = 0.5; }
+        ay = sampleCategorical(py2);
+        if (ay === 0 && this.debug.maskStats) this.debug.maskStats.illegalYSampledPrevented++;
+      } else {
+        ay = sampleCategorical(py);
+      }
     }
 
+
+    if (this.debug.maskStats) {
+      if (!isAir) this.debug.maskStats.groundN++; else this.debug.maskStats.airN++;
+      const yc = this.debug.maskStats.yChosenCounts;
+      yc[ay] = (yc[ay] ?? 0) + 1;
+    }
     const logp = logProbFromProbs(px, ax) + logProbFromProbs(py, ay) + logProbFromProbs(pp, ap);
     const action = { xDirection: mapClassToXDir(ax), yDirection: mapClassToYDir(ay), powerHit: ap ? 1 : 0 };
     // diagnostics: count sampled power-hit actions (main policy path)
@@ -612,11 +694,23 @@ this.hidden1 = Math.max(1, (opts.hidden1 ?? 64) | 0);
    * @param {{xDirection:number,yDirection:number,powerHit:number}|number} action
    */
   logpValue(obs, playerIndex, action) {
+    // Recompute basic state flags for diagnostics/mask stats
+    const me = obs?.me ?? {};
+    const state = Number(me.state ?? 0);
+    const isAir = (me.isAir !== undefined) ? !!me.isAir : (state === 1 || state === 2);
+
     const a = (typeof action === 'number') ? { xDirection: 0, yDirection: 0, powerHit: 0 } : action;
     const ax = mapXDirToClass(Number(a.xDirection ?? 0));
     const ay = mapYDirToClass(Number(a.yDirection ?? 0));
     const ap = Number(a.powerHit ?? 0) ? 1 : 0;
     const { px, py, pp, value } = this.evaluate(obs, playerIndex);
+    if (this.debug.maskStats) this.debug.maskStats.n++;
+
+    if (this.debug.maskStats) {
+      if (!isAir) this.debug.maskStats.groundN++; else this.debug.maskStats.airN++;
+      const yc = this.debug.maskStats.yChosenCounts;
+      yc[ay] = (yc[ay] ?? 0) + 1;
+    }
     const logp = logProbFromProbs(px, ax) + logProbFromProbs(py, ay) + logProbFromProbs(pp, ap);
     return { logp, value, px, py, pp };
   }
