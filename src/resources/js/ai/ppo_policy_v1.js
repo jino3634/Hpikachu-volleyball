@@ -606,7 +606,6 @@ act(obs, playerIndex, opts = {}) {
     // (필드가 없을 수 있으니 0 초기화도 안전하게 포함)
 
     if (ap === 1) {
-      this.debug.powerHitSampled++;
 
       if (this.debug && this.debug.powerGate) {
         const pg = this.debug.powerGate;
