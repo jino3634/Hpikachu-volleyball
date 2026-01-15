@@ -26,6 +26,15 @@ export class OnePointEpisodeRunner {
 
     this.maxTraceFrames = opts.maxTraceFrames ?? 2400;
     this.hardSafetyFrames = opts.hardSafetyFrames ?? 36000;
+
+    // ===== trace debug (undefined 방지) =====
+    this._traceEnabled = false;          // 필요하면 true로 켜
+    this._traceBuf = [];
+    this._traceMax = 600;               // trace buf 최대 길이
+    this._traceDumps = { win: 0, loss: 0 }; // 포인트 로그 덤프 제한
+
+    // ===== 안전장치: non-round 무한루프 방지 =====
+    this._maxTotalSteps = 200000;        // 전체 stepLogic 호출 상한
   }
 
   // ─────────────────────────────────────────────────────────────
@@ -182,7 +191,8 @@ export class OnePointEpisodeRunner {
     const trace = [];
     let frames = 0;
 
-    
+    // ✅ 전체 stepLogic 안전장치 (round가 아니어도 증가)
+    let totalSteps = 0;
 
     // Episode-level diagnostics (for learning pipeline sanity)
     const epDiag = {
@@ -194,20 +204,21 @@ export class OnePointEpisodeRunner {
       stepsSkippedNoDecisionInfo: 0,// canAct=true & hasChooseInput=true but no decisionInfo
       stepsSkippedForcedIdle: 0,    // decisionInfo.forcedIdle => skipped
     };
-try {
+
+    try {
       // 0) round 진입 강제(메뉴/intro 스킵)
       const ok = this._forceEnterRoundNoMenu();
       if (!ok) {
-          return {
-            ok: false,
-            scoredBy: 0,
-            loser: 0,
-            loseReason: 'ENTER_ROUND_FAILED',
-            frames,
-            trace,
-            episode: null,
-          };
-        }
+        return {
+          ok: false,
+          scoredBy: 0,
+          loser: 0,
+          loseReason: 'ENTER_ROUND_FAILED',
+          frames,
+          trace,
+          episode: null,
+        };
+      }
 
       const builder = new EpisodeBuilder({ learningPlayer: this.learningPlayer });
 
@@ -238,300 +249,340 @@ try {
       this.game.agent2 = null;
 
       let result = null;
+
       try {
-    // --- minimal shaping state: serve/return only (PPO-friendly) ---
-    const NET_X = 216; // court half (432/2)
-    const isP2ServeAtStart = !!this.game.isPlayer2Serve;
-    const learningServing = (this.learningPlayer === 1) ? !isP2ServeAtStart : isP2ServeAtStart;
-    let serveCrossedNet = false;
-    let sawBallOnMySide = false; // for return shaping when receiving
-    let returnCrossedNet = false;
+        // --- minimal shaping state: serve/return only (PPO-friendly) ---
+        const NET_X = 216; // court half (432/2)
+        const isP2ServeAtStart = !!this.game.isPlayer2Serve;
+        const learningServing = (this.learningPlayer === 1) ? !isP2ServeAtStart : isP2ServeAtStart;
+        let serveCrossedNet = false;
+        let sawBallOnMySide = false; // for return shaping when receiving
+        let returnCrossedNet = false;
 
         while (true) {
-      // round가 아니면 학습 프레임 카운트/trace 누적 안 하고 진행만
-      if (this.game.state !== this.game.round) {
-        this._setNeutralInput();
-        this.game.stepLogic();
-        continue;
-      }
-
-      this.game._lastRoundEvents = null;
-
-      // obs(learningPlayer 기준)
-      const obs1 = this.game.getObservation(1);
-      const obs2 = this.game.getObservation(2);
-      const obs = (this.learningPlayer === 1) ? obs1 : obs2;
-
-      // Reset trace buffer at start of a round (frames==0)
-      if (this._traceEnabled && frames === 0) {
-        this._traceBuf = [];
-      }
-
-
-      // If cannot act (lying/diving/etc), skip *decision sampling itself*.
-      // (obs.me.canAct is produced by getObservation() and is 0 when state > 3)
-      const canAct = !(obs && obs.me && obs.me.canAct === 0) && !((obs && obs.me && obs.me.isDiving) || (obs && obs.me && obs.me.isLying));
-
-      epDiag.framesTotal++;
-      if (!canAct) epDiag.framesCanActFalse++;
-
-      // action: prefer tuple-based API
-      let aLearn = 0;
-      let inputTuple = { xDirection: 0, yDirection: 0, powerHit: 0 };
-
-      if (canAct) {
-        try {
-          if (hasChooseInput) {
-            epDiag.framesDecisionSampled++;
-            inputTuple = agent.chooseInput(obs, this.learningPlayer, this.game) || inputTuple;
-          } else {
-            epDiag.framesDecisionSampled++;
-            epDiag.framesLegacyAction++;
-            // Backward-compatible: some agents implement chooseAction(obs, playerIndex, game),
-            // others implement chooseAction(physics, playerIndex, game). Try obs first, then physics.
+          // ✅ 전체 stepLogic 안전장치: round가 아니어도 증가
+          totalSteps++;
+          if (totalSteps >= (this._maxTotalSteps | 0)) {
+            // TOTAL_STEPS_SAFETY로 끊길 때도 episode는 최대한 finalize 시도
             try {
-              aLearn = agent.chooseAction(obs, this.learningPlayer, this.game);
+              builder.finalize({
+                scoredBy: 0,
+                loser: 0,
+                loseReason: 'TOTAL_STEPS_SAFETY',
+              });
             } catch (_) {
-              aLearn = undefined;
+              // ignore
             }
-            if (typeof aLearn !== 'number') {
-              try {
-                aLearn = agent.chooseAction(this.game.physics, this.learningPlayer, this.game);
-              } catch (_) {
-                aLearn = 0;
+
+            const episode = (typeof builder.toEpisode === 'function') ? builder.toEpisode() : null;
+            if (episode && typeof episode === 'object') {
+              /** @type {any} */ (episode).diag = epDiag;
+            }
+
+            result = {
+              ok: false,
+              scoredBy: 0,
+              loser: 0,
+              loseReason: 'TOTAL_STEPS_SAFETY',
+              frames,
+              trace,
+              episode,
+              diag: epDiag,
+            };
+            break;
+          }
+
+          // round가 아니면 학습 프레임 카운트/trace 누적 안 하고 진행만
+          if (this.game.state !== this.game.round) {
+            this._setNeutralInput();
+            this.game.stepLogic();
+            continue;
+          }
+
+          this.game._lastRoundEvents = null;
+
+          // obs(learningPlayer 기준)
+          const obs1 = this.game.getObservation(1);
+          const obs2 = this.game.getObservation(2);
+          const obs = (this.learningPlayer === 1) ? obs1 : obs2;
+
+          // Reset trace buffer at start of a round (frames==0)
+          if (this._traceEnabled && frames === 0) {
+            this._traceBuf = [];
+          }
+
+          // If cannot act (lying/diving/etc), skip *decision sampling itself*.
+          // (obs.me.canAct is produced by getObservation() and is 0 when state > 3)
+          const canAct =
+            !(obs && obs.me && obs.me.canAct === 0) &&
+            !((obs && obs.me && obs.me.isDiving) || (obs && obs.me && obs.me.isLying));
+
+          epDiag.framesTotal++;
+          if (!canAct) epDiag.framesCanActFalse++;
+
+          // action: prefer tuple-based API
+          let aLearn = 0;
+          let inputTuple = { xDirection: 0, yDirection: 0, powerHit: 0 };
+
+          if (canAct) {
+            try {
+              if (hasChooseInput) {
+                epDiag.framesDecisionSampled++;
+                inputTuple = agent.chooseInput(obs, this.learningPlayer, this.game) || inputTuple;
+              } else {
+                epDiag.framesDecisionSampled++;
+                epDiag.framesLegacyAction++;
+                // Backward-compatible: some agents implement chooseAction(obs, playerIndex, game),
+                // others implement chooseAction(physics, playerIndex, game). Try obs first, then physics.
+                try {
+                  aLearn = agent.chooseAction(obs, this.learningPlayer, this.game);
+                } catch (_) {
+                  aLearn = undefined;
+                }
+                if (typeof aLearn !== 'number') {
+                  try {
+                    aLearn = agent.chooseAction(this.game.physics, this.learningPlayer, this.game);
+                  } catch (_) {
+                    aLearn = 0;
+                  }
+                }
+                aLearn = (aLearn | 0);
+              }
+            } catch (_) {
+              // keep defaults
+            }
+          }
+          // else: leave inputTuple neutral (0,0,0) and do NOT call agent at all
+
+          // opponent is builtin (externalEnabled=false) so we only inject learning side
+          const p1Input = (this.learningPlayer === 1) ? inputTuple : { xDirection: 0, yDirection: 0, powerHit: 0 };
+          const p2Input = (this.learningPlayer === 2) ? inputTuple : { xDirection: 0, yDirection: 0, powerHit: 0 };
+          this._applyInputs(p1Input, p2Input);
+
+          // 한 프레임 진행
+          // stepLogic()가 이벤트를 반환하지 않는 구현도 있어서,
+          // 반환값과 game._lastRoundEvents 둘 다를 확인한다.
+          const stepRet = this.game.stepLogic();
+          // stepLogic()는 보통 boolean을 반환하지만, 일부 구현은 이벤트 객체를 반환할 수 있다.
+          // pikavolley.js에서는 round()에서 this._lastRoundEvents에 이벤트를 저장한다.
+          const ev = (stepRet && typeof stepRet === 'object')
+            ? stepRet
+            : (this.game._lastRoundEvents ?? null);
+
+          // nextObs
+          const nextObs1 = this.game.getObservation(1);
+          const nextObs2 = this.game.getObservation(2);
+          const nextObs = (this.learningPlayer === 1) ? nextObs1 : nextObs2;
+
+          // === minimal shaping: serve/return only ===
+          // Uses raw ball x (0..432). Reward is small and does not replace terminal +/-1.
+          let shapingReward = 0;
+          try {
+            const bx0 = obs?.raw?.ball?.x;
+            const bx1 = nextObs?.raw?.ball?.x;
+            if (typeof bx0 === 'number' && typeof bx1 === 'number') {
+              // Serve success: when serving, first time the ball crosses the net into opponent side
+              if (learningServing && !serveCrossedNet) {
+                const crossed = (this.learningPlayer === 1)
+                  ? (bx0 <= NET_X && bx1 > NET_X)
+                  : (bx0 >= NET_X && bx1 < NET_X);
+                if (crossed) {
+                  serveCrossedNet = true;
+                  shapingReward += 0.10;
+                }
+              }
+
+              // Return success: when receiving, first time we send the ball back across the net
+              if (!learningServing) {
+                const onMySide = (this.learningPlayer === 1) ? (bx1 < NET_X) : (bx1 > NET_X);
+                if (onMySide) sawBallOnMySide = true;
+                if (sawBallOnMySide && !returnCrossedNet) {
+                  const crossedBack = (this.learningPlayer === 1)
+                    ? (bx0 <= NET_X && bx1 > NET_X)
+                    : (bx0 >= NET_X && bx1 < NET_X);
+                  if (crossedBack) {
+                    returnCrossedNet = true;
+                    shapingReward += 0.10;
+                  }
+                }
               }
             }
-            aLearn = (aLearn | 0);
-          }
-        } catch (_) {
-          // keep defaults
-        }
-      }
-      // else: leave inputTuple neutral (0,0,0) and do NOT call agent at all
-
-
-      // opponent is builtin (externalEnabled=false) so we only inject learning side
-      const p1Input = (this.learningPlayer === 1) ? inputTuple : { xDirection: 0, yDirection: 0, powerHit: 0 };
-      const p2Input = (this.learningPlayer === 2) ? inputTuple : { xDirection: 0, yDirection: 0, powerHit: 0 };
-      this._applyInputs(p1Input, p2Input);
-
-      // 한 프레임 진행
-      // stepLogic()가 이벤트를 반환하지 않는 구현도 있어서,
-      // 반환값과 game._lastRoundEvents 둘 다를 확인한다.
-      const stepRet = this.game.stepLogic();
-      // stepLogic()는 보통 boolean을 반환하지만, 일부 구현은 이벤트 객체를 반환할 수 있다.
-      // pikavolley.js에서는 round()에서 this._lastRoundEvents에 이벤트를 저장한다.
-      const ev = (stepRet && typeof stepRet === 'object')
-        ? stepRet
-        : (this.game._lastRoundEvents ?? null);
-
-      // nextObs
-      const nextObs1 = this.game.getObservation(1);
-      const nextObs2 = this.game.getObservation(2);
-      const nextObs = (this.learningPlayer === 1) ? nextObs1 : nextObs2;
-
-      // === minimal shaping: serve/return only ===
-      // Uses raw ball x (0..432). Reward is small and does not replace terminal +/-1.
-      let shapingReward = 0;
-      try {
-        const bx0 = obs?.raw?.ball?.x;
-        const bx1 = nextObs?.raw?.ball?.x;
-        if (typeof bx0 === 'number' && typeof bx1 === 'number') {
-          // Serve success: when serving, first time the ball crosses the net into opponent side
-          if (learningServing && !serveCrossedNet) {
-            const crossed = (this.learningPlayer === 1) ? (bx0 <= NET_X && bx1 > NET_X) : (bx0 >= NET_X && bx1 < NET_X);
-            if (crossed) {
-              serveCrossedNet = true;
-              shapingReward += 0.10;
-            }
+          } catch (_) {
+            // ignore shaping errors
           }
 
-          // Return success: when receiving, first time we send the ball back across the net
-          if (!learningServing) {
-            const onMySide = (this.learningPlayer === 1) ? (bx1 < NET_X) : (bx1 > NET_X);
-            if (onMySide) sawBallOnMySide = true;
-            if (sawBallOnMySide && !returnCrossedNet) {
-              const crossedBack = (this.learningPlayer === 1) ? (bx0 <= NET_X && bx1 > NET_X) : (bx0 >= NET_X && bx1 < NET_X);
-              if (crossedBack) {
-                returnCrossedNet = true;
-                shapingReward += 0.10;
+          // Attach shaping to roundEvents so builder reward function can use it.
+          if (ev && typeof ev === 'object') {
+            ev.shapingReward = shapingReward;
+          }
+
+          // Terminal shaping penalties (serve/return failure) are attached on the terminal frame.
+          const scoredByNow = (ev && typeof ev.scoredBy === 'number') ? ev.scoredBy : ((ev && typeof ev.scored === 'number') ? ev.scored : 0);
+          if ((scoredByNow === 1 || scoredByNow === 2) && ev && typeof ev === 'object') {
+            let terminalShaping = 0;
+            if (learningServing && !serveCrossedNet && scoredByNow !== this.learningPlayer) terminalShaping -= 0.10;
+            if (!learningServing && sawBallOnMySide && !returnCrossedNet && scoredByNow !== this.learningPlayer) terminalShaping -= 0.10;
+            if (terminalShaping !== 0) ev.terminalShapingReward = terminalShaping;
+          }
+
+          // trace 포맷: trainer._buildPointReplay가 기대하는 형태(t.obs.p1/p2)
+          if (trace.length < this.maxTraceFrames) {
+            trace.push({
+              t: frames,
+              obs: { p1: obs1, p2: obs2, ball: (obs1?.raw?.ball ?? obs2?.raw?.ball ?? obs1?.ball ?? obs2?.ball ?? null) },
+              action: { p1: p1Input, p2: p2Input },
+              roundEvents: ev,
+            });
+          }
+
+          // builder step (reward는 builder가 roundEvents로 내부 계산)
+          // Only create decisionInfo if we actually sampled a decision this frame.
+          const decisionInfo = (canAct && hasChooseInput && agent && agent.lastDecision)
+            ? {
+                logp: agent.lastDecision.logp,
+                value: agent.lastDecision.value,
+                forcedIdle: !!agent.lastDecision?.meta?.forcedIdle,
+                forcedIdleReason: agent.lastDecision?.meta?.reason ?? null,
+              }
+            : null;
+
+          // Collect per-frame trace (only last N frames). Dumped on point end.
+          if (this._traceEnabled) {
+            const me = obs?.me ?? {};
+            const ball = obs?.ball ?? {};
+            const meta = agent?.lastDecision?.meta ?? null;
+            this._traceBuf.push({
+              t: frames,
+              me: {
+                state: me.state,
+                canAct: me.canAct,
+                isAir: (me.isAir !== undefined ? me.isAir : null),
+                isDiving: (me.isDiving !== undefined ? me.isDiving : null),
+                isLying: (me.isLying !== undefined ? me.isLying : null),
+                x: me.x, y: me.y, vx: me.vx, vy: me.vy,
+              },
+              ball: {
+                x: ball.x, y: ball.y, vx: ball.vx, vy: ball.vy,
+                timeToLand: ball.timeToLand, landingX: ball.landingX,
+              },
+              action: inputTuple,
+              meta: meta ? {
+                ax: meta.ax, ay: meta.ay, ap: meta.ap,
+                allowPowerHit: meta.allowPowerHit,
+                dx: meta.dx, dy: meta.dy, timeToLand: meta.timeToLand,
+                forcedIdle: meta.forcedIdle, reason: meta.reason,
+              } : null,
+            });
+            if (this._traceBuf.length > this._traceMax) this._traceBuf.shift();
+          }
+
+          // PPO requires decisionInfo (logp/value). If missing => skip creating a transition.
+          if (!decisionInfo) {
+            // canAct=false OR hasChooseInput=false OR lastDecision missing
+            // For PPO we only care about the “tuple + lastDecision” path.
+            if (canAct && hasChooseInput) epDiag.stepsSkippedNoDecisionInfo++;
+          } else if (decisionInfo.forcedIdle) {
+            epDiag.stepsSkippedForcedIdle++;
+          } else {
+            builder.addStep({
+              t: frames,
+              obs,
+              action: inputTuple,     // PPO path should be tuple-based
+              nextObs,
+              done: false,
+              info: decisionInfo,     // always non-null here
+              roundEvents: ev,
+            });
+            epDiag.stepsAdded++;
+          }
+
+          frames++;
+
+          // 포인트 종료 감지: 프로젝트에 따라 필드명이 다를 수 있어 둘 다 지원
+          // - scoredBy: 1|2
+          // - scored: 1|2
+          const scoredBy = (ev && typeof ev.scoredBy === 'number')
+            ? ev.scoredBy
+            : ((ev && typeof ev.scored === 'number') ? ev.scored : 0);
+
+          if (scoredBy === 1 || scoredBy === 2) {
+            const loser = (scoredBy === 1) ? 2 : 1;
+
+            if (this._traceEnabled) {
+              const didLearningWin = (scoredBy === this.learningPlayer);
+              const key = didLearningWin ? 'win' : 'loss';
+              if ((this._traceDumps[key] ?? 0) < 1) {
+                this._traceDumps[key] = (this._traceDumps[key] ?? 0) + 1;
+                const lr = ev?.loseReason ?? ev?.reason ?? null;
+                console.log(`[TRACE-POINT] ${key.toUpperCase()} frames=${frames} scoredBy=${scoredBy} learning=${this.learningPlayer} loseReason=${lr}`);
+                for (const row of this._traceBuf) {
+                  console.log(`[TRACE-FRAME] ${JSON.stringify(row)}`);
+                }
               }
             }
+
+            builder.finalize({
+              scoredBy,
+              loser,
+              loseReason: 'SCORE',
+            });
+
+            const episode = builder.toEpisode();
+
+            if (episode && typeof episode === 'object') {
+              /** @type {any} */ (episode).diag = epDiag;
+            }
+
+            result = /** @type {any} */ ({
+              ok: true,
+              scoredBy,
+              loser,
+              loseReason: 'SCORE',
+              frames,
+              trace,
+              episode,
+              diag: epDiag,
+            });
+
+            break;
           }
-        }
-      } catch (_) {
-        // ignore shaping errors
-      }
 
-      // Attach shaping to roundEvents so builder reward function can use it.
-      if (ev && typeof ev === 'object') {
-        ev.shapingReward = shapingReward;
-      }
+          // hard safety (round 프레임 기준)
+          if (frames >= this.hardSafetyFrames) {
+            // HARD_SAFETY로 끊길 때는 다음 포인트를 위해 게임 상태를 한 번 리셋해준다.
+            // (roundEnded=true인데 state가 round에 머무는 등, 후속 포인트가 영원히 점수 안 나는 상태를 방지)
+            try {
+              if (this.game.beforeStartOfNewGame) this.game.state = this.game.beforeStartOfNewGame;
+              else if (this.game.startOfNewGame) this.game.state = this.game.startOfNewGame;
+              this.game.frameCounter = 0;
+              if (typeof this.game.roundEnded === 'boolean') this.game.roundEnded = false;
+              if (typeof this.game.gameEnded === 'boolean') this.game.gameEnded = false;
+            } catch (_) {}
 
-      // Terminal shaping penalties (serve/return failure) are attached on the terminal frame.
-      const scoredByNow = (ev && typeof ev.scoredBy === 'number') ? ev.scoredBy : ((ev && typeof ev.scored === 'number') ? ev.scored : 0);
-      if ((scoredByNow === 1 || scoredByNow === 2) && ev && typeof ev === 'object') {
-        let terminalShaping = 0;
-        if (learningServing && !serveCrossedNet && scoredByNow !== this.learningPlayer) terminalShaping -= 0.10;
-        if (!learningServing && sawBallOnMySide && !returnCrossedNet && scoredByNow !== this.learningPlayer) terminalShaping -= 0.10;
-        if (terminalShaping !== 0) ev.terminalShapingReward = terminalShaping;
-      }
+            builder.finalize({
+              scoredBy: 0,
+              loser: 0,
+              loseReason: 'HARD_SAFETY',
+            });
 
-      // trace 포맷: trainer._buildPointReplay가 기대하는 형태(t.obs.p1/p2)
-      if (trace.length < this.maxTraceFrames) {
-        trace.push({
-          t: frames,
-          obs: { p1: obs1, p2: obs2, ball: (obs1?.raw?.ball ?? obs2?.raw?.ball ?? obs1?.ball ?? obs2?.ball ?? null) },
-          action: { p1: p1Input, p2: p2Input },
-          roundEvents: ev,
-        });
-      }
+            const episode = builder.toEpisode();
 
-      // builder step (reward는 builder가 roundEvents로 내부 계산)
-      // Only create decisionInfo if we actually sampled a decision this frame.
-      const decisionInfo = (canAct && hasChooseInput && agent && agent.lastDecision)
-        ? {
-            logp: agent.lastDecision.logp,
-            value: agent.lastDecision.value,
-            forcedIdle: !!agent.lastDecision?.meta?.forcedIdle,
-            forcedIdleReason: agent.lastDecision?.meta?.reason ?? null,
+            if (episode && typeof episode === 'object') {
+              /** @type {any} */ (episode).diag = epDiag;
+            }
+
+            result = {
+              ok: false,
+              scoredBy: 0,
+              loser: 0,
+              loseReason: 'HARD_SAFETY',
+              frames,
+              trace,
+              episode,
+              diag: epDiag,
+            };
+            break;
           }
-        : null;
-
-      // Collect per-frame trace (only last N frames). Dumped on point end.
-      if (this._traceEnabled) {
-        const me = obs?.me ?? {};
-        const ball = obs?.ball ?? {};
-        const meta = agent?.lastDecision?.meta ?? null;
-        this._traceBuf.push({
-          t: frames,
-          me: {
-            state: me.state,
-            canAct: me.canAct,
-            isAir: (me.isAir !== undefined ? me.isAir : null),
-            isDiving: (me.isDiving !== undefined ? me.isDiving : null),
-            isLying: (me.isLying !== undefined ? me.isLying : null),
-            x: me.x, y: me.y, vx: me.vx, vy: me.vy
-          },
-          ball: {
-            x: ball.x, y: ball.y, vx: ball.vx, vy: ball.vy,
-            timeToLand: ball.timeToLand, landingX: ball.landingX
-          },
-          action: inputTuple,
-          meta: meta ? {
-            ax: meta.ax, ay: meta.ay, ap: meta.ap,
-            allowPowerHit: meta.allowPowerHit,
-            dx: meta.dx, dy: meta.dy, timeToLand: meta.timeToLand,
-            forcedIdle: meta.forcedIdle, reason: meta.reason
-          } : null,
-        });
-        if (this._traceBuf.length > this._traceMax) this._traceBuf.shift();
-      }
-
-      // PPO requires decisionInfo (logp/value). If missing => skip creating a transition.
-      if (!decisionInfo) {
-        // canAct=false OR hasChooseInput=false OR lastDecision missing
-        // For PPO we only care about the “tuple + lastDecision” path.
-        if (canAct && hasChooseInput) epDiag.stepsSkippedNoDecisionInfo++;
-      } else if (decisionInfo.forcedIdle) {
-        epDiag.stepsSkippedForcedIdle++;
-      } else {
-        builder.addStep({
-          t: frames,
-          obs,
-          action: inputTuple,     // PPO path should be tuple-based
-          nextObs,
-          done: false,
-          info: decisionInfo,     // always non-null here
-          roundEvents: ev,
-        });
-        epDiag.stepsAdded++;
-      }
-
-      // Note: when canAct=false, decisionInfo=null, and we also never sampled action.
-      // We still advance the game, but we do not train on this frame and do not count a decision.
-
-
-
-
-      frames++;
-
-      // 포인트 종료 감지: 프로젝트에 따라 필드명이 다를 수 있어 둘 다 지원
-      // - scoredBy: 1|2
-      // - scored: 1|2
-      const scoredBy = (ev && typeof ev.scoredBy === 'number')
-        ? ev.scoredBy
-        : ((ev && typeof ev.scored === 'number') ? ev.scored : 0);
-      if (scoredBy === 1 || scoredBy === 2) {
-        const loser = (scoredBy === 1) ? 2 : 1;
-      if (this._traceEnabled) {
-        const didLearningWin = (scoredBy === this.learningPlayer);
-        const key = didLearningWin ? 'win' : 'loss';
-        if ((this._traceDumps[key] ?? 0) < 1) {
-          this._traceDumps[key] = (this._traceDumps[key] ?? 0) + 1;
-          const lr = ev?.loseReason ?? ev?.reason ?? null;
-          console.log(`[TRACE-POINT] ${key.toUpperCase()} frames=${frames} scoredBy=${scoredBy} learning=${this.learningPlayer} loseReason=${lr}`);
-          for (const row of this._traceBuf) {
-            console.log(`[TRACE-FRAME] ${JSON.stringify(row)}`);
-          }
-        }
-      }
-
-
-        builder.finalize({
-          scoredBy,
-          loser,
-          loseReason: 'SCORE',
-        });
-
-        const episode = builder.toEpisode();
-        
-        if (episode && typeof episode === 'object') episode.diag = epDiag;
-result = {
-          ok: true,
-          scoredBy,
-          loser,
-          loseReason: 'SCORE',
-          frames,
-          trace,
-          episode,
-          diag: epDiag,
-        };
-        break;
-      }
-
-      // hard safety (round 프레임 기준)
-      if (frames >= this.hardSafetyFrames) {
-        
-        // HARD_SAFETY로 끊길 때는 다음 포인트를 위해 게임 상태를 한 번 리셋해준다.
-        // (roundEnded=true인데 state가 round에 머무는 등, 후속 포인트가 영원히 점수 안 나는 상태를 방지)
-        try {
-          if (this.game.beforeStartOfNewGame) this.game.state = this.game.beforeStartOfNewGame;
-          else if (this.game.startOfNewGame) this.game.state = this.game.startOfNewGame;
-          this.game.frameCounter = 0;
-          if (typeof this.game.roundEnded === 'boolean') this.game.roundEnded = false;
-          if (typeof this.game.gameEnded === 'boolean') this.game.gameEnded = false;
-        } catch (_) {}
-builder.finalize({
-          scoredBy: 0,
-          loser: 0,
-          loseReason: 'HARD_SAFETY',
-        });
-        const episode = builder.toEpisode();
-        
-        if (episode && typeof episode === 'object') episode.diag = epDiag;
-result = {
-          ok: false,
-          scoredBy: 0,
-          loser: 0,
-          loseReason: 'HARD_SAFETY',
-          frames,
-          trace,
-          episode,
-          diag: epDiag,
-        };
-        break;
-      }
         }
       } finally {
         // restore agents
@@ -540,7 +591,16 @@ result = {
         this.game.agent2 = prevAgent2;
       }
 
-      return result;
+      // ✅ result null 방지
+      return result ?? {
+        ok: false,
+        scoredBy: 0,
+        loser: 0,
+        loseReason: 'NO_RESULT',
+        frames,
+        trace,
+        episode: null,
+      };
 
     } catch (err) {
       console.error('[EpisodeRunner] runOnePoint failed', err);
@@ -555,5 +615,4 @@ result = {
       };
     }
   }
-
 }

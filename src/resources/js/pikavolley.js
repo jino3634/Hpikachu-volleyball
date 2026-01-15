@@ -1037,13 +1037,12 @@ isPowerHit: b.isPowerHit ? 1 : 0,
 
     const meIsLying = (raw.me.state === 4 && (raw.me.lying|0) > 0) ? 1 : 0;
     const meIsDiving = raw.me.state === 3 ? 1 : 0;
-    const meIsAir = (raw.me.y < 244 || raw.me.state === 1 || raw.me.state === 2 || raw.me.state === 3) ? 1 : 0;
-    const meCanAct = (raw.me.state <= 3) ? 1 : 0;
+    const meIsAir = (raw.me.state === 1 || raw.me.state === 2 || raw.me.state === 3) ? 1 : 0;
+const meCanAct = (raw.me.state <= 3) ? 1 : 0;
 
     const oppIsLying = (raw.opp.state === 4 && (raw.opp.lying|0) > 0) ? 1 : 0;
-    const oppIsAir = (raw.opp.y < 244 || raw.opp.state === 1 || raw.opp.state === 2 || raw.opp.state === 3) ? 1 : 0;
-
-    // Build processed obs while keeping original field names.
+    const oppIsAir = (raw.opp.state === 1 || raw.opp.state === 2 || raw.opp.state === 3) ? 1 : 0;
+// Build processed obs while keeping original field names.
     const meP = {
       x: nx(xTo(raw.me.x)),
       y: ny(raw.me.y),
