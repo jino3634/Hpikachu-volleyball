@@ -269,12 +269,25 @@ export class PpoPolicyV1 {
       axCounts: [0,0,0],
       ayCounts: [0,0,0],
       apCounts: [0,0],
+
       powerHitTotal: 0,
       powerHitNearBall: 0,
-      tieX: 0,
-      tieY: 0,
-      tieP: 0,
+
+      tieX: 0, tieY: 0, tieP: 0,
+
+      // ✅ near-tie / margin (deterministic 분석용)
+      nearTieX: 0,
+      nearTieY: 0,
+      nearTieP: 0,
+      marginXSum: 0,
+      marginYSum: 0,
+      marginPSum: 0,
+
+      // ✅ power gate 관찰용
+      gateAllowN: 0,     // allowPowerHit=true 프레임 수
+      gateBlockN: 0,     // allowPowerHit=false 프레임 수
     };
+
 
     this.debug.maskStats = {
       n: 0,
@@ -827,9 +840,23 @@ act(obs, playerIndex, opts = {}) {
 
   // --- TIE-DIAG (POWER) INSERT HERE ---
   const as2 = this.debug?.actionStats;
-  const EPS = 1e-6;
-  if (as2 && deterministic && Math.abs(ppEff[1] - ppEff[0]) < EPS) {
-    as2.tieP = (as2.tieP | 0) + 1;
+
+  // ✅ EPS=1e-6은 너무 빡빡해서 사실상 0만 나옴
+  const EPS_TIE = 1e-6;   // "완전 동점"용(그대로 둬도 됨)
+  const EPS_NEAR = 1e-3;  // ✅ "거의 동점"용(이게 핵심)
+
+  if (as2) {
+    // gate 관찰
+    if (allowPowerHit) as2.gateAllowN = (as2.gateAllowN | 0) + 1;
+    else as2.gateBlockN = (as2.gateBlockN | 0) + 1;
+
+    if (deterministic) {
+      const marginP = Math.abs(ppEff[1] - ppEff[0]);
+      as2.marginPSum += marginP;
+
+      if (marginP < EPS_TIE) as2.tieP = (as2.tieP | 0) + 1;
+      if (marginP < EPS_NEAR) as2.nearTieP = (as2.nearTieP | 0) + 1;
+    }
   }
   // --- END ---
 
@@ -864,12 +891,17 @@ act(obs, playerIndex, opts = {}) {
 
   // --- TIE-DIAG (X) INSERT HERE ---
   if (as2 && deterministic) {
-    const mx = Math.max(pxEff[0], pxEff[1], pxEff[2]);
-    let cnt = 0;
-    if (Math.abs(pxEff[0] - mx) < EPS) cnt++;
-    if (Math.abs(pxEff[1] - mx) < EPS) cnt++;
-    if (Math.abs(pxEff[2] - mx) < EPS) cnt++;
-    if (cnt >= 2) as2.tieX = (as2.tieX | 0) + 1;
+    // top1-top2 margin
+    const a = pxEff[0], b = pxEff[1], c = pxEff[2];
+    const s = [a,b,c].slice().sort((x,y)=>y-x);
+    const marginX = s[0] - s[1];
+    as2.marginXSum += marginX;
+
+    // 완전 동점(거의 안 나옴)
+    if (marginX < 1e-6) as2.tieX = (as2.tieX | 0) + 1;
+
+    // ✅ near-tie (이게 의미 있음)
+    if (marginX < 1e-3) as2.nearTieX = (as2.nearTieX | 0) + 1;
   }
   // --- END ---
 
@@ -897,12 +929,13 @@ act(obs, playerIndex, opts = {}) {
 
   // --- TIE-DIAG (Y) INSERT HERE ---
   if (as2 && deterministic) {
-    const my = Math.max(pyEff[0], pyEff[1], pyEff[2]);
-    let cnt = 0;
-    if (Math.abs(pyEff[0] - my) < EPS) cnt++;
-    if (Math.abs(pyEff[1] - my) < EPS) cnt++;
-    if (Math.abs(pyEff[2] - my) < EPS) cnt++;
-    if (cnt >= 2) as2.tieY = (as2.tieY | 0) + 1;
+    const a = pyEff[0], b = pyEff[1], c = pyEff[2];
+    const s = [a,b,c].slice().sort((x,y)=>y-x);
+    const marginY = s[0] - s[1];
+    as2.marginYSum += marginY;
+
+    if (marginY < 1e-6) as2.tieY = (as2.tieY | 0) + 1;
+    if (marginY < 1e-3) as2.nearTieY = (as2.nearTieY | 0) + 1;
   }
   // --- END ---
 

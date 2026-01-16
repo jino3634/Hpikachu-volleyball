@@ -1626,6 +1626,17 @@ async runPoints(n, mode) {
       const tieY = (as.tieY !== undefined) ? (as.tieY | 0) : 0;
       const tieP = (as.tieP !== undefined) ? (as.tieP | 0) : 0;
 
+      const nearTieX = (as.nearTieX | 0);
+      const nearTieY = (as.nearTieY | 0);
+      const nearTieP = (as.nearTieP | 0);
+
+      const mX = (Number(as.marginXSum) / denom).toFixed(6);
+      const mY = (Number(as.marginYSum) / denom).toFixed(6);
+      const mP = (Number(as.marginPSum) / denom).toFixed(6);
+
+      const gAllow = (as.gateAllowN | 0);
+      const gBlock = (as.gateBlockN | 0);
+
       logDebug(
         `[EVAL-ACTS] n=${as.n | 0} ` +
         `ax=${(as.axCounts || [0,0,0]).join(',')} ` +
@@ -1633,7 +1644,10 @@ async runPoints(n, mode) {
         `ap=${(as.apCounts || [0,0]).join(',')} ` +
         `entX=${(Number(as.entX) / denom).toFixed(4)} entY=${(Number(as.entY) / denom).toFixed(4)} entP=${(Number(as.entP) / denom).toFixed(4)} ` +
         `maxX=${(Number(as.maxX) / denom).toFixed(4)} maxY=${(Number(as.maxY) / denom).toFixed(4)} maxP=${(Number(as.maxP) / denom).toFixed(4)} ` +
-        `tieX=${tieX} tieY=${tieY} tieP=${tieP}`
+        `tieX=${tieX} tieY=${tieY} tieP=${tieP}` +
+        `nearTieX=${nearTieX} nearTieY=${nearTieY} nearTieP=${nearTieP}` +
+        `marginX=${mX} marginY=${mY} marginP=${mP}` +
+        `gateAllow=${gAllow} gateBlock=${gBlock}`
       );
     } else {
       logDebug('[EVAL-ACTS] actionStats unavailable (policy.debug.actionStats missing)');
