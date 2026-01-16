@@ -184,12 +184,20 @@ export class PikachuVolleyball {
       if (!isAir) y = 0;
     }
 
-    // ✅ powerHitApplied: 실제로 override 입력에 powerHit=1이 주입되는 순간만 카운트 (신용도 100%)
+    // ✅ powerHitRequested/powerHitApplied: "실제로 override에 powerHit=1이 주입되는 순간"만 카운트
     if (p === 1) {
       const selfAny = /** @type {any} */ (this);
-      const ds = (selfAny.debugStats ??= {});
+      const ds = (selfAny.debugStats ??= {
+        decisions: 0,
+        forcedIdle: 0,
+        powerHitRequested: 0,
+        powerHitApplied: 0,
+      });
+
+      ds.powerHitRequested = (ds.powerHitRequested | 0) + 1;
       ds.powerHitApplied = (ds.powerHitApplied | 0) + 1;
     }
+
 
     kb.setOverrideInput(x, y, p);
   }
@@ -240,9 +248,6 @@ export class PikachuVolleyball {
         if (this.externalEnabledP1 && this.agent1 && typeof this.agent1.chooseAction === 'function') {
           const obs1 = this.getObservation(1);
           this._heldActionP1 = (this.agent1.chooseAction(obs1, 1, this) | 0);
-          if (this._heldActionP1 === 6 || this._heldActionP1 === 7 || this._heldActionP1 === 8 || this._heldActionP1 === 9) {
-          this.debugStats.powerHitRequested++;
-}
         }
         if (this.externalEnabledP2 && this.agent2 && typeof this.agent2.chooseAction === 'function') {
           const obs2 = this.getObservation(2);

@@ -42,7 +42,6 @@ export class PpoPolicyAgentV1 {
       }
       game.debugStats.decisions++;
       if (out?.meta?.forcedIdle) game.debugStats.forcedIdle++;
-      if (out?.action?.powerHit === 1) game.debugStats.powerHitRequested++;
     }
 
     return out.action;

@@ -365,36 +365,62 @@ export class OnePointEpisodeRunner {
 
           // action: prefer tuple-based API
           let aLearn = 0;
-          let inputTuple = { xDirection: 0, yDirection: 0, powerHit: 0 };
+          // (추가) held input (phase=1에서 유지할 x/y)
+          let heldTuple = { xDirection: 0, yDirection: 0, powerHit: 0 };
 
-          if (canAct) {
+          // (추가) decision phase 읽기: powerHit는 phase=0에서만 의미가 있음
+          const phase = (this.game && typeof this.game._decisionPhase === 'number')
+            ? (this.game._decisionPhase | 0)
+            : 0;
+
+          let inputTuple = heldTuple; // 기본은 hold
+
+          if (canAct && phase === 0) {
             try {
               if (hasChooseInput) {
                 epDiag.framesDecisionSampled++;
-                inputTuple = agent.chooseInput(obs, this.learningPlayer, this.game) || inputTuple;
+                const raw = agent.chooseInput(obs, this.learningPlayer, this.game);
+                if (raw && typeof raw === 'object') {
+                  // hold 갱신: phase=0 결정값
+                  heldTuple = {
+                    xDirection: Number(raw.xDirection ?? 0) | 0,
+                    yDirection: Number(raw.yDirection ?? 0) | 0,
+                    powerHit: Number(raw.powerHit ?? 0) ? 1 : 0,
+                  };
+                }
+                inputTuple = heldTuple;
               } else {
+                // legacy chooseAction 경로(필요하면 나중에 별도 정리)
                 epDiag.framesDecisionSampled++;
                 epDiag.framesLegacyAction++;
-                // Backward-compatible: some agents implement chooseAction(obs, playerIndex, game),
-                // others implement chooseAction(physics, playerIndex, game). Try obs first, then physics.
-                try {
-                  aLearn = agent.chooseAction(obs, this.learningPlayer, this.game);
-                } catch (_) {
-                  aLearn = undefined;
-                }
-                if (typeof aLearn !== 'number') {
-                  try {
-                    aLearn = agent.chooseAction(this.game.physics, this.learningPlayer, this.game);
-                  } catch (_) {
-                    aLearn = 0;
-                  }
-                }
-                aLearn = (aLearn | 0);
+                let aLearn = 0;
+                try { aLearn = agent.chooseAction(obs, this.learningPlayer, this.game) | 0; } catch (_) {}
+                // legacy는 여기서 tuple 변환이 빠져있었음. (지금은 우선 neutral로 둬도 됨)
+                inputTuple = heldTuple;
               }
             } catch (_) {
-              // keep defaults
+              // keep hold
             }
           }
+
+          // (핵심) sanitize: phase!=0이면 powerHit는 무조건 0
+          if (!inputTuple || typeof inputTuple !== 'object') {
+            inputTuple = { xDirection: 0, yDirection: 0, powerHit: 0 };
+          }
+          if (phase !== 0) {
+            inputTuple = {
+              xDirection: Number(inputTuple.xDirection ?? 0) | 0,
+              yDirection: Number(inputTuple.yDirection ?? 0) | 0,
+              powerHit: 0,
+            };
+          } else {
+            inputTuple = {
+              xDirection: Number(inputTuple.xDirection ?? 0) | 0,
+              yDirection: Number(inputTuple.yDirection ?? 0) | 0,
+              powerHit: Number(inputTuple.powerHit ?? 0) ? 1 : 0,
+            };
+          }
+
           // else: leave inputTuple neutral (0,0,0) and do NOT call agent at all
 
           // opponent is builtin (externalEnabled=false) so we only inject learning side
@@ -529,14 +555,25 @@ export class OnePointEpisodeRunner {
 
           // builder step (reward는 builder가 roundEvents로 내부 계산)
           // Only create decisionInfo if we actually sampled a decision this frame.
-          const decisionInfo = (canAct && hasChooseInput && agent && agent.lastDecision)
-            ? {
-                logp: agent.lastDecision.logp,
-                value: agent.lastDecision.value,
-                forcedIdle: !!agent.lastDecision?.meta?.forcedIdle,
-                forcedIdleReason: agent.lastDecision?.meta?.reason ?? null,
+          let decisionInfo = null;
+
+          if (canAct && hasChooseInput && agent && agent.policy && typeof agent.policy.logpValue === 'function') {
+            try {
+              const out = agent.policy.logpValue(obs, this.learningPlayer, inputTuple);
+
+              // out이 { logp, value, forcedIdle, forcedIdleReason } 형태면 그대로 normalize
+              if (out && typeof out === 'object') {
+                decisionInfo = {
+                  logp: Number(out.logp ?? 0),
+                  value: Number(out.value ?? 0),
+                  forcedIdle: !!out.forcedIdle,
+                  forcedIdleReason: out.forcedIdleReason ?? null,
+                };
               }
-            : null;
+            } catch (_) {
+              decisionInfo = null;
+            }
+          }
 
           // Collect per-frame trace (only last N frames). Dumped on point end.
           if (this._traceEnabled) {
@@ -570,19 +607,15 @@ export class OnePointEpisodeRunner {
 
           // PPO requires decisionInfo (logp/value). If missing => skip creating a transition.
           if (!decisionInfo) {
-            // canAct=false OR hasChooseInput=false OR lastDecision missing
-            // For PPO we only care about the “tuple + lastDecision” path.
             if (canAct && hasChooseInput) epDiag.stepsSkippedNoDecisionInfo++;
-          } else if (decisionInfo.forcedIdle) {
-            epDiag.stepsSkippedForcedIdle++;
           } else {
             builder.addStep({
               t: frames,
               obs,
-              action: inputTuple,     // PPO path should be tuple-based
+              action: inputTuple,    // ✅ sanitize된 action 저장
               nextObs,
               done: false,
-              info: decisionInfo,     // always non-null here
+              info: decisionInfo,    // ✅ logp/value가 action과 일치
               roundEvents: ev,
             });
             epDiag.stepsAdded++;
