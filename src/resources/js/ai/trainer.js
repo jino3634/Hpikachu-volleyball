@@ -52,7 +52,7 @@ export class Trainer {
    *   tickDelayMs?: number,
    *   autosaveEveryEpisodes?: number,
    *   setWinTarget?: number,
-   *   consecutiveSetWinsToGraduate?: number
+   *   consecutiveSetWinsToGraduate?: number,
    *   pbtEnabled?: boolean,
    * }} [opts]
    */
@@ -380,16 +380,44 @@ export class Trainer {
   }
 
   _policySig() {
-    // “가중치/정책이 같은지”를 가볍게 확인하는 대표값 스냅샷
     const p = this.policy;
-    const a = (p?.W1?.[0]?.[0] ?? 0);
-    const b = (p?.W2?.[0]?.[0] ?? 0);
-    const c = (p?.Wx?.[0]?.[0] ?? 0);
-    const d = (p?.Wy?.[0]?.[0] ?? 0);
-    const e = (p?.Wp?.[0]?.[0] ?? 0);
-    const v = (p?.Wv?.[0] ?? 0);
-    return `W1=${Number(a).toFixed(4)} W2=${Number(b).toFixed(4)} Wx=${Number(c).toFixed(4)} Wy=${Number(d).toFixed(4)} Wp=${Number(e).toFixed(4)} Wv=${Number(v).toFixed(4)}`;
+
+    // 샘플 weight(기존 유지)
+    const W1 = Number(p?.W1?.[0]?.[0] ?? 0);
+    const W2 = Number(p?.W2?.[0]?.[0] ?? 0);
+    const Wx = Number(p?.Wx?.[0]?.[0] ?? 0);
+    const Wy = Number(p?.Wy?.[0]?.[0] ?? 0);
+    const Wp = Number(p?.Wp?.[0]?.[0] ?? 0);
+    const Wv = Number(p?.Wv?.[0] ?? 0);
+
+    // bias 샘플(추가: weight 변화가 안 보일 때 bias가 변하는 케이스 잡음)
+    const b1 = Number(p?.b1?.[0] ?? 0);
+    const b2 = Number(p?.b2?.[0] ?? 0);
+    const bp = Number(p?.bp?.[0] ?? 0);
+    const bv = Number(p?.bv ?? 0);
+
+    // 학습 직후 진단값(추가: 가장 민감)
+    const lu = p?.debug?.lastUpdate ?? null;
+    const wNorm = Number(lu?.wNorm ?? NaN);
+    const gNorm = Number(lu?.gradNorm ?? NaN);
+    const clipF = Number(lu?.clipFrac ?? NaN);
+
+    // 하이퍼파라미터(추가: rollback/mutate가 적용됐는지 즉시 보임)
+    const lr = Number(p?.learningRate ?? NaN);
+    const clip = Number(p?.clipEps ?? NaN);
+    const vf = Number(p?.vfCoef ?? NaN);
+
+    const fmt = (x) => (Number.isFinite(x) ? x.toFixed(4) : 'n/a');
+
+    return (
+      `lr=${Number.isFinite(lr) ? lr.toExponential(2) : 'n/a'} ` +
+      `clip=${Number.isFinite(clip) ? clip.toFixed(3) : 'n/a'} vf=${Number.isFinite(vf) ? vf.toFixed(2) : 'n/a'} ` +
+      `W1=${fmt(W1)} W2=${fmt(W2)} Wx=${fmt(Wx)} Wy=${fmt(Wy)} Wp=${fmt(Wp)} Wv=${fmt(Wv)} ` +
+      `b1=${fmt(b1)} b2=${fmt(b2)} bp=${fmt(bp)} bv=${fmt(bv)} ` +
+      `wNorm=${fmt(wNorm)} gNorm=${fmt(gNorm)} clipF=${fmt(clipF)}`
+    );
   }
+
 
   _genomeSig(genome) {
     const g = genome ?? this.pbtCurrentGenome ?? this._makeGenomeFromPolicy();
@@ -870,6 +898,24 @@ export class Trainer {
 
       // 1) train 30
       const trainRes = await this.runPoints(TRAIN_N, 'train');
+
+      // ✅ (추가) Train→Eval 경계에서 남은 rollout을 강제 flush해서
+      // "평가가 최신 가중치 기준"이 되게 한다.
+      const rolloutBeforeEval = (this.rollout?.length ?? 0);
+      const ppoFlushBeforeEval = this.ppoFlushCount || 0;
+      const ppoStepsBeforeEval = this.ppoFlushSteps || 0;
+
+      await this._flushRollout(true);
+
+      const ppoFlushAfterEval = this.ppoFlushCount || 0;
+      const ppoStepsAfterEval = this.ppoFlushSteps || 0;
+      const dFlush = ppoFlushAfterEval - ppoFlushBeforeEval;
+      const dSteps = ppoStepsAfterEval - ppoStepsBeforeEval;
+
+      logDebug(
+        `[PBT-FLUSH] cycle=${this.pbtCycle} afterTrain ` +
+        `rolloutBefore=${rolloutBeforeEval} dPpoFlush=${dFlush} dPpoSteps=${dSteps} sig=${this._policySig()}`
+      );
 
       // 2) eval 30 x3 (learning OFF)
       const eval1 = await this.runPoints(EVAL_N, 'eval');
