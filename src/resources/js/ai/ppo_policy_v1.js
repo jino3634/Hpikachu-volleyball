@@ -212,17 +212,15 @@ export class PpoPolicyV1 {
     this.featureLen = Math.max(24, (opts.featureLen ?? 24) | 0);
 
     // ✅ 주입 지점에서 들어온 genome 저장 (없으면 기본값)
+    // powerHitGate는 "픽셀 충돌 예측 gate"와 동일 스키마로 통일
     this.genome = opts.genome ?? {
       powerHitGate: {
-        air_dx_max: 0.30,
-        air_dy_max: 0.50,
-        air_tLand_max: 0.55,
-        ground_tLand_max: 0.70,
-        ground_dLand_min: 0.20,
-        ground_dLand_max: 0.90,
-        ballOnMySide_margin: 0.05,
+        kFrames: 4,
+        dxMarginPx: 6,
+        dyMarginPx: 10,
       },
     };
+
 
     // debug/diagnostics counters (for training stability)
     this.debug = {
@@ -884,24 +882,16 @@ act(obs, playerIndex, opts = {}) {
     pg.blockedDLandLow = pg.blockedDLandLow ?? 0;
     pg.blockedDLandHigh = pg.blockedDLandHigh ?? 0;
 
-    // ✅ 유전자 파라미터(없으면 기본값)
+    // ✅ 유전자 파라미터(없으면 기본값) - P0-1 스키마로 통일
     const g = (this.genome && this.genome.powerHitGate) ? this.genome.powerHitGate : {
-      air_dx_max: 0.30,
-      air_dy_max: 0.50,
-      air_tLand_max: 0.55,
-      ground_tLand_max: 0.70,
-      ground_dLand_min: 0.20,
-      ground_dLand_max: 0.90,
-      ballOnMySide_margin: 0.05,
+      kFrames: 4,
+      dxMarginPx: 6,
+      dyMarginPx: 10,
     };
 
-    const airDxMax = Number(g.air_dx_max ?? 0.30);
-    const airDyMax = Number(g.air_dy_max ?? 0.50);
-    const airTMax  = Number(g.air_tLand_max ?? 0.55);
-
-    const groundTMax = Number(g.ground_tLand_max ?? 0.70);
-    const groundDMin = Number(g.ground_dLand_min ?? 0.20);
-    const groundDMax = Number(g.ground_dLand_max ?? 0.90);
+    // (P0-1) 여기서는 g를 "기록용"으로만 보유.
+    // blockedDX/DY/TTL 같은 옛 기준 분해는 P0-2에서 픽셀 기준으로 재정의할 예정이라
+    // P0-1에서는 제거(또는 사용하지 않음).
 
     // 요청 집계(정책이 ap=1을 원했음)
     pg.requested += 1;
@@ -911,26 +901,15 @@ act(obs, playerIndex, opts = {}) {
     if (!allowPowerHit) {
       // ✅ blocked 사유를 air/ground로 나눠 분해(유전자 기준)
 
-      if (gate.isAir) {
-        // air 조건이 깨진 경우(유전자 임계값 기준)
-        if (gate.dx > airDxMax) pg.blockedDX += 1;
-        if (gate.dy > airDyMax) pg.blockedDY += 1;
-        if (gate.tLand > airTMax) pg.blockedTTL += 1;
-      } else {
-        // ground 조건이 깨진 경우(추가 카운터)
-        // - 공이 내 코트가 아니면 groundOK 자체 불가
-        if (!gate.ballOnMySide) pg.blockedBallSide += 1;
+      // gate.allow가 false이면: "kFrames 내 충돌 예측 실패"가 유일한 차단 원인
+      // (P0-2에서 minDx/minDy/minKFrame 같은 디테일을 추가하면 더 풍부해짐)
+      if (!gate.allow) {
+        pg.blockedNoContactWindow = (pg.blockedNoContactWindow ?? 0) + 1;
 
-        // - 타이밍(착지까지 시간)
-        if (gate.tLand > groundTMax) pg.blockedGroundTTL += 1;
-
-        // - 착지점 거리(dLand) 범위
-        if (gate.dLand < groundDMin) pg.blockedDLandLow += 1;
-        if (gate.dLand > groundDMax) pg.blockedDLandHigh += 1;
-
-        // 기존 로그 호환(예전 필드 유지)
+        // 기존 로그 호환(있다면) - 'blockedNotAir'를 "gate 실패"의 대표 카운터로 쓰고 싶다면:
         pg.blockedNotAir += 1;
       }
+
 
       pg.sumDX_block += gate.dx; pg.sumDY_block += gate.dy; pg.sumTTL_block += gate.tLand;
       pg.count_block += 1;

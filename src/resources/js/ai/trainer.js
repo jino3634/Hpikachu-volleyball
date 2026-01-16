@@ -133,15 +133,12 @@ export class Trainer {
       // ✅ 단 하나의 주입 지점
       genome: {
         powerHitGate: {
-          air_dx_max: 0.30,
-          air_dy_max: 0.50,
-          air_tLand_max: 0.55,
-          ground_tLand_max: 0.70,
-          ground_dLand_min: 0.20,
-          ground_dLand_max: 0.90,
-          ballOnMySide_margin: 0.05,
+          kFrames: 4,
+          dxMarginPx: 6,
+          dyMarginPx: 10,
         },
       },
+
 
     });
 
