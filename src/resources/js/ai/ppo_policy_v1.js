@@ -859,6 +859,80 @@ act(obs, playerIndex, opts = {}) {
     }
   }
   // --- END ---
+  // ✅ deterministic에서 near-tie면 argmax 고정 대신 "고정 seed" 샘플링(결정론 유지)
+  const TIE_EPS_P = 1e-3; // power near-tie
+  const TIE_EPS_X = 1e-3; // x near-tie
+  const TIE_EPS_Y = 1e-3; // y near-tie
+
+  function _mulberry32(seed) {
+    let a = seed >>> 0;
+    return function () {
+      a |= 0; a = (a + 0x6D2B79F5) | 0;
+      let t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  function _hashObs32(obs, playerIndex) {
+    const me2 = obs?.me ?? {};
+    const ball2 = obs?.ball ?? {};
+    const q = (v, s) => (Math.floor((Number(v) || 0) * s) | 0);
+
+    let h = 2166136261 | 0;
+    const mix = (x) => { h ^= (x | 0); h = Math.imul(h, 16777619); };
+
+    mix(playerIndex | 0);
+    mix(q(me2.x, 1000));
+    mix(q(me2.y, 1000));
+    mix(q(ball2.x, 1000));
+    mix(q(ball2.y, 1000));
+    mix(q(ball2.timeToLand, 1000));
+    mix(q(ball2.landingX, 1000));
+    return h >>> 0;
+  }
+
+  const seedBase = (opts && Number.isFinite(opts.seed)) ? (opts.seed >>> 0) : 0;
+  const rng = _mulberry32((seedBase ^ _hashObs32(obs, playerIndex)) >>> 0);
+
+  function _sampleCategoricalRng(probs) {
+    let sum = 0;
+    for (let i = 0; i < probs.length; i++) sum += Math.max(0, Number(probs[i] ?? 0));
+    if (!(sum > 0)) return 0;
+
+    let r = rng() * sum;
+    for (let i = 0; i < probs.length; i++) {
+      r -= Math.max(0, Number(probs[i] ?? 0));
+      if (r <= 0) return i;
+    }
+    return probs.length - 1;
+  }
+
+  function _top2Margin(arr) {
+    let a = -Infinity, b = -Infinity;
+    for (let i = 0; i < arr.length; i++) {
+      const v = Number(arr[i] ?? -Infinity);
+      if (v > a) { b = a; a = v; }
+      else if (v > b) { b = v; }
+    }
+    if (!Number.isFinite(a) || !Number.isFinite(b)) return Infinity;
+    return a - b;
+  }
+
+  function _argmax(arr) {
+    let mx = -Infinity, mi = 0;
+    for (let i = 0; i < arr.length; i++) {
+      const v = Number(arr[i] ?? -Infinity);
+      if (v > mx) { mx = v; mi = i; }
+    }
+    return mi;
+  }
+
+  function _chooseDeterministic(probs, tieEps) {
+    const m = _top2Margin(probs);
+    if (m < tieEps) return _sampleCategoricalRng(probs); // ✅ near-tie면 seed 샘플
+    return _argmax(probs);                               // ✅ 아니면 argmax
+  }
 
   // 1) (계측용) apRaw: "원래 정책이 원했을" powerHit 샘플
   let apRaw = 0;
@@ -868,12 +942,12 @@ act(obs, playerIndex, opts = {}) {
     apRaw = sampleCategorical(ppRaw);
   }
 
-  // 2) (실제 행동용) ap: gate 반영된 분포에서 샘플
-  if (deterministic) {
-    ap = (ppEff[1] > ppEff[0]) ? 1 : 0;
-  } else {
-    ap = sampleCategorical(ppEff);
-  }
+    // 2) (실제 행동용) ap: gate 반영된 분포에서 샘플
+    if (deterministic) {
+      ap = _chooseDeterministic(ppEff, TIE_EPS_P);
+    } else {
+      ap = sampleCategorical(ppEff);
+    }
 
 
   // 2) conditional X distribution: if ground && ap==1 => forbid x=0 (class 1)
@@ -906,7 +980,7 @@ act(obs, playerIndex, opts = {}) {
   // --- END ---
 
   if (deterministic) {
-    ax = (pxEff[1] >= pxEff[0] && pxEff[1] >= pxEff[2]) ? 1 : ((pxEff[2] > pxEff[0]) ? 2 : 0);
+    ax = _chooseDeterministic(pxEff, TIE_EPS_X);
     if (!isAir && ap === 1 && ax === 1 && this.debug.maskStats) this.debug.maskStats.illegalXSampledPrevented++;
   } else {
     ax = sampleCategorical(pxEff);
@@ -940,7 +1014,7 @@ act(obs, playerIndex, opts = {}) {
   // --- END ---
 
   if (deterministic) {
-    ay = (pyEff[1] >= pyEff[0] && pyEff[1] >= pyEff[2]) ? 1 : ((pyEff[2] > pyEff[0]) ? 2 : 0);
+    ay = _chooseDeterministic(pyEff, TIE_EPS_Y);
     if (isAir && ay === 0 && this.debug.maskStats) this.debug.maskStats.illegalYSampledPrevented++;
   } else {
     ay = sampleCategorical(pyEff);
