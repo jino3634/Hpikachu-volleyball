@@ -758,22 +758,32 @@ act(obs, playerIndex, opts = {}) {
   // deterministic = argmax, else sample (with conditional masks applied consistently to sampling + logp)
   let ax = 1, ay = 1, ap = 0;
 
-  // ✅ Power gate probabilities: 이제 lying/diving일 때만 [1,0]
-  const ppEff = (!allowPowerHit) ? [1, 0] : (() => {
+  // 0) 마스킹 전 "원본" pp 정규화 (계측용)
+  const ppRaw = (() => {
     const a = clamp01(pp[0] ?? 0);
     const b = clamp01(pp[1] ?? 0);
     const s = a + b;
     return (s > 1e-12) ? [a / s, b / s] : [0.5, 0.5];
   })();
 
-  // 1) sample/choose ap first
+  // ✅ Power gate probabilities: gate가 false면 실제 샘플링 분포는 [1,0]
+  const ppEff = (!allowPowerHit) ? [1, 0] : ppRaw;
+
+  // 1) (계측용) apRaw: "원래 정책이 원했을" powerHit 샘플
+  let apRaw = 0;
+  if (deterministic) {
+    apRaw = (ppRaw[1] > ppRaw[0]) ? 1 : 0;
+  } else {
+    apRaw = sampleCategorical(ppRaw);
+  }
+
+  // 2) (실제 행동용) ap: gate 반영된 분포에서 샘플
   if (deterministic) {
     ap = (ppEff[1] > ppEff[0]) ? 1 : 0;
   } else {
     ap = sampleCategorical(ppEff);
-    // ✅ 사실상 allowPowerHit=false일 때는 ppEff=[1,0]이라 ap=1이 안 나오지만 안전장치 유지
-    if (ap === 1 && !allowPowerHit) { ap = 0; this.debug.powerMasked++; }
   }
+
 
   // 2) conditional X distribution: if ground && ap==1 => forbid x=0 (class 1)
   const pxEff = (() => {
@@ -852,41 +862,43 @@ act(obs, playerIndex, opts = {}) {
     };
   }
 
-  if (ap === 1) {
-    // ✅ 기존 지표 유지
-    this.debug.powerHitSampled = (this.debug.powerHitSampled ?? 0) + 1;
-
-    // ✅ (추가) PPO-ACTION의 phNear/phAir/phGround/phAllowed용 카운트
-    const as = this.debug.actionStats;
-    as.powerHitAllowed = (as.powerHitAllowed ?? 0) + (allowPowerHit ? 1 : 0);
-    as.powerHitAir = (as.powerHitAir ?? 0) + (gate.airOK ? 1 : 0);
-    as.powerHitGround = (as.powerHitGround ?? 0) + (gate.groundOK ? 1 : 0);
-
-    // ✅ powerGate는 {}가 아니라 "타입이 요구하는 형태"로 초기화
+  // ✅ 실제로 "powerHit=1을 원했던" 경우를 요청으로 본다
+  if (apRaw === 1) {
+    // (요청 카운트)
     if (!this.debug.powerGate) this.debug.powerGate = makeEmptyPowerGate();
     const pg = this.debug.powerGate;
 
-    // ✅ requested/allowed/blocked… 기존 필드명 그대로 사용
     pg.requested += 1;
     pg.sumDX_req += gate.dx; pg.sumDY_req += gate.dy; pg.sumTTL_req += gate.tLand;
     pg.count_req += 1;
 
+    // ✅ gate가 막았는지/허용했는지
     if (!allowPowerHit) {
-      // blocked 사유를 기존 분류로 매핑(새 gate 구조를 기존 카운트로 환원)
+      // blocked 사유(여기도 genome 기준으로 맞추는 게 좋음 — 아래 참고)
       if (!gate.isAir) pg.blockedNotAir += 1;
-      if (gate.dx > 0.30) pg.blockedDX += 1;
-      if (gate.dy > 0.50) pg.blockedDY += 1;
-      if (gate.tLand > 0.55) pg.blockedTTL += 1;
+      if (gate.dx > Number(this.genome?.powerHitGate?.air_dx_max ?? 0.30)) pg.blockedDX += 1;
+      if (gate.dy > Number(this.genome?.powerHitGate?.air_dy_max ?? 0.50)) pg.blockedDY += 1;
+      if (gate.tLand > Number(this.genome?.powerHitGate?.air_tLand_max ?? 0.55)) pg.blockedTTL += 1;
 
       pg.sumDX_block += gate.dx; pg.sumDY_block += gate.dy; pg.sumTTL_block += gate.tLand;
       pg.count_block += 1;
     } else {
       pg.allowed += 1;
-
       pg.sumDX_allow += gate.dx; pg.sumDY_allow += gate.dy; pg.sumTTL_allow += gate.tLand;
       pg.count_allow += 1;
     }
   }
+
+  // ✅ "실제로 실행된" powerHit=1 샘플은 기존처럼 따로 유지
+  if (ap === 1) {
+    this.debug.powerHitSampled = (this.debug.powerHitSampled ?? 0) + 1;
+
+    const as = this.debug.actionStats;
+    as.powerHitAllowed = (as.powerHitAllowed ?? 0) + (allowPowerHit ? 1 : 0);
+    as.powerHitAir = (as.powerHitAir ?? 0) + (gate.airOK ? 1 : 0);
+    as.powerHitGround = (as.powerHitGround ?? 0) + (gate.groundOK ? 1 : 0);
+  }
+
 
   recordActionStats(pxEff, pyEff, ppEff, ax, ay, ap);
   return { action, logp, value, meta: { ax, ay, ap, forcedIdle: skipLearn, reason: (skipLearn ? (isLying ? 'lying' : 'diving') : null) } };
