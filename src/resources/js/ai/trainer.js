@@ -1519,6 +1519,22 @@ async runPoints(n, mode) {
   const batchFlushBefore = this.flushCount || 0;
   const rolloutBefore = (this.rollout?.length ?? 0);
 
+  // ✅ Eval 액션분포 로그를 위해: policy actionStats를 "runPoints 단위"로 리셋
+  //   (PPO-DIAG는 flush 단위라서, Eval 30포인트 전체 분포를 보고 싶을 때 필요)
+  if (mode === 'eval' && this.policy && this.policy.debug && this.policy.debug.actionStats) {
+    const as = this.policy.debug.actionStats;
+    as.n = 0;
+    as.entX = 0; as.entY = 0; as.entP = 0;
+    as.maxX = 0; as.maxY = 0; as.maxP = 0;
+    as.axCounts = [0, 0, 0];
+    as.ayCounts = [0, 0, 0];
+    as.apCounts = [0, 0];
+    // tie 카운터가 없을 수도 있으니 안전하게 초기화
+    if (as.tieX !== undefined) as.tieX = 0;
+    if (as.tieY !== undefined) as.tieY = 0;
+    if (as.tieP !== undefined) as.tieP = 0;
+  }
+
   if (mode === 'eval') {
     logDebug(
       `[EVAL] begin points=${points}${tag} learningOff=true eps=0 det=true ` +
@@ -1600,6 +1616,28 @@ async runPoints(n, mode) {
       `dPpoFlush=${dPpoFlush} dPpoSteps=${dPpoSteps} dBatchFlush=${dBatchFlush} dRollout=${dRollout} ` +
       `sig=${sig1} genome=${gsig1}` // ✅ 추가
     );
+
+    // ✅ Eval 액션분포 요약(결정론 고정/동률 타이브레이크 문제 확정용)
+    if (this.policy && this.policy.debug && this.policy.debug.actionStats) {
+      const as = this.policy.debug.actionStats;
+      const denom = Math.max(1, as.n | 0);
+
+      const tieX = (as.tieX !== undefined) ? (as.tieX | 0) : 0;
+      const tieY = (as.tieY !== undefined) ? (as.tieY | 0) : 0;
+      const tieP = (as.tieP !== undefined) ? (as.tieP | 0) : 0;
+
+      logDebug(
+        `[EVAL-ACTS] n=${as.n | 0} ` +
+        `ax=${(as.axCounts || [0,0,0]).join(',')} ` +
+        `ay=${(as.ayCounts || [0,0,0]).join(',')} ` +
+        `ap=${(as.apCounts || [0,0]).join(',')} ` +
+        `entX=${(Number(as.entX) / denom).toFixed(4)} entY=${(Number(as.entY) / denom).toFixed(4)} entP=${(Number(as.entP) / denom).toFixed(4)} ` +
+        `maxX=${(Number(as.maxX) / denom).toFixed(4)} maxY=${(Number(as.maxY) / denom).toFixed(4)} maxP=${(Number(as.maxP) / denom).toFixed(4)} ` +
+        `tieX=${tieX} tieY=${tieY} tieP=${tieP}`
+      );
+    } else {
+      logDebug('[EVAL-ACTS] actionStats unavailable (policy.debug.actionStats missing)');
+    }
   } else {
     logDebug(
       `[TRAIN] end points=${points}${tag} wins=${wins} losses=${losses} winrate=${winrate.toFixed(4)} ` +

@@ -271,6 +271,9 @@ export class PpoPolicyV1 {
       apCounts: [0,0],
       powerHitTotal: 0,
       powerHitNearBall: 0,
+      tieX: 0,
+      tieY: 0,
+      tieP: 0,
     };
 
     this.debug.maskStats = {
@@ -822,6 +825,14 @@ act(obs, playerIndex, opts = {}) {
   // ✅ Power gate probabilities: gate가 false면 실제 샘플링 분포는 [1,0]
   const ppEff = (!allowPowerHit) ? [1, 0] : ppRaw;
 
+  // --- TIE-DIAG (POWER) INSERT HERE ---
+  const as2 = this.debug?.actionStats;
+  const EPS = 1e-6;
+  if (as2 && deterministic && Math.abs(ppEff[1] - ppEff[0]) < EPS) {
+    as2.tieP = (as2.tieP | 0) + 1;
+  }
+  // --- END ---
+
   // 1) (계측용) apRaw: "원래 정책이 원했을" powerHit 샘플
   let apRaw = 0;
   if (deterministic) {
@@ -851,6 +862,17 @@ act(obs, playerIndex, opts = {}) {
     return (s > 1e-12) ? [a / s, b / s, c / s] : [1/3, 1/3, 1/3];
   })();
 
+  // --- TIE-DIAG (X) INSERT HERE ---
+  if (as2 && deterministic) {
+    const mx = Math.max(pxEff[0], pxEff[1], pxEff[2]);
+    let cnt = 0;
+    if (Math.abs(pxEff[0] - mx) < EPS) cnt++;
+    if (Math.abs(pxEff[1] - mx) < EPS) cnt++;
+    if (Math.abs(pxEff[2] - mx) < EPS) cnt++;
+    if (cnt >= 2) as2.tieX = (as2.tieX | 0) + 1;
+  }
+  // --- END ---
+
   if (deterministic) {
     ax = (pxEff[1] >= pxEff[0] && pxEff[1] >= pxEff[2]) ? 1 : ((pxEff[2] > pxEff[0]) ? 2 : 0);
     if (!isAir && ap === 1 && ax === 1 && this.debug.maskStats) this.debug.maskStats.illegalXSampledPrevented++;
@@ -872,6 +894,17 @@ act(obs, playerIndex, opts = {}) {
     const s = a + b + c;
     return (s > 1e-12) ? [a / s, b / s, c / s] : [1/3, 1/3, 1/3];
   })();
+
+  // --- TIE-DIAG (Y) INSERT HERE ---
+  if (as2 && deterministic) {
+    const my = Math.max(pyEff[0], pyEff[1], pyEff[2]);
+    let cnt = 0;
+    if (Math.abs(pyEff[0] - my) < EPS) cnt++;
+    if (Math.abs(pyEff[1] - my) < EPS) cnt++;
+    if (Math.abs(pyEff[2] - my) < EPS) cnt++;
+    if (cnt >= 2) as2.tieY = (as2.tieY | 0) + 1;
+  }
+  // --- END ---
 
   if (deterministic) {
     ay = (pyEff[1] >= pyEff[0] && pyEff[1] >= pyEff[2]) ? 1 : ((pyEff[2] > pyEff[0]) ? 2 : 0);
