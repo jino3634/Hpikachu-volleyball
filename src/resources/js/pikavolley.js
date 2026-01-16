@@ -190,13 +190,27 @@ export class PikachuVolleyball {
       const ds = (selfAny.debugStats ??= {
         decisions: 0,
         forcedIdle: 0,
+
         powerHitRequested: 0,
         powerHitApplied: 0,
+
+        // ✅ P0-2: ground truth 계측
+        powerHitContact: 0,   // 최근 powerHit 적용 직후 실제 충돌 발생
+        powerHitSuccess: 0,   // 그 충돌이 state=2라서 ball.isPowerHit=true였음
+
+        // ✅ “최근 powerHit 적용” 타이밍 버퍼(TTL, 프레임 단위)
+        _phTTL1: 0,
+        _phTTL2: 0,
       });
 
       ds.powerHitRequested = (ds.powerHitRequested | 0) + 1;
       ds.powerHitApplied = (ds.powerHitApplied | 0) + 1;
+
+      // ✅ 최근 적용 버퍼: 이번 프레임 포함해서 2프레임 정도 유효
+      if (playerIndex === 1) ds._phTTL1 = 2;
+      else ds._phTTL2 = 2;
     }
+
 
 
     kb.setOverrideInput(x, y, p);
@@ -539,6 +553,36 @@ export class PikachuVolleyball {
     const isBallTouchingGround = this.physics.runEngineForNextFrame(
       this.keyboardArray
     );
+
+    // ✅ P0-2: powerHit "진짜 성공" ground truth 계측 (충돌 + isPowerHit)
+    {
+      const gameAny = /** @type {any} */ (this);
+      const ds = gameAny.debugStats;
+      if (ds) {
+        // TTL 감소는 “현재 프레임 판정 후”에 줄이는 게 직관적
+        const ttl1 = ds._phTTL1 | 0;
+        const ttl2 = ds._phTTL2 | 0;
+
+        const c1 = !!this.physics.player1.isCollisionWithBallHappened;
+        const c2 = !!this.physics.player2.isCollisionWithBallHappened;
+
+        // physics.js에서 ball.isPowerHit는 "충돌 프레임 + playerState===2"일 때만 true
+        const isPH = !!this.physics.ball.isPowerHit;
+
+        if (ttl1 > 0 && c1) {
+          ds.powerHitContact = (ds.powerHitContact | 0) + 1;
+          if (isPH) ds.powerHitSuccess = (ds.powerHitSuccess | 0) + 1;
+        }
+        if (ttl2 > 0 && c2) {
+          ds.powerHitContact = (ds.powerHitContact | 0) + 1;
+          if (isPH) ds.powerHitSuccess = (ds.powerHitSuccess | 0) + 1;
+        }
+
+        // TTL tick down
+        if (ttl1 > 0) ds._phTTL1 = ttl1 - 1;
+        if (ttl2 > 0) ds._phTTL2 = ttl2 - 1;
+      }
+    }
 
     // ✅ 바로 여기
     this.touchTracker.observePhysics(this.physics);

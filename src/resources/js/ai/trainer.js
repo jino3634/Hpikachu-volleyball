@@ -980,19 +980,31 @@ export class Trainer {
           const gameAny = /** @type {any} */ (this.game);
           if (gameAny && gameAny.debugStats) {
             const ds = gameAny.debugStats;
-            logDebug(`[GAME-DIAG] decisions=${ds.decisions} forcedIdle=${ds.forcedIdle} powerHitReq=${ds.powerHitRequested} powerHitApplied=${ds.powerHitApplied}`);
-            const req = ds.powerHitRequested;
-            const app = ds.powerHitApplied;
+            const req = ds.powerHitRequested | 0;
+            const app = ds.powerHitApplied | 0;
+            const contact = ds.powerHitContact | 0;
+            const success = ds.powerHitSuccess | 0;
+
+            logDebug(
+              `[GAME-DIAG] decisions=${ds.decisions | 0} forcedIdle=${ds.forcedIdle | 0} ` +
+              `powerHitReq=${req} powerHitApplied=${app} powerHitContact=${contact} powerHitSuccess=${success}`
+            );
 
             // ✅ 추가: 이번 flush 구간의 "실제 엔진 발동" 수치를 저장
             this._lastPowerHitRequested = req;
             this._lastPowerHitApplied = app;
 
             if (req > 0) logDebug(`[ACTION-EFFECTIVE] powerHitAppliedRate=${(app / req).toFixed(4)}`);
+            if (app > 0) logDebug(`[PH-GT] contactRate=${(contact / app).toFixed(4)} trueSuccessRate=${(success / app).toFixed(4)}`);
+            if (contact > 0) logDebug(`[PH-GT2] successGivenContact=${(success / contact).toFixed(4)}`);
+
+            // reset
             ds.decisions = 0;
             ds.forcedIdle = 0;
             ds.powerHitRequested = 0;
             ds.powerHitApplied = 0;
+            ds.powerHitContact = 0;
+            ds.powerHitSuccess = 0;
           }
           }
         } else {

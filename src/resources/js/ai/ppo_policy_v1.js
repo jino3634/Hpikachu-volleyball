@@ -108,70 +108,81 @@ function clip(x, lo, hi) {
 }
 
 function powerHitGate(obs, playerIndex, gateParams) {
-  // ✅ genome 없을 때도 기존과 동일하게 동작하도록 기본값
+  // ✅ 기본값(유전자 없을 때)
   const g = gateParams ?? {
-    air_dx_max: 0.30,
-    air_dy_max: 0.50,
-    air_tLand_max: 0.55,
-    ground_tLand_max: 0.70,
-    ground_dLand_min: 0.20,
-    ground_dLand_max: 0.90,
-    ballOnMySide_margin: 0.05,
+    // P0-2: 충돌 예측 gate 파라미터
+    kFrames: 4,          // 몇 프레임 ahead로 충돌 가능성 볼지
+    dxMarginPx: 6,       // 충돌 박스 여유(px)
+    dyMarginPx: 10,      // 충돌 박스 여유(px)
+  };
+
+  const toFinite = (v, fb = 0) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : fb;
   };
 
   const me = obs?.me ?? {};
   const ball = obs?.ball ?? {};
 
-  const state = Number(me.state ?? 0);
+  const state = toFinite(me.state, 0) | 0;
   const isLying = !!me.isLying || state === 4;
   const isDiving = !!me.isDiving || state === 3;
 
-  const canAct = (me.canAct !== undefined)
-    ? !!me.canAct
-    : (!isLying && !isDiving);
+  const canAct = (me.canAct !== undefined) ? !!me.canAct : (!isLying && !isDiving);
+  const isAir = (me.isAir !== undefined) ? !!me.isAir : (state === 1 || state === 2);
 
-  const isAir = (me.isAir !== undefined)
-    ? !!me.isAir
-    : (state === 1 || state === 2);
+  // ✅ diagnostics용(정규화 공간): 기존 통계가 NaN 안 나게 유지
+  const mxN = toFinite(me.x, 0);
+  const myN = toFinite(me.y, 0);
+  const bxN = toFinite(ball.x, 0);
+  const byN = toFinite(ball.y, 0);
+  const dx = Math.abs(bxN - mxN);
+  const dy = Math.abs(byN - myN);
+  const tLand = toFinite(ball.timeToLand, 1);
 
-  const mx = Number(me.x ?? 0);
-  const my = Number(me.y ?? 0);
-  const bx = Number(ball.x ?? 0);
-  const by = Number(ball.y ?? 0);
+  // ✅ raw 픽셀 기반 충돌 예측
+  const raw = obs?.raw ?? null;
+  const mePx = raw?.me ?? null;
+  const bPx = raw?.ball ?? null;
 
-  const dx = Math.abs(bx - mx);
-  const dy = Math.abs(by - my);
+  const meX = toFinite(mePx?.x, 0);
+  const meY = toFinite(mePx?.y, 0);
+  const bX0 = toFinite(bPx?.x, 0);
+  const bY0 = toFinite(bPx?.y, 0);
+  const bVX = toFinite(bPx?.xV, 0);
+  const bVY = toFinite(bPx?.yV, 0);
 
-  const tLand = Number(ball.timeToLand ?? 1);
+  const k = Math.max(0, Math.min(12, toFinite(g.kFrames, 4) | 0));
+  const mx = Math.max(0, Math.min(32, toFinite(g.dxMarginPx, 6)));
+  const my = Math.max(0, Math.min(40, toFinite(g.dyMarginPx, 10)));
 
-  const landingX = Number(ball.landingX ?? ball.expectedX ?? 0);
-  const dLand = Math.abs(landingX - mx);
+  // physics.js: PLAYER_HALF_LENGTH = 32
+  const PH = 32;
+  const thrX = PH + mx;
+  const thrY = PH + my;
 
-  // ✅ 중앙선 여유(margin)를 유전자에서
-  const isP2 = (me.isP2 !== undefined) ? !!me.isP2 : (playerIndex === 2);
-  const m = Number(g.ballOnMySide_margin ?? 0.05);
-  const ballOnMySide = isP2 ? (bx >= -m) : (bx <= m);
+  // ✅ “진짜 성공”에 맞추려면: 공중 공격(powerHit)만 우선 학습 (groundOK 제거)
+  let airOK = false;
+  if (isAir && canAct && !isLying && !isDiving) {
+    // K프레임 안에 공이 내 충돌 박스에 들어오면 허용
+    for (let i = 0; i <= k; i++) {
+      const bx = bX0 + bVX * i;
+      const by = bY0 + bVY * i;
+      const dxPx = Math.abs(bx - meX);
+      const dyPx = Math.abs(by - meY);
+      if (dxPx <= thrX && dyPx <= thrY) {
+        airOK = true;
+        break;
+      }
+    }
+  }
 
-  // ✅ air gate 임계값을 유전자에서
-  const airOK =
-    isAir &&
-    (dx <= Number(g.air_dx_max ?? 0.30)) &&
-    (dy <= Number(g.air_dy_max ?? 0.50)) &&
-    (tLand <= Number(g.air_tLand_max ?? 0.55));
+  const groundOK = false;      // ✅ P0-2에서는 지상 powerHit(=다이브 혼입) 제거
+  const allow = airOK;         // ✅ allow는 airOK만
 
-  // ✅ ground gate 임계값을 유전자에서
-  const groundOK =
-    (!isAir) &&
-    ballOnMySide &&
-    (tLand <= Number(g.ground_tLand_max ?? 0.70)) &&
-    (dLand >= Number(g.ground_dLand_min ?? 0.20)) &&
-    (dLand <= Number(g.ground_dLand_max ?? 0.90));
-
-  const allow =
-    canAct &&
-    !isLying &&
-    !isDiving &&
-    (airOK || groundOK);
+  // dLand/ballOnMySide는 기존 구조 유지용 더미(통계 NaN 방지)
+  const dLand = 0;
+  const ballOnMySide = true;
 
   return { allow, airOK, groundOK, canAct, isLying, isDiving, isAir, dx, dy, tLand, dLand, ballOnMySide };
 }
