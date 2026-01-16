@@ -1338,12 +1338,14 @@ _buildPointReplay(res) {
 
         // powerGate가 있다면 간단히 요약
         const pg = /** @type {any} */ (dbg.powerGate || {});
-        const gateReq = Number(pg.requested ?? 0);
-        const gateAllow = Number(pg.allowed ?? 0);
+        const gateReq = Number(pg.requested ?? 0);   // apRaw==1 "요청" 수
+        const gateAllow = Number(pg.allowed ?? 0);   // 요청 중 gate 통과 수
 
-        const sampled = Number(dbg.powerHitSampled ?? 0);
-        const allowed = gateAllow;
-        const applied = Number(this._lastPowerHitApplied ?? 0);
+        // ✅ 3-stage는 반드시 같은 모집단(apRaw==1 요청)을 기준으로 잡아야 함
+        const sampled = gateReq;                      // requested = sampled
+        const allowed = gateAllow;                    // allowed <= sampled
+        const applied = Number(this._lastPowerHitApplied ?? 0); // applied <= allowed
+
 
         const div = (a, b) => (b > 0 ? (a / b) : 0);
 
@@ -1351,7 +1353,7 @@ _buildPointReplay(res) {
             `[PPO-DIAG] nanFeatures=${dbg.nanFeatures} invalidSteps=${dbg.invalidFeatureSteps} ` +
             `forcedIdle=${dbg.forcedIdle} (noAct=${dbg.forcedIdleNoAct}, lying=${dbg.forcedIdleLying}, diving=${dbg.forcedIdleDiving}) ` +
             `powerHitReq=${dbg.powerHitSampled} powerMasked=${dbg.powerMasked} ` +
-            `gateReq=${gateReq} gateAllow=${gateAllow} gateNotAir=${pg.blockedNotAir ?? 0} gateDX=${pg.blockedDX ?? 0} gateDY=${pg.blockedDY ?? 0} gateTTL=${pg.blockedTTL ?? 0}` +
+            `gateReq=${gateReq} gateAllow=${gateAllow} gateNotAir=${pg.blockedNotAir ?? 0} gateDX=${pg.blockedDX ?? 0} gateDY=${pg.blockedDY ?? 0} gateTTL=${pg.blockedTTL ?? 0} ` +
             `[POWERHIT-3STAGE] sampled=${sampled} allowed=${allowed} applied=${applied} ` +
             `allowRate=${div(allowed, sampled).toFixed(4)} appliedRate=${div(applied, allowed).toFixed(4)} overallRate=${div(applied, sampled).toFixed(4)}`
         );
@@ -1368,16 +1370,22 @@ _buildPointReplay(res) {
 
         // reset powerGate counters (있을 때만)
         if (dbg.powerGate) {
-            dbg.powerGate.requested = 0;
-            dbg.powerGate.allowed = 0;
-            dbg.powerGate.blockedNotAir = 0;
-            dbg.powerGate.blockedDX = 0;
-            dbg.powerGate.blockedDY = 0;
-            dbg.powerGate.blockedTTL = 0;
+          dbg.powerGate.requested = 0;
+          dbg.powerGate.allowed = 0;
+          dbg.powerGate.blockedNotAir = 0;
+          dbg.powerGate.blockedDX = 0;
+          dbg.powerGate.blockedDY = 0;
+          dbg.powerGate.blockedTTL = 0;
 
-            dbg.powerGate.sumDX_req = 0; dbg.powerGate.sumDY_req = 0; dbg.powerGate.sumTTL_req = 0; dbg.powerGate.count_req = 0;
-            dbg.powerGate.sumDX_allow = 0; dbg.powerGate.sumDY_allow = 0; dbg.powerGate.sumTTL_allow = 0; dbg.powerGate.count_allow = 0;
-            dbg.powerGate.sumDX_block = 0; dbg.powerGate.sumDY_block = 0; dbg.powerGate.sumTTL_block = 0; dbg.powerGate.count_block = 0;
+          // ✅ ground 원인분해 카운터 reset
+          dbg.powerGate.blockedBallSide = 0;
+          dbg.powerGate.blockedGroundTTL = 0;
+          dbg.powerGate.blockedDLandLow = 0;
+          dbg.powerGate.blockedDLandHigh = 0;
+
+          dbg.powerGate.sumDX_req = 0; dbg.powerGate.sumDY_req = 0; dbg.powerGate.sumTTL_req = 0; dbg.powerGate.count_req = 0;
+          dbg.powerGate.sumDX_allow = 0; dbg.powerGate.sumDY_allow = 0; dbg.powerGate.sumTTL_allow = 0; dbg.powerGate.count_allow = 0;
+          dbg.powerGate.sumDX_block = 0; dbg.powerGate.sumDY_block = 0; dbg.powerGate.sumTTL_block = 0; dbg.powerGate.count_block = 0;
         }
 
         // reset actionStats (있을 때만)
