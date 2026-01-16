@@ -897,112 +897,129 @@ export class Trainer {
 
             // Diagnostics
             if (this.policy && this.policy.debug) {
-            const pg = /** @type {any} */ (this.policy.debug.powerGate || {});
-            const gateReq = Number(pg.requested ?? 0);
-            const gateAllow = Number(pg.allowed ?? 0);
-            const gateBlocked = gateReq - gateAllow;
-            const avg = (sum, cnt, digits=3) => (cnt ? (sum / cnt).toFixed(digits) : 'NA');
+              const pg = /** @type {any} */ (this.policy.debug.powerGate || {});
+              const frames = Number(pg.frames ?? 0);
+              const eligible = Number(pg.eligibleFrames ?? 0);
+              const blocked = Number(pg.blockedFrames ?? (frames - eligible));
+              const sumPPower = Number(pg.sumPPower ?? 0);
+              const sumPPowerEl = Number(pg.sumPPowerEligible ?? 0);
+              const expApplied = Number(pg.expectedApplied ?? 0);
+              const sampledApplied = Number(pg.sampledApplied ?? 0);
 
-            logDebug(`[PPO-DIAG] nanFeatures=${this.policy.debug.nanFeatures} invalidSteps=${this.policy.debug.invalidFeatureSteps} forcedIdle=${this.policy.debug.forcedIdle} (noAct=${this.policy.debug.forcedIdleNoAct}, lying=${this.policy.debug.forcedIdleLying}, diving=${this.policy.debug.forcedIdleDiving}) powerHitReq=${this.policy.debug.powerHitSampled} powerMasked=${this.policy.debug.powerMasked} gateReq=${gateReq} gateAllow=${gateAllow} gateNotAir=${pg.blockedNotAir ?? 0} gateDX=${pg.blockedDX ?? 0} gateDY=${pg.blockedDY ?? 0} gateTTL=${pg.blockedTTL ?? 0} gateBlocked=${gateBlocked} gateAvgReqDX=${avg(pg.sumDX_req ?? 0, pg.count_req ?? 0, 3)} gateAvgReqDY=${avg(pg.sumDY_req ?? 0, pg.count_req ?? 0, 3)} gateAvgReqTTL=${avg(pg.sumTTL_req ?? 0, pg.count_req ?? 0, 3)} gateAvgAllowDX=${avg(pg.sumDX_allow ?? 0, pg.count_allow ?? 0, 3)} gateAvgAllowDY=${avg(pg.sumDY_allow ?? 0, pg.count_allow ?? 0, 3)} gateAvgAllowTTL=${avg(pg.sumTTL_allow ?? 0, pg.count_allow ?? 0, 3)} gateAvgBlockDX=${avg(pg.sumDX_block ?? 0, pg.count_block ?? 0, 3)} gateAvgBlockDY=${avg(pg.sumDY_block ?? 0, pg.count_block ?? 0, 3)} gateAvgBlockTTL=${avg(pg.sumTTL_block ?? 0, pg.count_block ?? 0, 3)}`);
+              const div = (a, b, digits=4) => (b > 0 ? (a / b).toFixed(digits) : 'NA');
+              const mean = (s, n, digits=4) => (n > 0 ? (s / n).toFixed(digits) : 'NA');
 
-            // Observation sanity
-            {
-                const os = /** @type {any} */ (this.policy.debug.obsStats || {});
-                const cnt = Number(os.count ?? 0);
-                const avg2 = (s) => (cnt ? (s / cnt).toFixed(4) : 'NA');
-                logDebug(`[OBS-DIAG] obsCount=${cnt} |absMeX|=${avg2(os.sumAbsMeX||0)} |absMeY|=${avg2(os.sumAbsMeY||0)} |absBallX|=${avg2(os.sumAbsBallX||0)} |absBallY|=${avg2(os.sumAbsBallY||0)} |dx|=${avg2(os.sumAbsDx||0)} |dy|=${avg2(os.sumAbsDy||0)}`);
+              logDebug(
+                `[PPO-DIAG] nanFeatures=${this.policy.debug.nanFeatures} invalidSteps=${this.policy.debug.invalidFeatureSteps} ` +
+                `forcedIdle=${this.policy.debug.forcedIdle} (noAct=${this.policy.debug.forcedIdleNoAct}, lying=${this.policy.debug.forcedIdleLying}, diving=${this.policy.debug.forcedIdleDiving}) ` +
+                `powerHitReq=${this.policy.debug.powerHitSampled} powerMasked=${this.policy.debug.powerMasked} ` +
+                `gateFrames=${frames} eligible=${eligible} blocked=${blocked} eligibleRate=${div(eligible, frames)} ` +
+                `pPowerMean=${mean(sumPPower, frames)} pPowerMeanEligible=${mean(sumPPowerEl, eligible)} ` +
+                `expApplied=${expApplied.toFixed(2)} expAppliedRateEligible=${div(expApplied, eligible)} ` +
+                `sampledApplied=${sampledApplied} sampledAppliedRate=${div(sampledApplied, frames)}`
+              );
 
-                if (this.policy.debug.obsStats) {
-                this.policy.debug.obsStats.count = 0;
-                this.policy.debug.obsStats.sumAbsMeX = 0;
-                this.policy.debug.obsStats.sumAbsMeY = 0;
-                this.policy.debug.obsStats.sumAbsBallX = 0;
-                this.policy.debug.obsStats.sumAbsBallY = 0;
-                this.policy.debug.obsStats.sumAbsDx = 0;
-                this.policy.debug.obsStats.sumAbsDy = 0;
-                }
+              // Observation sanity
+              {
+                  const os = /** @type {any} */ (this.policy.debug.obsStats || {});
+                  const cnt = Number(os.count ?? 0);
+                  const avg2 = (s) => (cnt ? (s / cnt).toFixed(4) : 'NA');
+                  logDebug(`[OBS-DIAG] obsCount=${cnt} |absMeX|=${avg2(os.sumAbsMeX||0)} |absMeY|=${avg2(os.sumAbsMeY||0)} |absBallX|=${avg2(os.sumAbsBallX||0)} |absBallY|=${avg2(os.sumAbsBallY||0)} |dx|=${avg2(os.sumAbsDx||0)} |dy|=${avg2(os.sumAbsDy||0)}`);
+
+                  if (this.policy.debug.obsStats) {
+                  this.policy.debug.obsStats.count = 0;
+                  this.policy.debug.obsStats.sumAbsMeX = 0;
+                  this.policy.debug.obsStats.sumAbsMeY = 0;
+                  this.policy.debug.obsStats.sumAbsBallX = 0;
+                  this.policy.debug.obsStats.sumAbsBallY = 0;
+                  this.policy.debug.obsStats.sumAbsDx = 0;
+                  this.policy.debug.obsStats.sumAbsDy = 0;
+                  }
+              }
+
+              // Additional rolling diagnostics (action/mask/feat)  <-- 이 아래 전부 같은 블록 안
+              const as = this.policy.debug.actionStats;
+              if (as && as.n > 0) {
+                  const n = as.n;
+                  const ap1 = (as.apCounts?.[1] ?? 0);
+                  const phNear = (as.powerHitNearBall ?? 0);
+                  const phTot = Math.max(1, (as.powerHitTotal ?? ap1));
+                  logDebug(`[PPO-ACTION] n=${n} entX=${(as.entX/n).toFixed(4)} entY=${(as.entY/n).toFixed(4)} entP=${(as.entP/n).toFixed(4)} maxX=${(as.maxX/n).toFixed(4)} maxY=${(as.maxY/n).toFixed(4)} maxP=${(as.maxP/n).toFixed(4)} ap1=${ap1} phNear=${phNear}/${phTot} phGround=${(as.powerHitGround ?? 0)}/${Math.max(1, ap1)} phAir=${(as.powerHitAir ?? 0)}/${Math.max(1, ap1)} phAllowed=${(as.powerHitAllowed ?? 0)}/${Math.max(1, ap1)} ax=${JSON.stringify(as.axCounts)} ay=${JSON.stringify(as.ayCounts)} ap=${JSON.stringify(as.apCounts)}`);
+
+                  const ms = this.policy.debug.maskStats;
+                  if (ms && ms.n > 0) {
+                  const nms = Math.max(1, ms.n);
+                  logDebug(`[ACTION-MASK] n=${ms.n} groundN=${ms.groundN ?? 0} airN=${ms.airN ?? 0} yNegMaskedCount=${ms.yNegMaskedCount ?? 0} yNegMaskedMassAvg=${((ms.yNegMaskedMass ?? 0)/nms).toFixed(6)} xZeroMaskedCount=${ms.xZeroMaskedCount ?? 0} xZeroMaskedMassAvg=${((ms.xZeroMaskedMass ?? 0)/nms).toFixed(6)} illegalYPrevented=${ms.illegalYSampledPrevented ?? 0} illegalXPrevented=${ms.illegalXSampledPrevented ?? 0}`);
+                  }
+              }
+
+              const fs = this.policy.debug.featStats;
+              if (fs && fs.n > 0) {
+                  const n = fs.n;
+                  const pick = (i) => {
+                  const mean = fs.sum[i] / n;
+                  const varr = Math.max(0, fs.sumsq[i] / n - mean * mean);
+                  const std = Math.sqrt(varr);
+                  return { i, min: fs.min[i], max: fs.max[i], mean, std };
+                  };
+                  const keys = [0,1,2,8,9,10,14,15,16,17,18,19];
+                  const rows = keys.filter(i => i < this.policy.featureLen).map(pick);
+                  logDebug(`[FEAT-DIAG] n=${n} ` + rows.map(r => `f${r.i}[min=${r.min.toFixed(2)},max=${r.max.toFixed(2)},mean=${r.mean.toFixed(2)},std=${r.std.toFixed(2)}]`).join(' '));
+              }
+
+              // reset rolling diagnostics per flush
+              this.policy.debug.nanFeatures = 0;
+              this.policy.debug.invalidFeatureSteps = 0;
+              this.policy.debug.forcedIdle = 0;
+              this.policy.debug.forcedIdleNoAct = 0;
+              this.policy.debug.forcedIdleLying = 0;
+              this.policy.debug.forcedIdleDiving = 0;
+              this.policy.debug.powerHitSampled = 0;
+              this.policy.debug.powerMasked = 0;
+              if (this.policy.debug.powerGate) {
+                const pg = this.policy.debug.powerGate;
+                pg.frames = 0;
+                pg.eligibleFrames = 0;
+                pg.blockedFrames = 0;
+                pg.sumPPower = 0;
+                pg.sumPPowerEligible = 0;
+                pg.expectedApplied = 0;
+                pg.sampledApplied = 0;
+                pg.blockedNoContactWindow = 0;
+              }
+              this.policy.debug.featStats = null;
+              this.policy.debug.lastUpdate = null;
             }
 
-            // Additional rolling diagnostics (action/mask/feat)  <-- 이 아래 전부 같은 블록 안
-            const as = this.policy.debug.actionStats;
-            if (as && as.n > 0) {
-                const n = as.n;
-                const ap1 = (as.apCounts?.[1] ?? 0);
-                const phNear = (as.powerHitNearBall ?? 0);
-                const phTot = Math.max(1, (as.powerHitTotal ?? ap1));
-                logDebug(`[PPO-ACTION] n=${n} entX=${(as.entX/n).toFixed(4)} entY=${(as.entY/n).toFixed(4)} entP=${(as.entP/n).toFixed(4)} maxX=${(as.maxX/n).toFixed(4)} maxY=${(as.maxY/n).toFixed(4)} maxP=${(as.maxP/n).toFixed(4)} ap1=${ap1} phNear=${phNear}/${phTot} phGround=${(as.powerHitGround ?? 0)}/${Math.max(1, ap1)} phAir=${(as.powerHitAir ?? 0)}/${Math.max(1, ap1)} phAllowed=${(as.powerHitAllowed ?? 0)}/${Math.max(1, ap1)} ax=${JSON.stringify(as.axCounts)} ay=${JSON.stringify(as.ayCounts)} ap=${JSON.stringify(as.apCounts)}`);
+            const gameAny = /** @type {any} */ (this.game);
+            if (gameAny && gameAny.debugStats) {
+              const ds = gameAny.debugStats;
+              const req = ds.powerHitRequested | 0;
+              const app = ds.powerHitApplied | 0;
+              const contact = ds.powerHitContact | 0;
+              const success = ds.powerHitSuccess | 0;
 
-                const ms = this.policy.debug.maskStats;
-                if (ms && ms.n > 0) {
-                const nms = Math.max(1, ms.n);
-                logDebug(`[ACTION-MASK] n=${ms.n} groundN=${ms.groundN ?? 0} airN=${ms.airN ?? 0} yNegMaskedCount=${ms.yNegMaskedCount ?? 0} yNegMaskedMassAvg=${((ms.yNegMaskedMass ?? 0)/nms).toFixed(6)} xZeroMaskedCount=${ms.xZeroMaskedCount ?? 0} xZeroMaskedMassAvg=${((ms.xZeroMaskedMass ?? 0)/nms).toFixed(6)} illegalYPrevented=${ms.illegalYSampledPrevented ?? 0} illegalXPrevented=${ms.illegalXSampledPrevented ?? 0}`);
-                }
+              logDebug(
+                `[GAME-DIAG] decisions=${ds.decisions | 0} forcedIdle=${ds.forcedIdle | 0} ` +
+                `powerHitReq=${req} powerHitApplied=${app} powerHitContact=${contact} powerHitSuccess=${success}`
+              );
+
+              // ✅ 추가: 이번 flush 구간의 "실제 엔진 발동" 수치를 저장
+              this._lastPowerHitRequested = req;
+              this._lastPowerHitApplied = app;
+
+              if (req > 0) logDebug(`[ACTION-EFFECTIVE] powerHitAppliedRate=${(app / req).toFixed(4)}`);
+              if (app > 0) logDebug(`[PH-GT] contactRate=${(contact / app).toFixed(4)} trueSuccessRate=${(success / app).toFixed(4)}`);
+              if (contact > 0) logDebug(`[PH-GT2] successGivenContact=${(success / contact).toFixed(4)}`);
+
+              // reset
+              ds.decisions = 0;
+              ds.forcedIdle = 0;
+              ds.powerHitRequested = 0;
+              ds.powerHitApplied = 0;
+              ds.powerHitContact = 0;
+              ds.powerHitSuccess = 0;
             }
-
-            const fs = this.policy.debug.featStats;
-            if (fs && fs.n > 0) {
-                const n = fs.n;
-                const pick = (i) => {
-                const mean = fs.sum[i] / n;
-                const varr = Math.max(0, fs.sumsq[i] / n - mean * mean);
-                const std = Math.sqrt(varr);
-                return { i, min: fs.min[i], max: fs.max[i], mean, std };
-                };
-                const keys = [0,1,2,8,9,10,14,15,16,17,18,19];
-                const rows = keys.filter(i => i < this.policy.featureLen).map(pick);
-                logDebug(`[FEAT-DIAG] n=${n} ` + rows.map(r => `f${r.i}[min=${r.min.toFixed(2)},max=${r.max.toFixed(2)},mean=${r.mean.toFixed(2)},std=${r.std.toFixed(2)}]`).join(' '));
-            }
-
-            // reset rolling diagnostics per flush
-            this.policy.debug.nanFeatures = 0;
-            this.policy.debug.invalidFeatureSteps = 0;
-            this.policy.debug.forcedIdle = 0;
-            this.policy.debug.forcedIdleNoAct = 0;
-            this.policy.debug.forcedIdleLying = 0;
-            this.policy.debug.forcedIdleDiving = 0;
-            this.policy.debug.powerHitSampled = 0;
-            this.policy.debug.powerMasked = 0;
-            if (this.policy.debug.powerGate) {
-                this.policy.debug.powerGate.requested = 0;
-                this.policy.debug.powerGate.allowed = 0;
-                this.policy.debug.powerGate.blockedNotAir = 0;
-                this.policy.debug.powerGate.blockedDX = 0;
-                this.policy.debug.powerGate.blockedDY = 0;
-                this.policy.debug.powerGate.blockedTTL = 0;
-            }
-            this.policy.debug.featStats = null;
-            this.policy.debug.lastUpdate = null;
-            }
-
-          const gameAny = /** @type {any} */ (this.game);
-          if (gameAny && gameAny.debugStats) {
-            const ds = gameAny.debugStats;
-            const req = ds.powerHitRequested | 0;
-            const app = ds.powerHitApplied | 0;
-            const contact = ds.powerHitContact | 0;
-            const success = ds.powerHitSuccess | 0;
-
-            logDebug(
-              `[GAME-DIAG] decisions=${ds.decisions | 0} forcedIdle=${ds.forcedIdle | 0} ` +
-              `powerHitReq=${req} powerHitApplied=${app} powerHitContact=${contact} powerHitSuccess=${success}`
-            );
-
-            // ✅ 추가: 이번 flush 구간의 "실제 엔진 발동" 수치를 저장
-            this._lastPowerHitRequested = req;
-            this._lastPowerHitApplied = app;
-
-            if (req > 0) logDebug(`[ACTION-EFFECTIVE] powerHitAppliedRate=${(app / req).toFixed(4)}`);
-            if (app > 0) logDebug(`[PH-GT] contactRate=${(contact / app).toFixed(4)} trueSuccessRate=${(success / app).toFixed(4)}`);
-            if (contact > 0) logDebug(`[PH-GT2] successGivenContact=${(success / contact).toFixed(4)}`);
-
-            // reset
-            ds.decisions = 0;
-            ds.forcedIdle = 0;
-            ds.powerHitRequested = 0;
-            ds.powerHitApplied = 0;
-            ds.powerHitContact = 0;
-            ds.powerHitSuccess = 0;
-          }
           }
         } else {
           this.bufferSkipped++;
@@ -1347,24 +1364,21 @@ _buildPointReplay(res) {
 
         // powerGate가 있다면 간단히 요약
         const pg = /** @type {any} */ (dbg.powerGate || {});
-        const gateReq = Number(pg.requested ?? 0);   // apRaw==1 "요청" 수
-        const gateAllow = Number(pg.allowed ?? 0);   // 요청 중 gate 통과 수
-
-        // ✅ 3-stage는 반드시 같은 모집단(apRaw==1 요청)을 기준으로 잡아야 함
-        const sampled = gateReq;                      // requested = sampled
-        const allowed = gateAllow;                    // allowed <= sampled
-        const applied = Number(this._lastPowerHitApplied ?? 0); // applied <= allowed
-
+        const frames = Number(pg.frames ?? 0);
+        const eligible = Number(pg.eligibleFrames ?? 0);
+        const expApplied = Number(pg.expectedApplied ?? 0);
+        const sampledApplied = Number(pg.sampledApplied ?? 0);
+        const applied = Number(this._lastPowerHitApplied ?? 0); // 엔진 실제 발동
 
         const div = (a, b) => (b > 0 ? (a / b) : 0);
 
         logDebug(
-            `[PPO-DIAG] nanFeatures=${dbg.nanFeatures} invalidSteps=${dbg.invalidFeatureSteps} ` +
-            `forcedIdle=${dbg.forcedIdle} (noAct=${dbg.forcedIdleNoAct}, lying=${dbg.forcedIdleLying}, diving=${dbg.forcedIdleDiving}) ` +
-            `powerHitReq=${dbg.powerHitSampled} powerMasked=${dbg.powerMasked} ` +
-            `gateReq=${gateReq} gateAllow=${gateAllow} gateNotAir=${pg.blockedNotAir ?? 0} gateDX=${pg.blockedDX ?? 0} gateDY=${pg.blockedDY ?? 0} gateTTL=${pg.blockedTTL ?? 0} ` +
-            `[POWERHIT-3STAGE] sampled=${sampled} allowed=${allowed} applied=${applied} ` +
-            `allowRate=${div(allowed, sampled).toFixed(4)} appliedRate=${div(applied, allowed).toFixed(4)} overallRate=${div(applied, sampled).toFixed(4)}`
+          `[PPO-DIAG] nanFeatures=${dbg.nanFeatures} invalidSteps=${dbg.invalidFeatureSteps} ` +
+          `forcedIdle=${dbg.forcedIdle} (noAct=${dbg.forcedIdleNoAct}, lying=${dbg.forcedIdleLying}, diving=${dbg.forcedIdleDiving}) ` +
+          `gateFrames=${frames} eligible=${eligible} eligibleRate=${div(eligible, frames).toFixed(4)} ` +
+          `[POWER-EXPECT] expApplied=${expApplied.toFixed(2)} expAppliedRateEligible=${div(expApplied, eligible).toFixed(4)} ` +
+          `[POWER-SAMPLE] sampledApplied=${sampledApplied} sampledRate=${div(sampledApplied, frames).toFixed(4)} ` +
+          `[POWER-ENGINE] applied=${applied} appliedRateVsExpected=${(expApplied > 0 ? (applied / expApplied).toFixed(4) : 'NA')}`
         );
 
         // reset core counters

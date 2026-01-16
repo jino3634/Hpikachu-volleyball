@@ -233,22 +233,23 @@ export class PpoPolicyV1 {
       powerHitSampled: 0,
       powerMasked: 0,
       powerGate: {
-        // counts
-        requested: 0,       // power=1 sampled/selected (before gating)
-        allowed: 0,         // power=1 actually applied
-        blockedNotAir: 0,
-        blockedDX: 0,
-        blockedDY: 0,
-        blockedTTL: 0,
+        // 모집단(= act 호출 단위) 기반
+        frames: 0,               // act 호출 수 (canAct true인 프레임)
+        eligibleFrames: 0,       // gate.allow === true 인 프레임 수
+        blockedFrames: 0,        // gate.allow === false 인 프레임 수 (=frames-eligibleFrames)
 
-        // raw attempt stats (requested)
-        sumDX_req: 0, sumDY_req: 0, sumTTL_req: 0, count_req: 0,
+        // 정책의 power 선호도(샘플이 아니라 확률 평균)
+        sumPPower: 0,            // Σ ppRaw[1]
+        sumPPowerEligible: 0,    // Σ ppRaw[1] where eligible
 
-        // allowed stats
-        sumDX_allow: 0, sumDY_allow: 0, sumTTL_allow: 0, count_allow: 0,
+        // “기댓값 기준” 실제 적용량
+        expectedApplied: 0,      // Σ (eligible ? ppRaw[1] : 0)
 
-        // blocked stats
-        sumDX_block: 0, sumDY_block: 0, sumTTL_block: 0, count_block: 0,
+        // “샘플 기준” 실제 정책 샘플(ap==1)
+        sampledApplied: 0,       // Σ (ap==1)
+
+        // (선택) blocked 원인(현재 gate는 사실상 no-contact-window 하나뿐)
+        blockedNoContactWindow: 0,
       },
     
 // Observation sanity stats (per act call, for debugging schema issues)
@@ -850,76 +851,41 @@ act(obs, playerIndex, opts = {}) {
   // (선택) powerHit gate 디버그 카운트 개선
   function makeEmptyPowerGate() {
     return {
-      requested: 0,
-      allowed: 0,
-      blockedNotAir: 0,
-      blockedDX: 0,
-      blockedDY: 0,
-      blockedTTL: 0,
-      sumDX_req: 0,
-      sumDY_req: 0,
-      sumTTL_req: 0,
-      count_req: 0,
-      sumDX_allow: 0,
-      sumDY_allow: 0,
-      sumTTL_allow: 0,
-      count_allow: 0,
-      sumDX_block: 0,
-      sumDY_block: 0,
-      sumTTL_block: 0,
-      count_block: 0,
+      frames: 0,
+      eligibleFrames: 0,
+      blockedFrames: 0,
+      sumPPower: 0,
+      sumPPowerEligible: 0,
+      expectedApplied: 0,
+      sampledApplied: 0,
+      blockedNoContactWindow: 0,
     };
   }
 
-  // ✅ 실제로 "powerHit=1을 원했던" 경우를 요청으로 본다
-  if (apRaw === 1) {
-    if (!this.debug.powerGate) this.debug.powerGate = makeEmptyPowerGate();
-    const pg = this.debug.powerGate;
+  // --- P0-2 power gate diagnostics: per-frame, expectation-based ---
+  if (!this.debug.powerGate) this.debug.powerGate = makeEmptyPowerGate();
+  const pg = this.debug.powerGate;
 
-    // ✅ 새 카운터(ground 원인분해) - makeEmptyPowerGate에 없을 수 있으니 안전 초기화
-    pg.blockedBallSide = pg.blockedBallSide ?? 0;
-    pg.blockedGroundTTL = pg.blockedGroundTTL ?? 0;
-    pg.blockedDLandLow = pg.blockedDLandLow ?? 0;
-    pg.blockedDLandHigh = pg.blockedDLandHigh ?? 0;
+  // 모집단: act 호출 프레임
+  pg.frames += 1;
 
-    // ✅ 유전자 파라미터(없으면 기본값) - P0-1 스키마로 통일
-    const g = (this.genome && this.genome.powerHitGate) ? this.genome.powerHitGate : {
-      kFrames: 4,
-      dxMarginPx: 6,
-      dyMarginPx: 10,
-    };
-
-    // (P0-1) 여기서는 g를 "기록용"으로만 보유.
-    // blockedDX/DY/TTL 같은 옛 기준 분해는 P0-2에서 픽셀 기준으로 재정의할 예정이라
-    // P0-1에서는 제거(또는 사용하지 않음).
-
-    // 요청 집계(정책이 ap=1을 원했음)
-    pg.requested += 1;
-    pg.sumDX_req += gate.dx; pg.sumDY_req += gate.dy; pg.sumTTL_req += gate.tLand;
-    pg.count_req += 1;
-
-    if (!allowPowerHit) {
-      // ✅ blocked 사유를 air/ground로 나눠 분해(유전자 기준)
-
-      // gate.allow가 false이면: "kFrames 내 충돌 예측 실패"가 유일한 차단 원인
-      // (P0-2에서 minDx/minDy/minKFrame 같은 디테일을 추가하면 더 풍부해짐)
-      if (!gate.allow) {
-        pg.blockedNoContactWindow = (pg.blockedNoContactWindow ?? 0) + 1;
-
-        // 기존 로그 호환(있다면) - 'blockedNotAir'를 "gate 실패"의 대표 카운터로 쓰고 싶다면:
-        pg.blockedNotAir += 1;
-      }
-
-
-      pg.sumDX_block += gate.dx; pg.sumDY_block += gate.dy; pg.sumTTL_block += gate.tLand;
-      pg.count_block += 1;
-    } else {
-      pg.allowed += 1;
-
-      pg.sumDX_allow += gate.dx; pg.sumDY_allow += gate.dy; pg.sumTTL_allow += gate.tLand;
-      pg.count_allow += 1;
-    }
+  if (allowPowerHit) {
+    pg.eligibleFrames += 1;
+  } else {
+    pg.blockedFrames += 1;
+    pg.blockedNoContactWindow += 1; // 현재 gate는 사실상 이 이유 하나
   }
+
+  // 정책의 power 선호도(샘플이 아니라 확률)
+  const pPower = Number(ppRaw[1] ?? 0);
+  pg.sumPPower += pPower;
+  if (allowPowerHit) pg.sumPPowerEligible += pPower;
+
+  // 기댓값 기준 실제 적용량
+  pg.expectedApplied += allowPowerHit ? pPower : 0;
+
+  // 샘플 기준 실제 행동(ap==1)
+  if (ap === 1) pg.sampledApplied += 1;
 
 
   // ✅ "실제로 실행된" powerHit=1 샘플은 기존처럼 따로 유지
