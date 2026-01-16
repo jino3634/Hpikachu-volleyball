@@ -1886,26 +1886,29 @@ _buildPointReplay(res) {
 
         // ---- policy debug logs + reset ----
         if (this.policy && this.policy.debug) {
-        const dbg = this.policy.debug;
+          const dbg = this.policy.debug;
 
-        // powerGate가 있다면 간단히 요약
-        const pg = /** @type {any} */ (dbg.powerGate || {});
-        const frames = Number(pg.frames ?? 0);
-        const eligible = Number(pg.eligibleFrames ?? 0);
-        const expApplied = Number(pg.expectedApplied ?? 0);
-        const sampledApplied = Number(pg.sampledApplied ?? 0);
-        const applied = Number(this._lastPowerHitApplied ?? 0); // 엔진 실제 발동
+          // ✅ flush 시점의 엔진 applied를 직접 읽는다 (이번 flush 구간 값)
+          const gameAny = /** @type {any} */ (this.game);
+          const ds = (gameAny && gameAny.debugStats) ? gameAny.debugStats : null;
+          const appliedEngine = ds ? (ds.powerHitApplied | 0) : Number(this._lastPowerHitApplied ?? 0);
 
-        const div = (a, b) => (b > 0 ? (a / b) : 0);
+          const pg = /** @type {any} */ (dbg.powerGate || {});
+          const frames = Number(pg.frames ?? 0);
+          const eligible = Number(pg.eligibleFrames ?? 0);
+          const expApplied = Number(pg.expectedApplied ?? 0);
+          const sampledApplied = Number(pg.sampledApplied ?? 0);
 
-        logDebug(
-          `[PPO-DIAG] nanFeatures=${dbg.nanFeatures} invalidSteps=${dbg.invalidFeatureSteps} ` +
-          `forcedIdle=${dbg.forcedIdle} (noAct=${dbg.forcedIdleNoAct}, lying=${dbg.forcedIdleLying}, diving=${dbg.forcedIdleDiving}) ` +
-          `gateFrames=${frames} eligible=${eligible} eligibleRate=${div(eligible, frames).toFixed(4)} ` +
-          `[POWER-EXPECT] expApplied=${expApplied.toFixed(2)} expAppliedRateEligible=${div(expApplied, eligible).toFixed(4)} ` +
-          `[POWER-SAMPLE] sampledApplied=${sampledApplied} sampledRate=${div(sampledApplied, frames).toFixed(4)} ` +
-          `[POWER-ENGINE] applied=${applied} appliedRateVsExpected=${(expApplied > 0 ? (applied / expApplied).toFixed(4) : 'NA')}`
-        );
+          const div = (a, b) => (b > 0 ? (a / b) : 0);
+
+          logDebug(
+            `[PPO-DIAG] nanFeatures=${dbg.nanFeatures} invalidSteps=${dbg.invalidFeatureSteps} ` +
+            `forcedIdle=${dbg.forcedIdle} (noAct=${dbg.forcedIdleNoAct}, lying=${dbg.forcedIdleLying}, diving=${dbg.forcedIdleDiving}) ` +
+            `gateFrames=${frames} eligible=${eligible} eligibleRate=${div(eligible, frames).toFixed(4)} ` +
+            `[POWER-EXPECT] expApplied=${expApplied.toFixed(2)} expAppliedRateEligible=${div(expApplied, eligible).toFixed(4)} ` +
+            `[POWER-SAMPLE] sampledApplied=${sampledApplied} sampledRate=${div(sampledApplied, frames).toFixed(4)} ` +
+            `[POWER-ENGINE] applied=${appliedEngine} appliedRateVsExpected=${(expApplied > 0 ? (appliedEngine / expApplied).toFixed(4) : 'NA')}`
+          );
 
         // reset core counters
         dbg.nanFeatures = 0;
@@ -1957,20 +1960,36 @@ _buildPointReplay(res) {
         }
 
         // ---- game debugStats logs + reset (한 번만) ----
-        const gameAny = /** @type {any} */ (this.game);
-        if (gameAny && gameAny.debugStats) {
-        const ds = gameAny.debugStats;
-        logDebug(`[GAME-DIAG] decisions=${ds.decisions} forcedIdle=${ds.forcedIdle} powerHitReq=${ds.powerHitRequested} powerHitApplied=${ds.powerHitApplied}`);
-        ds.decisions = 0;
-        ds.forcedIdle = 0;
-        ds.powerHitRequested = 0;
-        ds.powerHitApplied = 0;
+        const gameAny2 = /** @type {any} */ (this.game);
+        if (gameAny2 && gameAny2.debugStats) {
+          const ds = gameAny2.debugStats;
+
+          const req = ds.powerHitRequested | 0;
+          const app = ds.powerHitApplied | 0;
+          const contact = ds.powerHitContact | 0;
+          const success = ds.powerHitSuccess | 0;
+
+          logDebug(
+            `[GAME-DIAG] decisions=${ds.decisions | 0} forcedIdle=${ds.forcedIdle | 0} ` +
+            `powerHitReq=${req} powerHitApplied=${app} powerHitContact=${contact} powerHitSuccess=${success}`
+          );
+
+          // ✅ (선택) 이번 flush 값을 last로 보관 (다른 로그에서 쓰면 일관성 상승)
+          this._lastPowerHitRequested = req;
+          this._lastPowerHitApplied = app;
+
+          // reset
+          ds.decisions = 0;
+          ds.forcedIdle = 0;
+          ds.powerHitRequested = 0;
+          ds.powerHitApplied = 0;
+          ds.powerHitContact = 0;
+          ds.powerHitSuccess = 0;
         }
 
         // loop exit conditions
         if (!force) break;
         if (this.rollout.length < this.minRolloutToUpdate) break;
     }
-}
-
+  }
 }
