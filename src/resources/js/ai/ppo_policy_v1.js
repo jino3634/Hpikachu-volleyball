@@ -864,30 +864,73 @@ act(obs, playerIndex, opts = {}) {
 
   // ✅ 실제로 "powerHit=1을 원했던" 경우를 요청으로 본다
   if (apRaw === 1) {
-    // (요청 카운트)
     if (!this.debug.powerGate) this.debug.powerGate = makeEmptyPowerGate();
     const pg = this.debug.powerGate;
 
+    // ✅ 새 카운터(ground 원인분해) - makeEmptyPowerGate에 없을 수 있으니 안전 초기화
+    pg.blockedBallSide = pg.blockedBallSide ?? 0;
+    pg.blockedGroundTTL = pg.blockedGroundTTL ?? 0;
+    pg.blockedDLandLow = pg.blockedDLandLow ?? 0;
+    pg.blockedDLandHigh = pg.blockedDLandHigh ?? 0;
+
+    // ✅ 유전자 파라미터(없으면 기본값)
+    const g = (this.genome && this.genome.powerHitGate) ? this.genome.powerHitGate : {
+      air_dx_max: 0.30,
+      air_dy_max: 0.50,
+      air_tLand_max: 0.55,
+      ground_tLand_max: 0.70,
+      ground_dLand_min: 0.20,
+      ground_dLand_max: 0.90,
+      ballOnMySide_margin: 0.05,
+    };
+
+    const airDxMax = Number(g.air_dx_max ?? 0.30);
+    const airDyMax = Number(g.air_dy_max ?? 0.50);
+    const airTMax  = Number(g.air_tLand_max ?? 0.55);
+
+    const groundTMax = Number(g.ground_tLand_max ?? 0.70);
+    const groundDMin = Number(g.ground_dLand_min ?? 0.20);
+    const groundDMax = Number(g.ground_dLand_max ?? 0.90);
+
+    // 요청 집계(정책이 ap=1을 원했음)
     pg.requested += 1;
     pg.sumDX_req += gate.dx; pg.sumDY_req += gate.dy; pg.sumTTL_req += gate.tLand;
     pg.count_req += 1;
 
-    // ✅ gate가 막았는지/허용했는지
     if (!allowPowerHit) {
-      // blocked 사유(여기도 genome 기준으로 맞추는 게 좋음 — 아래 참고)
-      if (!gate.isAir) pg.blockedNotAir += 1;
-      if (gate.dx > Number(this.genome?.powerHitGate?.air_dx_max ?? 0.30)) pg.blockedDX += 1;
-      if (gate.dy > Number(this.genome?.powerHitGate?.air_dy_max ?? 0.50)) pg.blockedDY += 1;
-      if (gate.tLand > Number(this.genome?.powerHitGate?.air_tLand_max ?? 0.55)) pg.blockedTTL += 1;
+      // ✅ blocked 사유를 air/ground로 나눠 분해(유전자 기준)
+
+      if (gate.isAir) {
+        // air 조건이 깨진 경우(유전자 임계값 기준)
+        if (gate.dx > airDxMax) pg.blockedDX += 1;
+        if (gate.dy > airDyMax) pg.blockedDY += 1;
+        if (gate.tLand > airTMax) pg.blockedTTL += 1;
+      } else {
+        // ground 조건이 깨진 경우(추가 카운터)
+        // - 공이 내 코트가 아니면 groundOK 자체 불가
+        if (!gate.ballOnMySide) pg.blockedBallSide += 1;
+
+        // - 타이밍(착지까지 시간)
+        if (gate.tLand > groundTMax) pg.blockedGroundTTL += 1;
+
+        // - 착지점 거리(dLand) 범위
+        if (gate.dLand < groundDMin) pg.blockedDLandLow += 1;
+        if (gate.dLand > groundDMax) pg.blockedDLandHigh += 1;
+
+        // 기존 로그 호환(예전 필드 유지)
+        pg.blockedNotAir += 1;
+      }
 
       pg.sumDX_block += gate.dx; pg.sumDY_block += gate.dy; pg.sumTTL_block += gate.tLand;
       pg.count_block += 1;
     } else {
       pg.allowed += 1;
+
       pg.sumDX_allow += gate.dx; pg.sumDY_allow += gate.dy; pg.sumTTL_allow += gate.tLand;
       pg.count_allow += 1;
     }
   }
+
 
   // ✅ "실제로 실행된" powerHit=1 샘플은 기존처럼 따로 유지
   if (ap === 1) {
