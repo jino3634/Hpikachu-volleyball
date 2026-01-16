@@ -683,55 +683,6 @@ act(obs, playerIndex, opts = {}) {
     as.ayCounts[ay] = (as.ayCounts[ay] ?? 0) + 1;
     as.apCounts[ap] = (as.apCounts[ap] ?? 0) + 1;
 
-    // ✅ (보완 2) act(): powerGate 디버그 블록을 새 allowPowerHit 정의(=lying/diving만 금지)에 맞게 "최소 수정"
-    //
-    // 기존 powerGate 블록의 blockedNotAir / blockedDX / blockedDY / blockedTTL 는 의미가 깨졌으니,
-    // 아래처럼 "blockedLying / blockedDiving"만 집계하게 바꿔.
-    // (필드가 없을 수 있으니 0 초기화도 안전하게 포함)
-
-    if (ap === 1) {
-
-      if (this.debug && this.debug.powerGate) {
-        const pg = this.debug.powerGate;
-
-        // 안전 초기화(없으면 생성)
-        pg.requested = pg.requested ?? 0;
-        pg.allowed = pg.allowed ?? 0;
-        pg.blockedLying = pg.blockedLying ?? 0;
-        pg.blockedDiving = pg.blockedDiving ?? 0;
-
-        // 기존 통계가 남아있어도 무방(원하면 지워도 됨)
-        pg.sumDX_req = pg.sumDX_req ?? 0;
-        pg.sumDY_req = pg.sumDY_req ?? 0;
-        pg.sumTTL_req = pg.sumTTL_req ?? 0;
-        pg.count_req = pg.count_req ?? 0;
-
-        pg.sumDX_allow = pg.sumDX_allow ?? 0;
-        pg.sumDY_allow = pg.sumDY_allow ?? 0;
-        pg.sumTTL_allow = pg.sumTTL_allow ?? 0;
-        pg.count_allow = pg.count_allow ?? 0;
-
-        pg.sumDX_block = pg.sumDX_block ?? 0;
-        pg.sumDY_block = pg.sumDY_block ?? 0;
-        pg.sumTTL_block = pg.sumTTL_block ?? 0;
-        pg.count_block = pg.count_block ?? 0;
-
-        // 집계(여기서 dxN/dyN/tLandN는 이미 위에서 계산해둔 값 그대로 사용)
-        pg.requested++;
-        pg.sumDX_req += dxN; pg.sumDY_req += dyN; pg.sumTTL_req += tLandN; pg.count_req++;
-
-        if (allowPowerHit) {
-          pg.allowed++;
-          pg.sumDX_allow += dxN; pg.sumDY_allow += dyN; pg.sumTTL_allow += tLandN; pg.count_allow++;
-        } else {
-          // allowPowerHit=false는 이제 (isLying||isDiving) 뿐
-          pg.sumDX_block += dxN; pg.sumDY_block += dyN; pg.sumTTL_block += tLandN; pg.count_block++;
-          if (isLying) pg.blockedLying++;
-          if (isDiving) pg.blockedDiving++;
-        }
-      }
-    }
-
   };
 
   // ✅ Power-hit gate 제거(소프트 억제/근접/TTL gate 전부 제거)
@@ -904,6 +855,12 @@ act(obs, playerIndex, opts = {}) {
   if (ap === 1) {
     // ✅ 기존 지표 유지
     this.debug.powerHitSampled = (this.debug.powerHitSampled ?? 0) + 1;
+
+    // ✅ (추가) PPO-ACTION의 phNear/phAir/phGround/phAllowed용 카운트
+    const as = this.debug.actionStats;
+    as.powerHitAllowed = (as.powerHitAllowed ?? 0) + (allowPowerHit ? 1 : 0);
+    as.powerHitAir = (as.powerHitAir ?? 0) + (gate.airOK ? 1 : 0);
+    as.powerHitGround = (as.powerHitGround ?? 0) + (gate.groundOK ? 1 : 0);
 
     // ✅ powerGate는 {}가 아니라 "타입이 요구하는 형태"로 초기화
     if (!this.debug.powerGate) this.debug.powerGate = makeEmptyPowerGate();
