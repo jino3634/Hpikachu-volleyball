@@ -53,6 +53,7 @@ export class Trainer {
    *   autosaveEveryEpisodes?: number,
    *   setWinTarget?: number,
    *   consecutiveSetWinsToGraduate?: number
+   *   pbtEnabled?: boolean,
    * }} [opts]
    */
   constructor(game, opts = {}) {
@@ -185,6 +186,14 @@ export class Trainer {
     // ✅ GAME-DIAG에서 나온 값을 PPO-DIAG 로그 시점에 같이 찍기 위해 저장
     this._lastPowerHitRequested = 0;
     this._lastPowerHitApplied = 0;
+
+    // ---- PBT(P1) ----
+    this.pbtEnabled = (opts.pbtEnabled !== undefined) ? !!opts.pbtEnabled : true;
+    this.pbtCycle = 0;
+    this.pbtBestScore = -1; // -1이면 첫 eval에서 바로 SAVE 될 수 있음
+    this.pbtBestGenome = null;
+    this.pbtCurrentGenome = null;
+
   }
 
   async init() {
@@ -265,6 +274,42 @@ export class Trainer {
       await this._maybePersistRecent1000(true);
     }
 
+    // ---- PBT checkpoints (best/current genome + best score + best weights) ----
+    // NOTE: BEST 롤백은 "가중치(model_state) + genome"만 되돌린다.
+    const bestScore = await this.storage.getCheckpoint('pbt_best_score');
+    if (typeof bestScore === 'number') this.pbtBestScore = bestScore;
+
+    const bestGenome = await this.storage.getCheckpoint('pbt_best_genome');
+    if (bestGenome && typeof bestGenome === 'object') this.pbtBestGenome = bestGenome;
+
+    const currentGenome = await this.storage.getCheckpoint('pbt_current_genome');
+    if (currentGenome && typeof currentGenome === 'object') {
+      this.pbtCurrentGenome = currentGenome;
+      this._applyGenome(this.pbtCurrentGenome);
+    } else {
+      // 처음 실행이면 "현재 policy"에서 genome 생성해서 저장
+      this.pbtCurrentGenome = this._makeGenomeFromPolicy();
+      await this.storage.setCheckpoint('pbt_current_genome', this.pbtCurrentGenome);
+    }
+
+    // init()에서 pbt_current_genome 로드/생성 처리 직후
+    console.log(
+      `[PBT-INIT] currentGenome=${currentGenome ? 'LOADED' : 'CREATED'} ` +
+      `lr=${Number(this.pbtCurrentGenome?.learningRate ?? 0).toExponential?.(2)} ` +
+      `clip=${Number(this.pbtCurrentGenome?.clipEps ?? 0).toFixed?.(3)} ` +
+      `vf=${Number(this.pbtCurrentGenome?.vfCoef ?? 0).toFixed?.(3)} ` +
+      `gate=${JSON.stringify(this.pbtCurrentGenome?.powerHitGate ?? {})}`
+    );
+    const bestState = await this.storage.getCheckpoint('pbt_best_model_state'); // ✅ 추가
+    console.log(
+      `[PBT-INIT] bestScore=${this.pbtBestScore} ` +
+      `bestGenome=${this.pbtBestGenome ? 'YES' : 'NO'} ` +
+      `bestState=${bestState ? 'YES' : 'NO'}`
+    );
+
+    // best model_state는 "pbt_best_model_state"로 별도 보관
+    // (없어도 OK: 첫 SAVE 때 생성됨)
+
     this._runner = new OnePointEpisodeRunner(this.game, {
       learningPlayer: this.learningPlayer,
     });
@@ -316,6 +361,95 @@ export class Trainer {
       lastResult: this.lastResult,
     };
   }
+
+  // ==============================
+  // PBT(P1) helpers
+  // ==============================
+  _makeGenomeFromPolicy() {
+    const gate = this.policy?.genome?.powerHitGate ?? {};
+    return {
+      learningRate: Number(this.policy.learningRate ?? 0.001),
+      clipEps: Number(this.policy.clipEps ?? 0.2),
+      vfCoef: Number(this.policy.vfCoef ?? 0.5),
+      powerHitGate: {
+        kFrames: (gate.kFrames ?? 4) | 0,
+        dxMarginPx: (gate.dxMarginPx ?? 6) | 0,
+        dyMarginPx: (gate.dyMarginPx ?? 10) | 0,
+      },
+    };
+  }
+
+  _policySig() {
+    // “가중치/정책이 같은지”를 가볍게 확인하는 대표값 스냅샷
+    const p = this.policy;
+    const a = (p?.W1?.[0]?.[0] ?? 0);
+    const b = (p?.W2?.[0]?.[0] ?? 0);
+    const c = (p?.Wx?.[0]?.[0] ?? 0);
+    const d = (p?.Wy?.[0]?.[0] ?? 0);
+    const e = (p?.Wp?.[0]?.[0] ?? 0);
+    const v = (p?.Wv?.[0] ?? 0);
+    return `W1=${Number(a).toFixed(4)} W2=${Number(b).toFixed(4)} Wx=${Number(c).toFixed(4)} Wy=${Number(d).toFixed(4)} Wp=${Number(e).toFixed(4)} Wv=${Number(v).toFixed(4)}`;
+  }
+
+  _genomeSig(genome) {
+    const g = genome ?? this.pbtCurrentGenome ?? this._makeGenomeFromPolicy();
+    const gate = g?.powerHitGate ?? {};
+    return (
+      `lr=${Number(g.learningRate ?? 0).toExponential?.(2) ?? g.learningRate} ` +
+      `clip=${Number(g.clipEps ?? 0).toFixed?.(3) ?? g.clipEps} ` +
+      `vf=${Number(g.vfCoef ?? 0).toFixed?.(2) ?? g.vfCoef} ` +
+      `gate(dx=${gate.dxMarginPx},dy=${gate.dyMarginPx},k=${gate.kFrames})`
+    );
+  }
+
+
+  _applyGenome(genome) {
+    if (!genome || typeof genome !== 'object') return;
+
+    const before = this._makeGenomeFromPolicy();
+    logDebug(`[PBT-GENOME] apply BEGIN sig=${this._policySig()} before=${JSON.stringify(before)} next=${JSON.stringify(genome)}`);
+
+    // ✅ 단일 주입 지점
+    this.policy.applyGenome({
+      learningRate: genome.learningRate,
+      clipEps: genome.clipEps,
+      vfCoef: genome.vfCoef,
+      powerHitGate: genome.powerHitGate,
+    });
+
+    const after = this._makeGenomeFromPolicy();
+    logDebug(`[PBT-GENOME] apply END   sig=${this._policySig()} after=${JSON.stringify(after)}`);
+  }
+
+  _mutateGenome(baseGenome) {
+    const g = JSON.parse(JSON.stringify(baseGenome ?? this._makeGenomeFromPolicy()));
+    const before = JSON.parse(JSON.stringify(baseGenome ?? this._makeGenomeFromPolicy()));
+
+    // learningRate: ×{0.8, 1.25}
+    const lrScale = (Math.random() < 0.5) ? 0.8 : 1.25;
+    g.learningRate = Math.max(1e-6, Math.min(1e-2, Number(g.learningRate || 1e-3) * lrScale));
+
+    // clipEps: ±0.02
+    g.clipEps = Number(g.clipEps || 0.2) + ((Math.random() < 0.5) ? -0.02 : 0.02);
+    g.clipEps = Math.max(0.05, Math.min(0.4, g.clipEps));
+
+    // vfCoef: ±0.1
+    g.vfCoef = Number(g.vfCoef || 0.5) + ((Math.random() < 0.5) ? -0.1 : 0.1);
+    g.vfCoef = Math.max(0, Math.min(2.0, g.vfCoef));
+
+    // gate dx ±1px, dy ±2px (kFrames 고정)
+    const gate = g.powerHitGate ?? (g.powerHitGate = {});
+    const dx = (gate.dxMarginPx ?? 6) | 0;
+    const dy = (gate.dyMarginPx ?? 10) | 0;
+    gate.dxMarginPx = Math.max(0, Math.min(30, dx + ((Math.random() < 0.5) ? -1 : 1)));
+    gate.dyMarginPx = Math.max(0, Math.min(40, dy + ((Math.random() < 0.5) ? -2 : 2)));
+    gate.kFrames = (gate.kFrames ?? 4) | 0;
+
+    console.log(`[PBT-MUTATE] from=${JSON.stringify(before)} to=${JSON.stringify(g)}`);
+    logDebug(`[PBT-MUTATE] from=${JSON.stringify(baseGenome)} to=${JSON.stringify(g)}`);
+    return g;
+  }
+
 
   /**
    * Export a warmup snapshot (model weights + warmup checkpoints) so you can skip warmup next runs.
@@ -702,11 +836,14 @@ export class Trainer {
     }
 
     while (this.running && !this.graduated) {
-      // 기존: for(pointsPerTick) { ...거대한 블록... }
-      // 변경: train 모드로만 N포인트 실행
-      await this.runPoints(this.pointsPerTick, 'train');
-
-      await sleep(this.tickDelayMs > 0 ? this.tickDelayMs : 0);
+      if (this.pbtEnabled) {
+        await this._runPbtLoop();
+      } else {
+        while (this.running && !this.graduated) {
+          await this.runPoints(this.pointsPerTick, 'train');
+          await sleep(this.tickDelayMs > 0 ? this.tickDelayMs : 0);
+        }
+      }
     }
 
 
@@ -717,6 +854,128 @@ export class Trainer {
     await this._saveStats();
     await this.storage.setCheckpoint('model_state', this.policy.saveState());
   }
+
+  async _runPbtLoop() {
+    // PBT loop: Train30 -> Eval30 x3 -> compare -> SAVE/ROLLBACK/HOLD -> (rollback이면 mutate)
+    const TRAIN_N = 30;
+    const EVAL_N = 30;
+
+    if (!this.pbtCurrentGenome) {
+      this.pbtCurrentGenome = this._makeGenomeFromPolicy();
+      await this.storage.setCheckpoint('pbt_current_genome', this.pbtCurrentGenome);
+    }
+
+    while (this.running && !this.graduated) {
+      this.pbtCycle++;
+
+      // 1) train 30
+      const trainRes = await this.runPoints(TRAIN_N, 'train');
+
+      // 2) eval 30 x3 (learning OFF)
+      const eval1 = await this.runPoints(EVAL_N, 'eval');
+      const eval2 = await this.runPoints(EVAL_N, 'eval');
+      const eval3 = await this.runPoints(EVAL_N, 'eval');
+      const avg = (eval1.winrate + eval2.winrate + eval3.winrate) / 3;
+
+      // 3) decision
+      const prevBest = Number(this.pbtBestScore ?? -1);
+      let decision = 'HOLD';
+
+      if (avg >= (prevBest + 0.05)) {
+        decision = 'SAVE';
+
+        // (optional) SAVE 직전 sig
+        const sigBeforeSave = (typeof this._policySig === 'function') ? this._policySig() : 'n/a';
+
+        this.pbtBestScore = avg;
+        this.pbtBestGenome = JSON.parse(JSON.stringify(this.pbtCurrentGenome ?? this._makeGenomeFromPolicy()));
+
+        await this.storage.setCheckpoint('pbt_best_score', this.pbtBestScore);
+        await this.storage.setCheckpoint('pbt_best_genome', this.pbtBestGenome);
+        await this.storage.setCheckpoint('pbt_best_model_state', this.policy.saveState());
+
+        const sigAfterSave = (typeof this._policySig === 'function') ? this._policySig() : 'n/a';
+        const gSig = (typeof this._genomeSig === 'function') ? this._genomeSig(this.pbtBestGenome) : JSON.stringify(this.pbtBestGenome);
+
+        console.log(
+          `[PBT-SAVE] cycle=${this.pbtCycle} prevBest=${prevBest.toFixed(4)} avg=${avg.toFixed(4)} ` +
+          `bestAfter=${Number(this.pbtBestScore).toFixed(4)} ` +
+          `savedKeys=pbt_best_score,pbt_best_genome,pbt_best_model_state ` +
+          `sigBefore=${sigBeforeSave} sigAfter=${sigAfterSave} genome=${gSig}`
+        );
+
+      } else if (avg <= (prevBest - 0.10)) {
+        decision = 'ROLLBACK';
+
+        // rollback: weights + genome
+        const bestState = await this.storage.getCheckpoint('pbt_best_model_state');
+        const okState = !!(bestState && typeof bestState === 'object');
+
+        const sigBefore = (typeof this._policySig === 'function') ? this._policySig() : 'n/a';
+
+        if (okState) {
+          this.policy.loadState(bestState);
+          // 기존 로그 유지 + 강화
+          console.log(`[PBT-ROLLBACK] loadState OK. wNorm=${this.policy?.debug?.lastUpdate?.wNorm ?? 'n/a'}`);
+
+          if (this.pbtBestGenome) this._applyGenome(this.pbtBestGenome);
+          await this.storage.setCheckpoint('model_state', this.policy.saveState());
+        }
+
+        const sigAfter = (typeof this._policySig === 'function') ? this._policySig() : 'n/a';
+        const bestGSig = (typeof this._genomeSig === 'function') ? this._genomeSig(this.pbtBestGenome) : JSON.stringify(this.pbtBestGenome);
+
+        console.log(
+          `[PBT-ROLLBACK] cycle=${this.pbtCycle} prevBest=${prevBest.toFixed(4)} avg=${avg.toFixed(4)} ` +
+          `bestState=${okState ? 'YES' : 'NO'} bestGenome=${this.pbtBestGenome ? 'YES' : 'NO'} ` +
+          `sigBefore=${sigBefore} sigAfter=${sigAfter} bestGenomeSig=${bestGSig}`
+        );
+
+        // mutate from BEST genome (없으면 current)
+        const baseG = this.pbtBestGenome ?? this.pbtCurrentGenome ?? this._makeGenomeFromPolicy();
+        const baseGSig = (typeof this._genomeSig === 'function') ? this._genomeSig(baseG) : JSON.stringify(baseG);
+
+        this.pbtCurrentGenome = this._mutateGenome(baseG);
+
+        const mutGSig = (typeof this._genomeSig === 'function') ? this._genomeSig(this.pbtCurrentGenome) : JSON.stringify(this.pbtCurrentGenome);
+        console.log(`[PBT-MUTATE] cycle=${this.pbtCycle} base=${baseGSig} -> mutated=${mutGSig}`);
+
+        this._applyGenome(this.pbtCurrentGenome);
+        await this.storage.setCheckpoint('pbt_current_genome', this.pbtCurrentGenome);
+
+        const sigAfterMutApply = (typeof this._policySig === 'function') ? this._policySig() : 'n/a';
+        console.log(`[PBT-MUT-APPLIED] cycle=${this.pbtCycle} sig=${sigAfterMutApply} genome=${mutGSig}`);
+
+      } else {
+        decision = 'HOLD';
+        const sigHold = (typeof this._policySig === 'function') ? this._policySig() : 'n/a';
+        const gHold = (typeof this._genomeSig === 'function') ? this._genomeSig(this.pbtCurrentGenome) : JSON.stringify(this.pbtCurrentGenome);
+        console.log(`[PBT-HOLD] cycle=${this.pbtCycle} prevBest=${prevBest.toFixed(4)} avg=${avg.toFixed(4)} sig=${sigHold} genome=${gHold}`);
+      }
+
+      // 4) cycle log (요약 1줄)
+      const g = this.pbtCurrentGenome ?? {};
+      const gate = g.powerHitGate ?? {};
+      const genomeStr =
+        `lr=${Number(g.learningRate ?? 0).toExponential?.(2) ?? g.learningRate} ` +
+        `clip=${Number(g.clipEps ?? 0).toFixed?.(3) ?? g.clipEps} ` +
+        `vf=${Number(g.vfCoef ?? 0).toFixed?.(2) ?? g.vfCoef} ` +
+        `gate(dx=${gate.dxMarginPx},dy=${gate.dyMarginPx},k=${gate.kFrames})`;
+
+      const sig = (typeof this._policySig === 'function') ? this._policySig() : 'n/a';
+
+      logDebug(
+        `[PBT] cycle=${this.pbtCycle} ` +
+        `train=${trainRes.wins}/${TRAIN_N} ` +
+        `eval=${eval1.wins}/${EVAL_N},${eval2.wins}/${EVAL_N},${eval3.wins}/${EVAL_N} ` +
+        `avg=${avg.toFixed(4)} prevBest=${prevBest.toFixed(4)} best=${Number(this.pbtBestScore ?? -1).toFixed(4)} ` +
+        `decision=${decision} ${genomeStr} sig=${sig}`
+      );
+
+      await sleep(this.tickDelayMs > 0 ? this.tickDelayMs : 0);
+    }
+  }
+
 
   async _runOnePointWithMode(cfg) {
   const res = await this._runner.runOnePoint();
@@ -1173,6 +1432,15 @@ async runPoints(n, mode) {
   // ---- 모드 토글 + 시작 로그(체크포인트) ----
   const prev = this._setAgentMode(mode);
 
+  // ✅ PBT 태그(몇 번째 cycle의 로그인지)
+  const tag = this.pbtEnabled ? ` cycle=${this.pbtCycle}` : '';
+
+  // ✅ policy/genome 시그니처(Train/Eval 동일성 검증 핵심)
+  const sig0 = (typeof this._policySig === 'function') ? this._policySig() : 'n/a';
+  const gsig0 = (typeof this._genomeSig === 'function')
+    ? this._genomeSig(this.pbtCurrentGenome)
+    : JSON.stringify(this.pbtCurrentGenome ?? {});
+
   // ---- 학습 OFF 검증용 스냅샷 ----
   const ppoFlushBefore = this.ppoFlushCount || 0;
   const ppoStepsBefore = this.ppoFlushSteps || 0;
@@ -1180,10 +1448,16 @@ async runPoints(n, mode) {
   const rolloutBefore = (this.rollout?.length ?? 0);
 
   if (mode === 'eval') {
-    logDebug(`[EVAL] begin points=${points} learningOff=true eps=0 det=true ` +
-            `ppoFlush=${ppoFlushBefore} batchFlush=${batchFlushBefore} rollout=${rolloutBefore}`);
+    logDebug(
+      `[EVAL] begin points=${points}${tag} learningOff=true eps=0 det=true ` +
+      `sig=${sig0} genome=${gsig0} ` + // ✅ 추가
+      `ppoFlush=${ppoFlushBefore} batchFlush=${batchFlushBefore} rollout=${rolloutBefore}`
+    );
   } else {
-    logDebug(`[TRAIN] begin points=${points} learningOn=true eps=${this.agent.epsilon} det=${this.agent.deterministic}`);
+    logDebug(
+      `[TRAIN] begin points=${points}${tag} learningOn=true eps=${this.agent.epsilon} det=${this.agent.deterministic} ` +
+      `sig=${sig0} genome=${gsig0}` // ✅ 추가
+    );
   }
 
   let wins = 0;
@@ -1210,12 +1484,19 @@ async runPoints(n, mode) {
         updateSetAndAutosave: true,
       };
 
-  // Eval 동안 “ppo flush가 0회”인지 확인하려면 아래 카운터를 start 전에 잡아둬도 좋음
-  // const flushBefore = this.policy?.debug?.updateCount ?? 0; (없으면 생략)
-
   for (let i = 0; i < points; i++) {
     const res = await this._runOnePointWithMode(cfg);
     if (!res || !res.ok) continue;
+
+    // ✅ C1: 승패 라벨 검증 (처음 3포인트만)
+    if (i < 3) {
+      logDebug(
+        `[${mode.toUpperCase()}-LABEL] ` +
+        `i=${i} LP=${this.learningPlayer} ` +
+        `scoredBy=${res.scoredBy} loser=${res.loser} ` +
+        `isWin=${res.scoredBy === this.learningPlayer}`
+      );
+    }
 
     const isWin = (res.scoredBy === this.learningPlayer);
     if (isWin) wins++;
@@ -1234,19 +1515,29 @@ async runPoints(n, mode) {
   const dBatchFlush = batchFlushAfter - batchFlushBefore;
   const dRollout = rolloutAfter - rolloutBefore;
 
+  // ✅ end에서도 sig/genome 다시 찍기(롤백/변이 후 같은 runPoints 안에서도 변할 수 있음)
+  const sig1 = (typeof this._policySig === 'function') ? this._policySig() : 'n/a';
+  const gsig1 = (typeof this._genomeSig === 'function')
+    ? this._genomeSig(this.pbtCurrentGenome)
+    : JSON.stringify(this.pbtCurrentGenome ?? {});
+
   if (mode === 'eval') {
-    logDebug(`[EVAL] end points=${points} wins=${wins} losses=${losses} winrate=${winrate.toFixed(4)} learningOff=true eps=0 det=true ` +
-            `dPpoFlush=${dPpoFlush} dPpoSteps=${dPpoSteps} dBatchFlush=${dBatchFlush} dRollout=${dRollout}`);
+    logDebug(
+      `[EVAL] end points=${points}${tag} wins=${wins} losses=${losses} winrate=${winrate.toFixed(4)} ` +
+      `learningOff=true eps=0 det=true ` +
+      `dPpoFlush=${dPpoFlush} dPpoSteps=${dPpoSteps} dBatchFlush=${dBatchFlush} dRollout=${dRollout} ` +
+      `sig=${sig1} genome=${gsig1}` // ✅ 추가
+    );
   } else {
-    logDebug(`[TRAIN] end points=${points} wins=${wins} losses=${losses} winrate=${winrate.toFixed(4)}`);
+    logDebug(
+      `[TRAIN] end points=${points}${tag} wins=${wins} losses=${losses} winrate=${winrate.toFixed(4)} ` +
+      `sig=${sig1} genome=${gsig1}` // ✅ 추가
+    );
   }
 
   this._restoreAgentMode(prev);
   return { points, wins, losses, winrate };
 }
-
-
-
 
 _flushBatch(allRemaining = false) {
   const n = allRemaining ? this.pointBuffer.length : this.batchPoints;
@@ -1331,10 +1622,24 @@ _flushBatch(allRemaining = false) {
     this.mode = 'PHASE1';
     // Phase1: track best margin (p1Score - p2Score) for current snapshot
     this.phase1BestMargin = -999;
+
+    // reset PBT state
+    this.pbtCycle = 0;
+    this.pbtBestScore = -1;
+    this.pbtBestGenome = null;
+    this.pbtCurrentGenome = this._makeGenomeFromPolicy();
+
     this.consecutiveSetWins = 0;
     this.currentSet = { p1: 0, p2: 0, index: 1 };
 
     await this.storage.setCheckpoint('model_state', this.policy.saveState());
+
+    // clearAll 후에도 checkpoint로 이어갈 수 있도록 초기화 저장
+    await this.storage.setCheckpoint('pbt_best_score', this.pbtBestScore);
+    await this.storage.setCheckpoint('pbt_best_genome', null);
+    await this.storage.setCheckpoint('pbt_best_model_state', null);
+    await this.storage.setCheckpoint('pbt_current_genome', this.pbtCurrentGenome);
+
     await this._saveStats();
   }
     

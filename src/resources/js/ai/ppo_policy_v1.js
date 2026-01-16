@@ -252,14 +252,14 @@ export class PpoPolicyV1 {
         blockedNoContactWindow: 0,
       },
     
-// Observation sanity stats (per act call, for debugging schema issues)
-obsStats: {
-  count: 0,
-  sumAbsMeX: 0, sumAbsMeY: 0,
-  sumAbsBallX: 0, sumAbsBallY: 0,
-  sumAbsDx: 0, sumAbsDy: 0,
-},
-};
+    // Observation sanity stats (per act call, for debugging schema issues)
+    obsStats: {
+      count: 0,
+      sumAbsMeX: 0, sumAbsMeY: 0,
+      sumAbsBallX: 0, sumAbsBallY: 0,
+      sumAbsDx: 0, sumAbsDy: 0,
+    },
+    };
     // Extended diagnostics (rolling; reset by Trainer after each flush)
     this.debug.featStats = null; // lazily initialized in buildFeatures()
     this.debug.actionStats = {
@@ -295,7 +295,7 @@ obsStats: {
     };
     this.debug.lastUpdate = null; // {policyLoss,valueLoss,clipFrac,gradNorm,wNorm,advMean,advStd,retMean,retStd,rewMean,rewStd}
 
-  this.hidden1 = Math.max(1, (opts.hidden1 ?? 64) | 0);
+    this.hidden1 = Math.max(1, (opts.hidden1 ?? 64) | 0);
     this.hidden2 = Math.max(1, (opts.hidden2 ?? 64) | 0);
     this.activation = (opts.activation === 'linear') ? 'linear' : 'tanh';
 
@@ -330,7 +330,50 @@ obsStats: {
     this.bv = 0;
 
     this._initWeights();
+    
   }
+
+    /**
+     * ✅ PBT/진화용: 런타임 genome 적용(가중치 변경 없음)
+     * - Trainer는 변이 후 이 함수만 호출한다.
+     * - policy.saveState()/loadState()는 가중치 복구용, genome은 별도 저장/복구.
+     * @param {{
+     *   learningRate?: number,
+     *   clipEps?: number,
+     *   vfCoef?: number,
+     *   powerHitGate?: { kFrames?: number, dxMarginPx?: number, dyMarginPx?: number }
+     * }|any} genome
+     */
+    applyGenome(genome) {
+      if (!genome || typeof genome !== 'object') return;
+
+      // hyper-params
+      if (genome.learningRate !== undefined) this.learningRate = Number(genome.learningRate);
+      if (genome.clipEps !== undefined) this.clipEps = Number(genome.clipEps);
+      if (genome.vfCoef !== undefined) this.vfCoef = Number(genome.vfCoef);
+
+      // gate
+      const cur = (this.genome && typeof this.genome === 'object') ? this.genome : {};
+      const curGate = (cur.powerHitGate && typeof cur.powerHitGate === 'object') ? cur.powerHitGate : {};
+      const g = (genome.powerHitGate && typeof genome.powerHitGate === 'object') ? genome.powerHitGate : null;
+
+      const nextGate = {
+        kFrames: (g?.kFrames !== undefined) ? (g.kFrames | 0) : (curGate.kFrames | 0),
+        dxMarginPx: (g?.dxMarginPx !== undefined) ? (g.dxMarginPx | 0) : (curGate.dxMarginPx | 0),
+        dyMarginPx: (g?.dyMarginPx !== undefined) ? (g.dyMarginPx | 0) : (curGate.dyMarginPx | 0),
+      };
+
+      this.genome = {
+        ...cur,
+        powerHitGate: nextGate,
+      };
+
+      console.log(
+        `[POLICY-GENOME] applied ` +
+        `lr=${this.learningRate} clip=${this.clipEps} vf=${this.vfCoef} ` +
+        `gate=${JSON.stringify(this.genome?.powerHitGate ?? {})}`
+      );
+    }
 
   _initWeights() {
     const s = this.initStd;
@@ -897,7 +940,6 @@ act(obs, playerIndex, opts = {}) {
     as.powerHitAir = (as.powerHitAir ?? 0) + (gate.airOK ? 1 : 0);
     as.powerHitGround = (as.powerHitGround ?? 0) + (gate.groundOK ? 1 : 0);
   }
-
 
   recordActionStats(pxEff, pyEff, ppEff, ax, ay, ap);
   return { action, logp, value, meta: { ax, ay, ap, forcedIdle: skipLearn, reason: (skipLearn ? (isLying ? 'lying' : 'diving') : null) } };
