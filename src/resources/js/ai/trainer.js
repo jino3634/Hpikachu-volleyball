@@ -356,6 +356,11 @@ export class Trainer {
       running: this.running,
       graduated: this.graduated,
       learningPlayer: this.learningPlayer,
+
+      // ✅ UI 표시용
+      pbtCycle: (this.pbtCycle ?? 0) | 0,
+      bestScore: Number(this.pbtBestScore ?? 0),
+
       totalEpisodes: total,
       wins,
       losses,

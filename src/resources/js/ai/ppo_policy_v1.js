@@ -895,9 +895,6 @@ act(obs, playerIndex, opts = {}) {
     return h >>> 0;
   }
 
-  // deterministic near-tie sampling: step counter를 seed에 섞어서 고정 루프 방지
-  this._detStep = (this._detStep ?? 0) + 1;
-
   const rng = _mulberry32(
     (_hashObs32(obs, playerIndex) ^ (this._detStep | 0)) >>> 0
   );

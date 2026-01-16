@@ -485,6 +485,7 @@ function createTrainingControlPanel({ trainer, ticker }) {
     status.textContent = [
       `running: ${s.running ? 'ON' : 'OFF'}`,
       `graduated: ${s.graduated ? 'YES' : 'NO'}`,
+      `cycle: ${s.pbtCycle}  best: ${(Number(s.bestScore ?? 0) * 100).toFixed(1)}%`,
       `episodes: ${s.totalEpisodes} (W ${s.wins} / L ${s.losses}, ${winratePct}%)`,
       `last1000: ${s.last1000Wins}/${s.last1000Count} (${last1000Pct}%)`,
       `set target: ${s.setWinTarget}, streak: ${s.consecutiveSetWins}/${s.consecutiveSetWinsToGraduate}`,
