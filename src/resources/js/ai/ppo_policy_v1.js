@@ -708,6 +708,9 @@ act(obs, playerIndex, opts = {}) {
   const deterministic = !!opts.deterministic;
   const epsRand = Number(opts.epsilon ?? 0);
 
+  // deterministic step counter (결정론이지만 step별 변화를 주기 위함)
+  this._detStep = (this._detStep ?? 0) + 1;
+
   const me = obs?.me ?? {};
   const state = Number(me.state ?? 0);
   const isLying = !!me.isLying || state === 4;
@@ -892,8 +895,12 @@ act(obs, playerIndex, opts = {}) {
     return h >>> 0;
   }
 
-  const seedBase = (opts && Number.isFinite(opts.seed)) ? (opts.seed >>> 0) : 0;
-  const rng = _mulberry32((seedBase ^ _hashObs32(obs, playerIndex)) >>> 0);
+  // deterministic near-tie sampling: step counter를 seed에 섞어서 고정 루프 방지
+  this._detStep = (this._detStep ?? 0) + 1;
+
+  const rng = _mulberry32(
+    (_hashObs32(obs, playerIndex) ^ (this._detStep | 0)) >>> 0
+  );
 
   function _sampleCategoricalRng(probs) {
     let sum = 0;
