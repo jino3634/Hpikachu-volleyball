@@ -107,6 +107,80 @@ function clip(x, lo, hi) {
   return Math.max(lo, Math.min(hi, x));
 }
 
+function powerHitGate(obs, playerIndex) {
+  const me = obs?.me ?? {};
+  const ball = obs?.ball ?? {};
+
+  const state = Number(me.state ?? 0);
+  const isLying = !!me.isLying || state === 4;
+  const isDiving = !!me.isDiving || state === 3;
+
+  const canAct = (me.canAct !== undefined)
+    ? !!me.canAct
+    : (!isLying && !isDiving);
+
+  const isAir = (me.isAir !== undefined)
+    ? !!me.isAir
+    : (state === 1 || state === 2);
+
+  const mx = Number(me.x ?? 0);
+  const my = Number(me.y ?? 0);
+  const bx = Number(ball.x ?? 0);
+  const by = Number(ball.y ?? 0);
+
+  const dx = Math.abs(bx - mx);
+  const dy = Math.abs(by - my);
+
+  const tLand = Number(ball.timeToLand ?? 1);
+
+  // landingX는 우리가 추가했을 수도 있고, 없으면 expectedX로 대체
+  const landingX = Number(ball.landingX ?? ball.expectedX ?? 0);
+  const dLand = Math.abs(landingX - mx);
+
+  // 내 코트쪽 판정(정규화 좌표 기준: 중앙이 0)
+  // 약간의 여유(±0.05)로 중앙선 튕김/판정 흔들림 흡수
+  const isP2 = (me.isP2 !== undefined) ? !!me.isP2 : (playerIndex === 2);
+  const ballOnMySide = isP2 ? (bx >= -0.05) : (bx <= 0.05);
+
+  // 1) 공중 파워샷(스파이크/강타): 공이 충분히 근접 + 착지 임박
+  const airOK =
+    isAir &&
+    (dx <= 0.30) &&
+    (dy <= 0.50) &&
+    (tLand <= 0.55);
+
+  // 2) 지상 다이빙: 공이 내 코트에 떨어질 예정 + 다이빙 의미가 있는 거리
+  // - 너무 가까우면 그냥 걸어가면 됨(불필요 파워히트)
+  // - 너무 멀면 어차피 못 닿음(무의미 파워히트)
+  const groundOK =
+    (!isAir) &&
+    ballOnMySide &&
+    (tLand <= 0.70) &&
+    (dLand >= 0.20) &&
+    (dLand <= 0.90);
+
+  const allow =
+    canAct &&
+    !isLying &&
+    !isDiving &&
+    (airOK || groundOK);
+
+  return {
+    allow,
+    airOK,
+    groundOK,
+    canAct,
+    isLying,
+    isDiving,
+    isAir,
+    dx,
+    dy,
+    tLand,
+    dLand,
+    ballOnMySide,
+  };
+}
+
 export class PpoPolicyV1 {
   /**
    * @param {{
@@ -652,7 +726,9 @@ act(obs, playerIndex, opts = {}) {
 
   // ✅ Power-hit gate 제거(소프트 억제/근접/TTL gate 전부 제거)
   // ✅ 하드 금지 조건은 오직 lying/diving
-  const allowPowerHit = !(isLying || isDiving);
+  const gate = powerHitGate(obs, playerIndex);
+  const allowPowerHit = gate.allow;
+
 
   // (아래 dxN/dyN/tLandN는 기존 디버그/통계에서 쓰이므로 "남겨도 됨")
   // powerGate 디버그는 기존 allowPowerHit(근접+TTL) 기준을 전제로 만들어졌으니,
@@ -791,28 +867,57 @@ act(obs, playerIndex, opts = {}) {
   const action = { xDirection: mapClassToXDir(ax), yDirection: mapClassToYDir(ay), powerHit: ap ? 1 : 0 };
 
   // diagnostics: count sampled power-hit actions (main policy path)
+  // (선택) powerHit gate 디버그 카운트 개선
+  function makeEmptyPowerGate() {
+    return {
+      requested: 0,
+      allowed: 0,
+      blockedNotAir: 0,
+      blockedDX: 0,
+      blockedDY: 0,
+      blockedTTL: 0,
+      sumDX_req: 0,
+      sumDY_req: 0,
+      sumTTL_req: 0,
+      count_req: 0,
+      sumDX_allow: 0,
+      sumDY_allow: 0,
+      sumTTL_allow: 0,
+      count_allow: 0,
+      sumDX_block: 0,
+      sumDY_block: 0,
+      sumTTL_block: 0,
+      count_block: 0,
+    };
+  }
+
   if (ap === 1) {
-    this.debug.powerHitSampled++; // requested power-hit (pre-gate)
+    // ✅ 기존 지표 유지
+    this.debug.powerHitSampled = (this.debug.powerHitSampled ?? 0) + 1;
 
-    // NOTE: 기존 powerGate 디버그는 "근접+TTL+공중" gate를 전제로 함.
-    // 지금은 allowPowerHit 의미가 "lying/diving이 아님"으로 바뀌었으니,
-    // 아래 블록은 숫자 해석이 달라진다. (원하면 통째로 제거해도 됨)
-    if (this.debug && this.debug.powerGate) {
-      const pg = this.debug.powerGate;
-      const dxv = dxN;
-      const dyv = dyN;
-      const ttlv = tLandN;
+    // ✅ powerGate는 {}가 아니라 "타입이 요구하는 형태"로 초기화
+    if (!this.debug.powerGate) this.debug.powerGate = makeEmptyPowerGate();
+    const pg = this.debug.powerGate;
 
-      pg.requested++;
-      pg.sumDX_req += dxv; pg.sumDY_req += dyv; pg.sumTTL_req += ttlv; pg.count_req++;
+    // ✅ requested/allowed/blocked… 기존 필드명 그대로 사용
+    pg.requested += 1;
+    pg.sumDX_req += gate.dx; pg.sumDY_req += gate.dy; pg.sumTTL_req += gate.tLand;
+    pg.count_req += 1;
 
-      if (allowPowerHit) {
-        pg.allowed++;
-        pg.sumDX_allow += dxv; pg.sumDY_allow += dyv; pg.sumTTL_allow += ttlv; pg.count_allow++;
-      } else {
-        pg.sumDX_block += dxv; pg.sumDY_block += dyv; pg.sumTTL_block += ttlv; pg.count_block++;
-        // blockedNotAir/dx/dy/ttl 등은 더 이상 의미 없음(원하면 지워라)
-      }
+    if (!allowPowerHit) {
+      // blocked 사유를 기존 분류로 매핑(새 gate 구조를 기존 카운트로 환원)
+      if (!gate.isAir) pg.blockedNotAir += 1;
+      if (gate.dx > 0.30) pg.blockedDX += 1;
+      if (gate.dy > 0.50) pg.blockedDY += 1;
+      if (gate.tLand > 0.55) pg.blockedTTL += 1;
+
+      pg.sumDX_block += gate.dx; pg.sumDY_block += gate.dy; pg.sumTTL_block += gate.tLand;
+      pg.count_block += 1;
+    } else {
+      pg.allowed += 1;
+
+      pg.sumDX_allow += gate.dx; pg.sumDY_allow += gate.dy; pg.sumTTL_allow += gate.tLand;
+      pg.count_allow += 1;
     }
   }
 
@@ -837,7 +942,9 @@ logpValue(obs, playerIndex, action) {
   // ✅ act()와 동일한 규칙:
   // - powerHit 하드 금지는 오직 lying/diving
   // - 지상/공중, 근접/TTL 조건으로는 막지 않음
-  const allowPowerHit = !(isLying || isDiving);
+  const gate = powerHitGate(obs, playerIndex);
+  const allowPowerHit = gate.allow;
+
 
   // (dxN/dyN/tLandN는 더 이상 gate에 쓰지 않으므로 삭제해도 됨)
   // const ballN = obs?.ball ?? {};

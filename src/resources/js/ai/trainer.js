@@ -166,6 +166,10 @@ export class Trainer {
 
     this.ppoEpochs = 4;
     this.ppoMinibatch = 256;
+
+    // ✅ GAME-DIAG에서 나온 값을 PPO-DIAG 로그 시점에 같이 찍기 위해 저장
+    this._lastPowerHitRequested = 0;
+    this._lastPowerHitApplied = 0;
   }
 
   async init() {
@@ -965,6 +969,11 @@ export class Trainer {
             logDebug(`[GAME-DIAG] decisions=${ds.decisions} forcedIdle=${ds.forcedIdle} powerHitReq=${ds.powerHitRequested} powerHitApplied=${ds.powerHitApplied}`);
             const req = ds.powerHitRequested;
             const app = ds.powerHitApplied;
+
+            // ✅ 추가: 이번 flush 구간의 "실제 엔진 발동" 수치를 저장
+            this._lastPowerHitRequested = req;
+            this._lastPowerHitApplied = app;
+
             if (req > 0) logDebug(`[ACTION-EFFECTIVE] powerHitAppliedRate=${(app / req).toFixed(4)}`);
             ds.decisions = 0;
             ds.forcedIdle = 0;
@@ -1318,11 +1327,19 @@ _buildPointReplay(res) {
         const gateReq = Number(pg.requested ?? 0);
         const gateAllow = Number(pg.allowed ?? 0);
 
+        const sampled = Number(dbg.powerHitSampled ?? 0);
+        const allowed = gateAllow;
+        const applied = Number(this._lastPowerHitApplied ?? 0);
+
+        const div = (a, b) => (b > 0 ? (a / b) : 0);
+
         logDebug(
             `[PPO-DIAG] nanFeatures=${dbg.nanFeatures} invalidSteps=${dbg.invalidFeatureSteps} ` +
             `forcedIdle=${dbg.forcedIdle} (noAct=${dbg.forcedIdleNoAct}, lying=${dbg.forcedIdleLying}, diving=${dbg.forcedIdleDiving}) ` +
             `powerHitReq=${dbg.powerHitSampled} powerMasked=${dbg.powerMasked} ` +
-            `gateReq=${gateReq} gateAllow=${gateAllow} gateNotAir=${pg.blockedNotAir ?? 0} gateDX=${pg.blockedDX ?? 0} gateDY=${pg.blockedDY ?? 0} gateTTL=${pg.blockedTTL ?? 0}`
+            `gateReq=${gateReq} gateAllow=${gateAllow} gateNotAir=${pg.blockedNotAir ?? 0} gateDX=${pg.blockedDX ?? 0} gateDY=${pg.blockedDY ?? 0} gateTTL=${pg.blockedTTL ?? 0}` +
+            `[POWERHIT-3STAGE] sampled=${sampled} allowed=${allowed} applied=${applied} ` +
+            `allowRate=${div(allowed, sampled).toFixed(4)} appliedRate=${div(applied, allowed).toFixed(4)} overallRate=${div(applied, sampled).toFixed(4)}`
         );
 
         // reset core counters
