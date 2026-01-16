@@ -185,7 +185,10 @@ async function setup() {
   setUpUI(pikaVolley, ticker);
 
   // ✅ Trainer
-  const trainer = new Trainer(pikaVolley, { /* ... 네가 쓰던 옵션 유지 ... */ });
+  const trainer = new Trainer(pikaVolley, {
+    disableWarmup: true,
+  });
+
   await trainer.init();
 
   // window.train 준비

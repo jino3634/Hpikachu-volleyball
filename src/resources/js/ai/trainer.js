@@ -54,6 +54,7 @@ export class Trainer {
    *   setWinTarget?: number,
    *   consecutiveSetWinsToGraduate?: number,
    *   pbtEnabled?: boolean,
+   *   disableWarmup?: boolean
    * }} [opts]
    */
   constructor(game, opts = {}) {
@@ -194,10 +195,10 @@ export class Trainer {
     // ✅ BEST 초기값은 0으로 (avg=0일 때 SAVE 방지)
     this.pbtBestScore = 0.0;
 
-    this.pbtBestScore = -1; // -1이면 첫 eval에서 바로 SAVE 될 수 있음
     this.pbtBestGenome = null;
     this.pbtCurrentGenome = null;
 
+    this.disableWarmup = !!opts.disableWarmup;
   }
 
   async init() {
@@ -856,12 +857,11 @@ export class Trainer {
     if (this.running) return;
 
     // Phase0: imitation dataset collection (builtin vs builtin)
-    if (!this.warmup.done) {
-      await this._collectWarmupSamples();
-    }
-    // Phase0.5: imitation training (supervised)
-    if (this.warmup.done && !this.warmup.trained) {
-      await this._trainWarmupImitation();
+    if (!this.disableWarmup) {
+      if (!this.warmup.done) await this._collectWarmupSamples();
+      if (this.warmup.done && !this.warmup.trained) await this._trainWarmupImitation();
+    } else {
+      logDebug('[WARMUP] disabled (skip collect/train)');
     }
 
     if (this.graduated) return;
