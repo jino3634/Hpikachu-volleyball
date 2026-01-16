@@ -1437,13 +1437,15 @@ export class Trainer {
       const p1Won = this._didP1WinSet();
 
       // Phase1: margin-based "current" snapshot rule
-      const margin = (this.currentSet.p1 | 0) - (this.currentSet.p2 | 0);
-      if (margin > (this.phase1BestMargin | 0)) {
-        this.phase1BestMargin = margin;
-        // save immediately so the best margin snapshot is persisted
-        await this.storage.setCheckpoint('model_state', this.policy.saveState());
-        await this._saveStats();
-        logDebug(`[P1] new bestMargin=${this.phase1BestMargin} (score ${this.currentSet.p1}-${this.currentSet.p2}) -> saved current`);
+      // ✅ PBT 운영 중이면 혼선/간섭 방지: P1 bestMargin 저장 로직 OFF
+      if (!this.pbtEnabled) {
+        const margin = (this.currentSet.p1 | 0) - (this.currentSet.p2 | 0);
+        if (margin > (this.phase1BestMargin | 0)) {
+          this.phase1BestMargin = margin;
+          await this.storage.setCheckpoint('model_state', this.policy.saveState());
+          await this._saveStats();
+          logDebug(`[P1] new bestMargin=${this.phase1BestMargin} (score ${this.currentSet.p1}-${this.currentSet.p2}) -> saved current`);
+        }
       }
 
       if (p1Won) this.consecutiveSetWins++;
@@ -1695,7 +1697,7 @@ _flushBatch(allRemaining = false) {
 
     // reset PBT state
     this.pbtCycle = 0;
-    this.pbtBestScore = -1;
+    this.pbtBestScore = 0.0;   // ✅ 초기 BEST는 0으로 통일
     this.pbtBestGenome = null;
     this.pbtCurrentGenome = this._makeGenomeFromPolicy();
 
