@@ -97,7 +97,11 @@ export class Trainer {
     this.flushCount = 0;
     this.bufferSkipped = 0;
 
-// global stats
+    // ---- 학습 OFF 검증용 카운터 ----
+    this.ppoFlushCount = 0;     // [PPO] flush 몇 번 했는지
+    this.ppoFlushSteps = 0;     // flush로 소비한 step 합
+
+    // global stats
     this.totalEpisodes = 0;
     this.totalWins = 0;
     this.totalLosses = 0;
@@ -698,428 +702,13 @@ export class Trainer {
     }
 
     while (this.running && !this.graduated) {
-      for (let i = 0; i < this.pointsPerTick; i++) {
-        // 한 포인트 실행
-        const res = await this._runner.runOnePoint();
-        this.lastResult = res;
+      // 기존: for(pointsPerTick) { ...거대한 블록... }
+      // 변경: train 모드로만 N포인트 실행
+      await this.runPoints(this.pointsPerTick, 'train');
 
-        if (!res) {
-          logDebug('[WARN]', '[TRAIN] runOnePoint returned null/undefined');
-          continue;
-        }
-
-        // episode 저장(가능한 경우만)
-        if (res.episode) {
-          await this.storage.appendEpisode(res.episode);
-        } else {
-          logDebug('[WARN]', '[TRAIN] missing episode; skip save/learn', { loseReason: res.loseReason });
-        }
-
-        // point replay 저장(최근 10개 + 최근 승리 3개 유지)
-        const replay = this._buildPointReplay(res);
-
-        // recent 10
-        await this.storage.appendReplay(replay);
-        await this.storage.pruneReplays(10);
-
-        // win 3 (별도 슬롯: win: 접두사로 중복 저장)
-        const isWinPoint = (replay.ok && replay.scoredBy === this.learningPlayer);
-        if (isWinPoint) {
-          const winReplay = {
-            ...replay,
-            id: `win:${replay.id}`,
-            baseId: replay.id,
-            bucket: 'win',
-          };
-          await this.storage.appendReplay(winReplay);
-          if (this.storage.pruneWinReplays) {
-            await this.storage.pruneWinReplays(3);
-          }
-        }
-
-        // PPO rollout collection + update
-        const canLearn =
-          res.ok === true &&
-          res.frames > 0 &&
-          res.loseReason !== 'EXCEPTION' &&
-          !!res.episode;
-
-        if (canLearn) {
-          const transitions = res.episode.transitions ?? [];
-
-          // Track how many steps we actually push for THIS point (helps diagnose “why pushed is tiny”).
-          const rolloutLenBeforePoint = this.rollout.length;
-          let pushedThisPoint = 0;
-          let okInfoThisPoint = 0;
-          
-
-          // Pull episode-runner diagnostics if present
-          const epAny = /** @type {any} */ (res.episode);
-          const d = epAny?.diag;
-          if (d && this.learnDiag) {
-            this.learnDiag.ep_framesTotal += (d.framesTotal | 0);
-            this.learnDiag.ep_framesCanActFalse += (d.framesCanActFalse | 0);
-            this.learnDiag.ep_framesDecisionSampled += (d.framesDecisionSampled | 0);
-            this.learnDiag.ep_framesLegacyAction += (d.framesLegacyAction | 0);
-            this.learnDiag.ep_stepsAdded += (d.stepsAdded | 0);
-            this.learnDiag.ep_stepsSkippedNoDecisionInfo += (d.stepsSkippedNoDecisionInfo | 0);
-            this.learnDiag.ep_stepsSkippedForcedIdle += (d.stepsSkippedForcedIdle | 0);
-          }
-
-          // Spot-check: transitions length vs episode_runner stepsAdded (helps detect builder issues)
-          if (d && typeof d.stepsAdded === 'number') {
-            const ta = transitions.length | 0;
-            const sa = d.stepsAdded | 0;
-            if (ta > 0) {
-              const ratio = sa / Math.max(1, ta);
-              if (ratio < 0.95 || ratio > 1.05) {
-                logDebug(`[EP-MISMATCH] ep=${this.totalEpisodes} transitions=${ta} stepsAdded=${sa} ratio=${ratio.toFixed(4)}`);
-              }
-            }
-          }
-          this.learnDiag.episodes++;
-          this.learnDiag.transitions += transitions.length;
-            let skippedNoInfo = 0;
-            let skippedBadFields = 0;
-          for (const tr of transitions) {
-            const info = tr.info; // keep null/undefined as-is
-            if (!info) { skippedNoInfo++; continue; }
-            if (typeof info.logp !== 'number' || typeof info.value !== 'number') { skippedBadFields++; continue; }
-
-            okInfoThisPoint++;
-
-            const me = tr.obs?.me ?? {};
-             const st = Number(me.state ?? 0);
-             const isLying = !!me.isLying || st === 4;
-             const isDiving = !!me.isDiving || st === 3;
-             const isAir = (me.isAir !== undefined) ? !!me.isAir : (st === 1 || st === 2);
-             const canAct = (me.canAct !== undefined) ? !!me.canAct : (!isLying && !isDiving);
-             if (canAct) this.learnDiag.stateLearn.canAct++;
-             if (isAir) this.learnDiag.stateLearn.air++;
-             if (!isAir && canAct) this.learnDiag.stateLearn.ground++;
-             if (isDiving) this.learnDiag.stateLearn.diving++;
-             if (isLying) this.learnDiag.stateLearn.lying++;
-             this.rollout.push({
-               obs: tr.obs ?? null,
-              action: tr.action ?? null,
-              reward: Number(tr.reward ?? 0),
-              done: !!tr.done,
-              oldLogp: Number(info.logp ?? 0),
-              value: Number(info.value ?? 0),
-              playerIndex: this.learningPlayer,
-            });
-            pushedThisPoint++;
-            this.learnDiag.pushedSteps++;
-          }
-
-          const rolloutLenAfterPoint = this.rollout.length;
-          // Always log when pushed is unexpectedly small compared to info-ok transitions.
-          // This should only happen if transitions themselves are tiny or filtered upstream.
-          if (okInfoThisPoint > 0 && pushedThisPoint <= 5) {
-            logDebug(
-              `[POINT-PUSH] ep=${this.totalEpisodes} trans=${transitions.length} okInfo=${okInfoThisPoint} pushed=${pushedThisPoint} skippedNoInfo=${skippedNoInfo} skippedBadFields=${skippedBadFields} rolloutLen=${rolloutLenBeforePoint}->${rolloutLenAfterPoint}`
-            );
-          }
-
-          // accumulate skip counters
-          this.learnDiag.skippedNoInfo += skippedNoInfo;
-          this.learnDiag.skippedBadFields += skippedBadFields;
-
-          // update when enough rollout steps are collected
-          while (this.rollout.length >= this.rolloutSteps) {
-            const rolloutLenBeforeBatch = this.rollout.length;
-            const batch = this.rollout.splice(0, this.rolloutSteps);
-            this.learnDiag.consumedSteps += batch.length;
-            const rolloutLenAfterBatch = this.rollout.length;
-            logDebug(`[BATCH-CONSUME] batch=${batch.length} rolloutLen=${rolloutLenBeforeBatch}->${rolloutLenAfterBatch} pushedStepsSinceFlush=${this.learnDiag.pushedSteps} consumedStepsSinceFlush=${this.learnDiag.consumedSteps}`);
-
-            // compute GAE + returns
-            this.policy.computeGAE(batch);
-
-            const stats = this.policy.ppoUpdate(batch, {
-              epochs: this.ppoEpochs,
-              minibatch: this.ppoMinibatch,
-            });
-
-            if (!stats) { logDebug('[PPO] flush stats missing'); continue; }
-            const akl = (typeof stats.approxKl === 'number') ? stats.approxKl.toFixed(6) : 'NA';
-            logDebug(`[PPO] flush steps=${stats.steps ?? 'NA'} updates=${stats.updates ?? 'NA'} approxKL=${akl}`);
-
-
-            if (stats && typeof stats.policyLoss === 'number') {
-            logDebug(`[PPO-LOSS] policyLoss=${stats.policyLoss.toFixed(6)} valueLoss=${stats.valueLoss.toFixed(6)} clipFrac=${stats.clipFrac.toFixed(4)} gradNorm=${stats.gradNorm.toFixed(6)} wNorm=${stats.wNorm.toFixed(3)}`);
-            if (stats.vrCorr !== undefined) logDebug(`[VALUE-DIAG] corr=${stats.vrCorr.toFixed(4)}`);
-            if (stats.advPos !== undefined) logDebug(`[ADV-SIGN] pos=${stats.advPos} neg=${stats.advNeg} zero=${stats.advZero}`);
-            logDebug(`[PPO-ADV] advMean=${stats.advMean.toFixed(6)} advStd=${stats.advStd.toFixed(6)} retMean=${stats.retMean.toFixed(6)} retStd=${stats.retStd.toFixed(6)} rewMean=${stats.rewMean.toFixed(6)} rewStd=${stats.rewStd.toFixed(6)}`);
-            }
-
-            // ---- learnDiag logging + reset (한 번만) ----
-            if (this.learnDiag) {
-            if (this.learnDiag.stateLearn) {
-                const s = this.learnDiag.stateLearn;
-                logDebug(`[STATE-LEARN] canAct=${s.canAct} ground=${s.ground} air=${s.air} diving=${s.diving} lying=${s.lying}`);
-                this.learnDiag.stateLearn = { canAct:0, air:0, ground:0, diving:0, lying:0 };
-            }
-
-            const transitionsN = Math.max(1, this.learnDiag.transitions);
-            const rolloutLeft = this.rollout.length;
-            const badRate = this.learnDiag.skippedBadFields / transitionsN;
-            const noInfoRate = this.learnDiag.skippedNoInfo / transitionsN;
-
-            logDebug(`[LEARN-DIAG] episodes=${this.learnDiag.episodes} transitions=${this.learnDiag.transitions} rolloutLen=${rolloutLeft} pushedSteps=${this.learnDiag.pushedSteps} consumedSteps=${this.learnDiag.consumedSteps} skippedNoInfo=${this.learnDiag.skippedNoInfo} skippedBadFields=${this.learnDiag.skippedBadFields}`);
-            logDebug(`[LEARN-RATE] rolloutLenPerTransition=${(rolloutLeft / transitionsN).toFixed(4)} noInfoRate=${noInfoRate.toFixed(4)} badFieldRate=${badRate.toFixed(4)}`);
-
-            if (this.learnDiag.pushedSteps > 0) {
-                logDebug(`[LEARN-FLOW] pushedSteps=${this.learnDiag.pushedSteps} consumedSteps=${this.learnDiag.consumedSteps} leftoverRollout=${rolloutLeft} consumedRate=${(this.learnDiag.consumedSteps/this.learnDiag.pushedSteps).toFixed(4)}`);
-            }
-
-            const epFramesTotal = Math.max(1, this.learnDiag.ep_framesTotal);
-            logDebug(`[EP-DIAG] framesTotal=${this.learnDiag.ep_framesTotal} canActFalse=${this.learnDiag.ep_framesCanActFalse} decisionSampled=${this.learnDiag.ep_framesDecisionSampled} legacyAction=${this.learnDiag.ep_framesLegacyAction}`);
-            logDebug(`[EP-DIAG] stepsAdded=${this.learnDiag.ep_stepsAdded} skippedNoDecisionInfo=${this.learnDiag.ep_stepsSkippedNoDecisionInfo} skippedForcedIdle=${this.learnDiag.ep_stepsSkippedForcedIdle}`);
-            logDebug(`[EP-RATE] canActFalseRate=${(this.learnDiag.ep_framesCanActFalse/epFramesTotal).toFixed(4)} decisionSampledRate=${(this.learnDiag.ep_framesDecisionSampled/epFramesTotal).toFixed(4)} stepsAddedPerFrame=${(this.learnDiag.ep_stepsAdded/epFramesTotal).toFixed(6)}`);
-
-            // reset per flush (딱 1번만)
-            this.learnDiag.episodes = 0;
-            this.learnDiag.transitions = 0;
-            this.learnDiag.pushedSteps = 0;
-            this.learnDiag.consumedSteps = 0;
-            this.learnDiag.skippedNoInfo = 0;
-            this.learnDiag.skippedBadFields = 0;
-
-            this.learnDiag.ep_framesTotal = 0;
-            this.learnDiag.ep_framesCanActFalse = 0;
-            this.learnDiag.ep_framesDecisionSampled = 0;
-            this.learnDiag.ep_framesLegacyAction = 0;
-            this.learnDiag.ep_stepsAdded = 0;
-            this.learnDiag.ep_stepsSkippedNoDecisionInfo = 0;
-            this.learnDiag.ep_stepsSkippedForcedIdle = 0;
-            }
-
-            // Diagnostics
-            if (this.policy && this.policy.debug) {
-              const pg = /** @type {any} */ (this.policy.debug.powerGate || {});
-              const frames = Number(pg.frames ?? 0);
-              const eligible = Number(pg.eligibleFrames ?? 0);
-              const blocked = Number(pg.blockedFrames ?? (frames - eligible));
-              const sumPPower = Number(pg.sumPPower ?? 0);
-              const sumPPowerEl = Number(pg.sumPPowerEligible ?? 0);
-              const expApplied = Number(pg.expectedApplied ?? 0);
-              const sampledApplied = Number(pg.sampledApplied ?? 0);
-
-              const div = (a, b, digits=4) => (b > 0 ? (a / b).toFixed(digits) : 'NA');
-              const mean = (s, n, digits=4) => (n > 0 ? (s / n).toFixed(digits) : 'NA');
-
-              logDebug(
-                `[PPO-DIAG] nanFeatures=${this.policy.debug.nanFeatures} invalidSteps=${this.policy.debug.invalidFeatureSteps} ` +
-                `forcedIdle=${this.policy.debug.forcedIdle} (noAct=${this.policy.debug.forcedIdleNoAct}, lying=${this.policy.debug.forcedIdleLying}, diving=${this.policy.debug.forcedIdleDiving}) ` +
-                `powerHitReq=${this.policy.debug.powerHitSampled} powerMasked=${this.policy.debug.powerMasked} ` +
-                `gateFrames=${frames} eligible=${eligible} blocked=${blocked} eligibleRate=${div(eligible, frames)} ` +
-                `pPowerMean=${mean(sumPPower, frames)} pPowerMeanEligible=${mean(sumPPowerEl, eligible)} ` +
-                `expApplied=${expApplied.toFixed(2)} expAppliedRateEligible=${div(expApplied, eligible)} ` +
-                `sampledApplied=${sampledApplied} sampledAppliedRate=${div(sampledApplied, frames)}`
-              );
-
-              // --- P0-3 HEAD-DIAG (power head learning check) ---
-              {
-                const pol = /** @type {any} */ (this.policy);
-                const Wp = pol.Wp;
-                const bp = pol.bp;
-
-                let wpSumSq = 0;
-                if (Array.isArray(Wp)) {
-                  for (let k = 0; k < Wp.length; k++) {
-                    const row = Wp[k];
-                    if (row && row.length) {
-                      for (let i = 0; i < row.length; i++) {
-                        const v = Number(row[i] ?? 0);
-                        wpSumSq += v * v;
-                      }
-                    }
-                  }
-                }
-
-                const wpNorm = Math.sqrt(wpSumSq);
-                const b0 = Number(bp?.[0] ?? 0);
-                const b1 = Number(bp?.[1] ?? 0);
-                const bDiff = b1 - b0;
-
-                logDebug(`[HEAD-DIAG] WpNorm=${wpNorm.toFixed(6)} bp0=${b0.toFixed(6)} bp1=${b1.toFixed(6)} bpDiff=${bDiff.toFixed(6)}`);
-              }
-
-
-              // Observation sanity
-              {
-                  const os = /** @type {any} */ (this.policy.debug.obsStats || {});
-                  const cnt = Number(os.count ?? 0);
-                  const avg2 = (s) => (cnt ? (s / cnt).toFixed(4) : 'NA');
-                  logDebug(`[OBS-DIAG] obsCount=${cnt} |absMeX|=${avg2(os.sumAbsMeX||0)} |absMeY|=${avg2(os.sumAbsMeY||0)} |absBallX|=${avg2(os.sumAbsBallX||0)} |absBallY|=${avg2(os.sumAbsBallY||0)} |dx|=${avg2(os.sumAbsDx||0)} |dy|=${avg2(os.sumAbsDy||0)}`);
-
-                  if (this.policy.debug.obsStats) {
-                  this.policy.debug.obsStats.count = 0;
-                  this.policy.debug.obsStats.sumAbsMeX = 0;
-                  this.policy.debug.obsStats.sumAbsMeY = 0;
-                  this.policy.debug.obsStats.sumAbsBallX = 0;
-                  this.policy.debug.obsStats.sumAbsBallY = 0;
-                  this.policy.debug.obsStats.sumAbsDx = 0;
-                  this.policy.debug.obsStats.sumAbsDy = 0;
-                  }
-              }
-
-              // Additional rolling diagnostics (action/mask/feat)  <-- 이 아래 전부 같은 블록 안
-              const as = this.policy.debug.actionStats;
-              if (as && as.n > 0) {
-                  const n = as.n;
-                  const ap1 = (as.apCounts?.[1] ?? 0);
-                  const phNear = (as.powerHitNearBall ?? 0);
-                  const phTot = Math.max(1, (as.powerHitTotal ?? ap1));
-                  logDebug(`[PPO-ACTION] n=${n} entX=${(as.entX/n).toFixed(4)} entY=${(as.entY/n).toFixed(4)} entP=${(as.entP/n).toFixed(4)} maxX=${(as.maxX/n).toFixed(4)} maxY=${(as.maxY/n).toFixed(4)} maxP=${(as.maxP/n).toFixed(4)} ap1=${ap1} phNear=${phNear}/${phTot} phGround=${(as.powerHitGround ?? 0)}/${Math.max(1, ap1)} phAir=${(as.powerHitAir ?? 0)}/${Math.max(1, ap1)} phAllowed=${(as.powerHitAllowed ?? 0)}/${Math.max(1, ap1)} ax=${JSON.stringify(as.axCounts)} ay=${JSON.stringify(as.ayCounts)} ap=${JSON.stringify(as.apCounts)}`);
-
-                  const ms = this.policy.debug.maskStats;
-                  if (ms && ms.n > 0) {
-                  const nms = Math.max(1, ms.n);
-                  logDebug(`[ACTION-MASK] n=${ms.n} groundN=${ms.groundN ?? 0} airN=${ms.airN ?? 0} yNegMaskedCount=${ms.yNegMaskedCount ?? 0} yNegMaskedMassAvg=${((ms.yNegMaskedMass ?? 0)/nms).toFixed(6)} xZeroMaskedCount=${ms.xZeroMaskedCount ?? 0} xZeroMaskedMassAvg=${((ms.xZeroMaskedMass ?? 0)/nms).toFixed(6)} illegalYPrevented=${ms.illegalYSampledPrevented ?? 0} illegalXPrevented=${ms.illegalXSampledPrevented ?? 0}`);
-                  }
-              }
-
-              const fs = this.policy.debug.featStats;
-              if (fs && fs.n > 0) {
-                  const n = fs.n;
-                  const pick = (i) => {
-                  const mean = fs.sum[i] / n;
-                  const varr = Math.max(0, fs.sumsq[i] / n - mean * mean);
-                  const std = Math.sqrt(varr);
-                  return { i, min: fs.min[i], max: fs.max[i], mean, std };
-                  };
-                  const keys = [0,1,2,8,9,10,14,15,16,17,18,19];
-                  const rows = keys.filter(i => i < this.policy.featureLen).map(pick);
-                  logDebug(`[FEAT-DIAG] n=${n} ` + rows.map(r => `f${r.i}[min=${r.min.toFixed(2)},max=${r.max.toFixed(2)},mean=${r.mean.toFixed(2)},std=${r.std.toFixed(2)}]`).join(' '));
-              }
-
-              // reset rolling diagnostics per flush
-              this.policy.debug.nanFeatures = 0;
-              this.policy.debug.invalidFeatureSteps = 0;
-              this.policy.debug.forcedIdle = 0;
-              this.policy.debug.forcedIdleNoAct = 0;
-              this.policy.debug.forcedIdleLying = 0;
-              this.policy.debug.forcedIdleDiving = 0;
-              this.policy.debug.powerHitSampled = 0;
-              this.policy.debug.powerMasked = 0;
-              if (this.policy.debug.powerGate) {
-                const pg = this.policy.debug.powerGate;
-                pg.frames = 0;
-                pg.eligibleFrames = 0;
-                pg.blockedFrames = 0;
-                pg.sumPPower = 0;
-                pg.sumPPowerEligible = 0;
-                pg.expectedApplied = 0;
-                pg.sampledApplied = 0;
-                pg.blockedNoContactWindow = 0;
-              }
-              this.policy.debug.featStats = null;
-              this.policy.debug.lastUpdate = null;
-            }
-
-            const gameAny = /** @type {any} */ (this.game);
-            if (gameAny && gameAny.debugStats) {
-              const ds = gameAny.debugStats;
-              const req = ds.powerHitRequested | 0;
-              const app = ds.powerHitApplied | 0;
-              const contact = ds.powerHitContact | 0;
-              const success = ds.powerHitSuccess | 0;
-
-              logDebug(
-                `[GAME-DIAG] decisions=${ds.decisions | 0} forcedIdle=${ds.forcedIdle | 0} ` +
-                `powerHitReq=${req} powerHitApplied=${app} powerHitContact=${contact} powerHitSuccess=${success}`
-              );
-
-              // ✅ 추가: 이번 flush 구간의 "실제 엔진 발동" 수치를 저장
-              this._lastPowerHitRequested = req;
-              this._lastPowerHitApplied = app;
-
-              if (req > 0) logDebug(`[ACTION-EFFECTIVE] powerHitAppliedRate=${(app / req).toFixed(4)}`);
-              if (app > 0) logDebug(`[PH-GT] contactRate=${(contact / app).toFixed(4)} trueSuccessRate=${(success / app).toFixed(4)}`);
-              if (contact > 0) logDebug(`[PH-GT2] successGivenContact=${(success / contact).toFixed(4)}`);
-
-              // reset
-              ds.decisions = 0;
-              ds.forcedIdle = 0;
-              ds.powerHitRequested = 0;
-              ds.powerHitApplied = 0;
-              ds.powerHitContact = 0;
-              ds.powerHitSuccess = 0;
-            }
-          }
-        } else {
-          this.bufferSkipped++;
-        }
-
-        // global stats
-        this.totalEpisodes++;
-        const isWin = (res.ok && res.scoredBy === this.learningPlayer);
-        if (isWin) this.totalWins++;
-        else if (res.ok) this.totalLosses++;
-
-        // recent1000 point stats
-        if (res.ok) {
-          this._recordRecent1000(isWin);
-          await this._maybePersistRecent1000(false);
-        }
-
-        // 🔍 학습 진행 확인용 단일 로그
-        logDebug(
-        `[TRAIN] ep=${this.totalEpisodes} W=${this.totalWins} L=${this.totalLosses} ` +
-        `WR=${(this.totalWins / Math.max(1, this.totalEpisodes)).toFixed(3)} ` +
-        `last={scoredBy:${res.scoredBy}, loser:${res.loser}, frames:${res.frames}}`
-        );
-
-        // set score 업데이트
-        if (res.ok && (res.scoredBy === 1 || res.scoredBy === 2)) {
-          if (res.scoredBy === 1) this.currentSet.p1++;
-          else this.currentSet.p2++;
-        }
-
-        // 세트 종료 처리
-        if (this._isSetFinished()) {
-          const p1Won = this._didP1WinSet();
-
-          // Phase1: margin-based "current" snapshot rule
-          const margin = (this.currentSet.p1 | 0) - (this.currentSet.p2 | 0);
-          if (margin > (this.phase1BestMargin | 0)) {
-            this.phase1BestMargin = margin;
-            // save immediately so the best margin snapshot is persisted
-            await this.storage.setCheckpoint('model_state', this.policy.saveState());
-            await this._saveStats();
-            logDebug(`[P1] new bestMargin=${this.phase1BestMargin} (score ${this.currentSet.p1}-${this.currentSet.p2}) -> saved current`);
-          }
-
-          if (p1Won) this.consecutiveSetWins++;
-          else this.consecutiveSetWins = 0;
-
-          // 졸업 조건: 3세트 연속 승리 -> Phase2 준비 완료(아직 Phase2는 미구현)
-          if (this.consecutiveSetWins >= this.consecutiveSetWinsToGraduate) {
-            this.graduated = true;
-            this.mode = 'PHASE2';
-            this.running = false;
-            // flush remaining rollout buffer before finalize
-            await this._flushRollout(true);
-            await this._saveStats();
-            logDebug('[P1->P2] graduated via 3 consecutive set wins; mode set to PHASE2');
-          }
-
-          // 다음 세트로
-          this._resetSet();
-        }
-
-        // autosave: stats + model_state
-        if ((this.totalEpisodes % this.autosaveEveryEpisodes) === 0) {
-          await this._saveStats();
-          await this.storage.setCheckpoint('model_state', this.policy.saveState());
-        }
-      }
-
-      // UI 프리즈 방지
       await sleep(this.tickDelayMs > 0 ? this.tickDelayMs : 0);
     }
+
 
     // flush remaining rollout steps (PPO)
     await this._flushRollout(true);
@@ -1128,6 +717,536 @@ export class Trainer {
     await this._saveStats();
     await this.storage.setCheckpoint('model_state', this.policy.saveState());
   }
+
+  async _runOnePointWithMode(cfg) {
+  const res = await this._runner.runOnePoint();
+  this.lastResult = res;
+
+  if (!res) {
+    logDebug('[WARN]', `[${cfg.tag}] runOnePoint returned null/undefined`);
+    return null;
+  }
+
+  // 1) episode 저장
+  if (cfg.saveEpisode) {
+    if (res.episode) {
+      await this.storage.appendEpisode(res.episode);
+    } else {
+      logDebug('[WARN]', `[${cfg.tag}] missing episode; skip save/learn`, { loseReason: res.loseReason });
+    }
+  }
+
+  // 2) replay 저장
+  if (cfg.saveReplay) {
+    const replay = this._buildPointReplay(res);
+    await this.storage.appendReplay(replay);
+    await this.storage.pruneReplays(10);
+
+    const isWinPoint = (replay.ok && replay.scoredBy === this.learningPlayer);
+    if (isWinPoint) {
+      const winReplay = { ...replay, id: `win:${replay.id}`, baseId: replay.id, bucket: 'win' };
+      await this.storage.appendReplay(winReplay);
+      if (this.storage.pruneWinReplays) await this.storage.pruneWinReplays(3);
+    }
+  }
+
+  // 3) PPO 학습(rollout push + update)  <-- Eval에서는 절대 실행되면 안 됨
+  if (cfg.learn) {
+    // 여기 블록은 기존 start()의 canLearn~PPO flush~GAME-DIAG reset까지를 통째로 “그대로” 옮겨오면 됨.
+    // 단, Eval에서 ppoUpdate가 0회가 되려면 이 if(cfg.learn) 밖으로 새어나오는 호출이 없어야 함.
+    // PPO rollout collection + update
+    const canLearn =
+      res.ok === true &&
+      res.frames > 0 &&
+      res.loseReason !== 'EXCEPTION' &&
+      !!res.episode;
+
+    if (canLearn) {
+      const transitions = res.episode.transitions ?? [];
+
+      // Track how many steps we actually push for THIS point (helps diagnose “why pushed is tiny”).
+      const rolloutLenBeforePoint = this.rollout.length;
+      let pushedThisPoint = 0;
+      let okInfoThisPoint = 0;
+      
+
+      // Pull episode-runner diagnostics if present
+      const epAny = /** @type {any} */ (res.episode);
+      const d = epAny?.diag;
+      if (d && this.learnDiag) {
+        this.learnDiag.ep_framesTotal += (d.framesTotal | 0);
+        this.learnDiag.ep_framesCanActFalse += (d.framesCanActFalse | 0);
+        this.learnDiag.ep_framesDecisionSampled += (d.framesDecisionSampled | 0);
+        this.learnDiag.ep_framesLegacyAction += (d.framesLegacyAction | 0);
+        this.learnDiag.ep_stepsAdded += (d.stepsAdded | 0);
+        this.learnDiag.ep_stepsSkippedNoDecisionInfo += (d.stepsSkippedNoDecisionInfo | 0);
+        this.learnDiag.ep_stepsSkippedForcedIdle += (d.stepsSkippedForcedIdle | 0);
+      }
+
+      // Spot-check: transitions length vs episode_runner stepsAdded (helps detect builder issues)
+      if (d && typeof d.stepsAdded === 'number') {
+        const ta = transitions.length | 0;
+        const sa = d.stepsAdded | 0;
+        if (ta > 0) {
+          const ratio = sa / Math.max(1, ta);
+          if (ratio < 0.95 || ratio > 1.05) {
+            logDebug(`[EP-MISMATCH] ep=${this.totalEpisodes} transitions=${ta} stepsAdded=${sa} ratio=${ratio.toFixed(4)}`);
+          }
+        }
+      }
+      this.learnDiag.episodes++;
+      this.learnDiag.transitions += transitions.length;
+        let skippedNoInfo = 0;
+        let skippedBadFields = 0;
+      for (const tr of transitions) {
+        const info = tr.info; // keep null/undefined as-is
+        if (!info) { skippedNoInfo++; continue; }
+        if (typeof info.logp !== 'number' || typeof info.value !== 'number') { skippedBadFields++; continue; }
+
+        okInfoThisPoint++;
+
+        const me = tr.obs?.me ?? {};
+          const st = Number(me.state ?? 0);
+          const isLying = !!me.isLying || st === 4;
+          const isDiving = !!me.isDiving || st === 3;
+          const isAir = (me.isAir !== undefined) ? !!me.isAir : (st === 1 || st === 2);
+          const canAct = (me.canAct !== undefined) ? !!me.canAct : (!isLying && !isDiving);
+          if (canAct) this.learnDiag.stateLearn.canAct++;
+          if (isAir) this.learnDiag.stateLearn.air++;
+          if (!isAir && canAct) this.learnDiag.stateLearn.ground++;
+          if (isDiving) this.learnDiag.stateLearn.diving++;
+          if (isLying) this.learnDiag.stateLearn.lying++;
+          this.rollout.push({
+            obs: tr.obs ?? null,
+          action: tr.action ?? null,
+          reward: Number(tr.reward ?? 0),
+          done: !!tr.done,
+          oldLogp: Number(info.logp ?? 0),
+          value: Number(info.value ?? 0),
+          playerIndex: this.learningPlayer,
+        });
+        pushedThisPoint++;
+        this.learnDiag.pushedSteps++;
+      }
+
+      const rolloutLenAfterPoint = this.rollout.length;
+      // Always log when pushed is unexpectedly small compared to info-ok transitions.
+      // This should only happen if transitions themselves are tiny or filtered upstream.
+      if (okInfoThisPoint > 0 && pushedThisPoint <= 5) {
+        logDebug(
+          `[POINT-PUSH] ep=${this.totalEpisodes} trans=${transitions.length} okInfo=${okInfoThisPoint} pushed=${pushedThisPoint} skippedNoInfo=${skippedNoInfo} skippedBadFields=${skippedBadFields} rolloutLen=${rolloutLenBeforePoint}->${rolloutLenAfterPoint}`
+        );
+      }
+
+      // accumulate skip counters
+      this.learnDiag.skippedNoInfo += skippedNoInfo;
+      this.learnDiag.skippedBadFields += skippedBadFields;
+
+      // update when enough rollout steps are collected
+      while (this.rollout.length >= this.rolloutSteps) {
+        const rolloutLenBeforeBatch = this.rollout.length;
+        const batch = this.rollout.splice(0, this.rolloutSteps);
+        this.learnDiag.consumedSteps += batch.length;
+        const rolloutLenAfterBatch = this.rollout.length;
+        logDebug(`[BATCH-CONSUME] batch=${batch.length} rolloutLen=${rolloutLenBeforeBatch}->${rolloutLenAfterBatch} pushedStepsSinceFlush=${this.learnDiag.pushedSteps} consumedStepsSinceFlush=${this.learnDiag.consumedSteps}`);
+
+        // compute GAE + returns
+        this.policy.computeGAE(batch);
+
+        const stats = this.policy.ppoUpdate(batch, {
+          epochs: this.ppoEpochs,
+          minibatch: this.ppoMinibatch,
+        });
+
+        if (!stats) { logDebug('[PPO] flush stats missing'); continue; }
+        const akl = (typeof stats.approxKl === 'number') ? stats.approxKl.toFixed(6) : 'NA';
+        logDebug(`[PPO] flush steps=${stats.steps ?? 'NA'} updates=${stats.updates ?? 'NA'} approxKL=${akl}`);
+
+
+        if (stats && typeof stats.policyLoss === 'number') {
+        logDebug(`[PPO-LOSS] policyLoss=${stats.policyLoss.toFixed(6)} valueLoss=${stats.valueLoss.toFixed(6)} clipFrac=${stats.clipFrac.toFixed(4)} gradNorm=${stats.gradNorm.toFixed(6)} wNorm=${stats.wNorm.toFixed(3)}`);
+        if (stats.vrCorr !== undefined) logDebug(`[VALUE-DIAG] corr=${stats.vrCorr.toFixed(4)}`);
+        if (stats.advPos !== undefined) logDebug(`[ADV-SIGN] pos=${stats.advPos} neg=${stats.advNeg} zero=${stats.advZero}`);
+        logDebug(`[PPO-ADV] advMean=${stats.advMean.toFixed(6)} advStd=${stats.advStd.toFixed(6)} retMean=${stats.retMean.toFixed(6)} retStd=${stats.retStd.toFixed(6)} rewMean=${stats.rewMean.toFixed(6)} rewStd=${stats.rewStd.toFixed(6)}`);
+        }
+
+        // ---- learnDiag logging + reset (한 번만) ----
+        if (this.learnDiag) {
+        if (this.learnDiag.stateLearn) {
+            const s = this.learnDiag.stateLearn;
+            logDebug(`[STATE-LEARN] canAct=${s.canAct} ground=${s.ground} air=${s.air} diving=${s.diving} lying=${s.lying}`);
+            this.learnDiag.stateLearn = { canAct:0, air:0, ground:0, diving:0, lying:0 };
+        }
+
+        const transitionsN = Math.max(1, this.learnDiag.transitions);
+        const rolloutLeft = this.rollout.length;
+        const badRate = this.learnDiag.skippedBadFields / transitionsN;
+        const noInfoRate = this.learnDiag.skippedNoInfo / transitionsN;
+
+        logDebug(`[LEARN-DIAG] episodes=${this.learnDiag.episodes} transitions=${this.learnDiag.transitions} rolloutLen=${rolloutLeft} pushedSteps=${this.learnDiag.pushedSteps} consumedSteps=${this.learnDiag.consumedSteps} skippedNoInfo=${this.learnDiag.skippedNoInfo} skippedBadFields=${this.learnDiag.skippedBadFields}`);
+        logDebug(`[LEARN-RATE] rolloutLenPerTransition=${(rolloutLeft / transitionsN).toFixed(4)} noInfoRate=${noInfoRate.toFixed(4)} badFieldRate=${badRate.toFixed(4)}`);
+
+        if (this.learnDiag.pushedSteps > 0) {
+            logDebug(`[LEARN-FLOW] pushedSteps=${this.learnDiag.pushedSteps} consumedSteps=${this.learnDiag.consumedSteps} leftoverRollout=${rolloutLeft} consumedRate=${(this.learnDiag.consumedSteps/this.learnDiag.pushedSteps).toFixed(4)}`);
+        }
+
+        const epFramesTotal = Math.max(1, this.learnDiag.ep_framesTotal);
+        logDebug(`[EP-DIAG] framesTotal=${this.learnDiag.ep_framesTotal} canActFalse=${this.learnDiag.ep_framesCanActFalse} decisionSampled=${this.learnDiag.ep_framesDecisionSampled} legacyAction=${this.learnDiag.ep_framesLegacyAction}`);
+        logDebug(`[EP-DIAG] stepsAdded=${this.learnDiag.ep_stepsAdded} skippedNoDecisionInfo=${this.learnDiag.ep_stepsSkippedNoDecisionInfo} skippedForcedIdle=${this.learnDiag.ep_stepsSkippedForcedIdle}`);
+        logDebug(`[EP-RATE] canActFalseRate=${(this.learnDiag.ep_framesCanActFalse/epFramesTotal).toFixed(4)} decisionSampledRate=${(this.learnDiag.ep_framesDecisionSampled/epFramesTotal).toFixed(4)} stepsAddedPerFrame=${(this.learnDiag.ep_stepsAdded/epFramesTotal).toFixed(6)}`);
+
+        // reset per flush (딱 1번만)
+        this.learnDiag.episodes = 0;
+        this.learnDiag.transitions = 0;
+        this.learnDiag.pushedSteps = 0;
+        this.learnDiag.consumedSteps = 0;
+        this.learnDiag.skippedNoInfo = 0;
+        this.learnDiag.skippedBadFields = 0;
+
+        this.learnDiag.ep_framesTotal = 0;
+        this.learnDiag.ep_framesCanActFalse = 0;
+        this.learnDiag.ep_framesDecisionSampled = 0;
+        this.learnDiag.ep_framesLegacyAction = 0;
+        this.learnDiag.ep_stepsAdded = 0;
+        this.learnDiag.ep_stepsSkippedNoDecisionInfo = 0;
+        this.learnDiag.ep_stepsSkippedForcedIdle = 0;
+        }
+
+        // Diagnostics
+        if (this.policy && this.policy.debug) {
+          const pg = /** @type {any} */ (this.policy.debug.powerGate || {});
+          const frames = Number(pg.frames ?? 0);
+          const eligible = Number(pg.eligibleFrames ?? 0);
+          const blocked = Number(pg.blockedFrames ?? (frames - eligible));
+          const sumPPower = Number(pg.sumPPower ?? 0);
+          const sumPPowerEl = Number(pg.sumPPowerEligible ?? 0);
+          const expApplied = Number(pg.expectedApplied ?? 0);
+          const sampledApplied = Number(pg.sampledApplied ?? 0);
+
+          const div = (a, b, digits=4) => (b > 0 ? (a / b).toFixed(digits) : 'NA');
+          const mean = (s, n, digits=4) => (n > 0 ? (s / n).toFixed(digits) : 'NA');
+
+          logDebug(
+            `[PPO-DIAG] nanFeatures=${this.policy.debug.nanFeatures} invalidSteps=${this.policy.debug.invalidFeatureSteps} ` +
+            `forcedIdle=${this.policy.debug.forcedIdle} (noAct=${this.policy.debug.forcedIdleNoAct}, lying=${this.policy.debug.forcedIdleLying}, diving=${this.policy.debug.forcedIdleDiving}) ` +
+            `powerHitReq=${this.policy.debug.powerHitSampled} powerMasked=${this.policy.debug.powerMasked} ` +
+            `gateFrames=${frames} eligible=${eligible} blocked=${blocked} eligibleRate=${div(eligible, frames)} ` +
+            `pPowerMean=${mean(sumPPower, frames)} pPowerMeanEligible=${mean(sumPPowerEl, eligible)} ` +
+            `expApplied=${expApplied.toFixed(2)} expAppliedRateEligible=${div(expApplied, eligible)} ` +
+            `sampledApplied=${sampledApplied} sampledAppliedRate=${div(sampledApplied, frames)}`
+          );
+
+          // --- P0-3 HEAD-DIAG (power head learning check) ---
+          {
+            const pol = /** @type {any} */ (this.policy);
+            const Wp = pol.Wp;
+            const bp = pol.bp;
+
+            let wpSumSq = 0;
+            if (Array.isArray(Wp)) {
+              for (let k = 0; k < Wp.length; k++) {
+                const row = Wp[k];
+                if (row && row.length) {
+                  for (let i = 0; i < row.length; i++) {
+                    const v = Number(row[i] ?? 0);
+                    wpSumSq += v * v;
+                  }
+                }
+              }
+            }
+
+            const wpNorm = Math.sqrt(wpSumSq);
+            const b0 = Number(bp?.[0] ?? 0);
+            const b1 = Number(bp?.[1] ?? 0);
+            const bDiff = b1 - b0;
+
+            logDebug(`[HEAD-DIAG] WpNorm=${wpNorm.toFixed(6)} bp0=${b0.toFixed(6)} bp1=${b1.toFixed(6)} bpDiff=${bDiff.toFixed(6)}`);
+          }
+
+
+          // Observation sanity
+          {
+              const os = /** @type {any} */ (this.policy.debug.obsStats || {});
+              const cnt = Number(os.count ?? 0);
+              const avg2 = (s) => (cnt ? (s / cnt).toFixed(4) : 'NA');
+              logDebug(`[OBS-DIAG] obsCount=${cnt} |absMeX|=${avg2(os.sumAbsMeX||0)} |absMeY|=${avg2(os.sumAbsMeY||0)} |absBallX|=${avg2(os.sumAbsBallX||0)} |absBallY|=${avg2(os.sumAbsBallY||0)} |dx|=${avg2(os.sumAbsDx||0)} |dy|=${avg2(os.sumAbsDy||0)}`);
+
+              if (this.policy.debug.obsStats) {
+              this.policy.debug.obsStats.count = 0;
+              this.policy.debug.obsStats.sumAbsMeX = 0;
+              this.policy.debug.obsStats.sumAbsMeY = 0;
+              this.policy.debug.obsStats.sumAbsBallX = 0;
+              this.policy.debug.obsStats.sumAbsBallY = 0;
+              this.policy.debug.obsStats.sumAbsDx = 0;
+              this.policy.debug.obsStats.sumAbsDy = 0;
+              }
+          }
+
+          // Additional rolling diagnostics (action/mask/feat)  <-- 이 아래 전부 같은 블록 안
+          const as = this.policy.debug.actionStats;
+          if (as && as.n > 0) {
+              const n = as.n;
+              const ap1 = (as.apCounts?.[1] ?? 0);
+              const phNear = (as.powerHitNearBall ?? 0);
+              const phTot = Math.max(1, (as.powerHitTotal ?? ap1));
+              logDebug(`[PPO-ACTION] n=${n} entX=${(as.entX/n).toFixed(4)} entY=${(as.entY/n).toFixed(4)} entP=${(as.entP/n).toFixed(4)} maxX=${(as.maxX/n).toFixed(4)} maxY=${(as.maxY/n).toFixed(4)} maxP=${(as.maxP/n).toFixed(4)} ap1=${ap1} phNear=${phNear}/${phTot} phGround=${(as.powerHitGround ?? 0)}/${Math.max(1, ap1)} phAir=${(as.powerHitAir ?? 0)}/${Math.max(1, ap1)} phAllowed=${(as.powerHitAllowed ?? 0)}/${Math.max(1, ap1)} ax=${JSON.stringify(as.axCounts)} ay=${JSON.stringify(as.ayCounts)} ap=${JSON.stringify(as.apCounts)}`);
+
+              const ms = this.policy.debug.maskStats;
+              if (ms && ms.n > 0) {
+              const nms = Math.max(1, ms.n);
+              logDebug(`[ACTION-MASK] n=${ms.n} groundN=${ms.groundN ?? 0} airN=${ms.airN ?? 0} yNegMaskedCount=${ms.yNegMaskedCount ?? 0} yNegMaskedMassAvg=${((ms.yNegMaskedMass ?? 0)/nms).toFixed(6)} xZeroMaskedCount=${ms.xZeroMaskedCount ?? 0} xZeroMaskedMassAvg=${((ms.xZeroMaskedMass ?? 0)/nms).toFixed(6)} illegalYPrevented=${ms.illegalYSampledPrevented ?? 0} illegalXPrevented=${ms.illegalXSampledPrevented ?? 0}`);
+              }
+          }
+
+          const fs = this.policy.debug.featStats;
+          if (fs && fs.n > 0) {
+              const n = fs.n;
+              const pick = (i) => {
+              const mean = fs.sum[i] / n;
+              const varr = Math.max(0, fs.sumsq[i] / n - mean * mean);
+              const std = Math.sqrt(varr);
+              return { i, min: fs.min[i], max: fs.max[i], mean, std };
+              };
+              const keys = [0,1,2,8,9,10,14,15,16,17,18,19];
+              const rows = keys.filter(i => i < this.policy.featureLen).map(pick);
+              logDebug(`[FEAT-DIAG] n=${n} ` + rows.map(r => `f${r.i}[min=${r.min.toFixed(2)},max=${r.max.toFixed(2)},mean=${r.mean.toFixed(2)},std=${r.std.toFixed(2)}]`).join(' '));
+          }
+
+          // reset rolling diagnostics per flush
+          this.policy.debug.nanFeatures = 0;
+          this.policy.debug.invalidFeatureSteps = 0;
+          this.policy.debug.forcedIdle = 0;
+          this.policy.debug.forcedIdleNoAct = 0;
+          this.policy.debug.forcedIdleLying = 0;
+          this.policy.debug.forcedIdleDiving = 0;
+          this.policy.debug.powerHitSampled = 0;
+          this.policy.debug.powerMasked = 0;
+          if (this.policy.debug.powerGate) {
+            const pg = this.policy.debug.powerGate;
+            pg.frames = 0;
+            pg.eligibleFrames = 0;
+            pg.blockedFrames = 0;
+            pg.sumPPower = 0;
+            pg.sumPPowerEligible = 0;
+            pg.expectedApplied = 0;
+            pg.sampledApplied = 0;
+            pg.blockedNoContactWindow = 0;
+          }
+          this.policy.debug.featStats = null;
+          this.policy.debug.lastUpdate = null;
+        }
+
+        const gameAny = /** @type {any} */ (this.game);
+        if (gameAny && gameAny.debugStats) {
+          const ds = gameAny.debugStats;
+          const req = ds.powerHitRequested | 0;
+          const app = ds.powerHitApplied | 0;
+          const contact = ds.powerHitContact | 0;
+          const success = ds.powerHitSuccess | 0;
+
+          logDebug(
+            `[GAME-DIAG] decisions=${ds.decisions | 0} forcedIdle=${ds.forcedIdle | 0} ` +
+            `powerHitReq=${req} powerHitApplied=${app} powerHitContact=${contact} powerHitSuccess=${success}`
+          );
+
+          // ✅ 추가: 이번 flush 구간의 "실제 엔진 발동" 수치를 저장
+          this._lastPowerHitRequested = req;
+          this._lastPowerHitApplied = app;
+
+          if (req > 0) logDebug(`[ACTION-EFFECTIVE] powerHitAppliedRate=${(app / req).toFixed(4)}`);
+          if (app > 0) logDebug(`[PH-GT] contactRate=${(contact / app).toFixed(4)} trueSuccessRate=${(success / app).toFixed(4)}`);
+          if (contact > 0) logDebug(`[PH-GT2] successGivenContact=${(success / contact).toFixed(4)}`);
+
+          // reset
+          ds.decisions = 0;
+          ds.forcedIdle = 0;
+          ds.powerHitRequested = 0;
+          ds.powerHitApplied = 0;
+          ds.powerHitContact = 0;
+          ds.powerHitSuccess = 0;
+        }
+      }
+    } else {
+      this.bufferSkipped++;
+    }
+  }
+
+  // 4) global stats / recent1000
+  if (cfg.updateGlobalStats) {
+    this.totalEpisodes++;
+    const isWin = (res.ok && res.scoredBy === this.learningPlayer);
+    if (isWin) this.totalWins++;
+    else if (res.ok) this.totalLosses++;
+
+    if (cfg.updateRecent1000 && res.ok) {
+      this._recordRecent1000(isWin);
+      await this._maybePersistRecent1000(false);
+    }
+
+    logDebug(
+      `[TRAIN] ep=${this.totalEpisodes} W=${this.totalWins} L=${this.totalLosses} ` +
+      `WR=${(this.totalWins / Math.max(1, this.totalEpisodes)).toFixed(3)} ` +
+      `last={scoredBy:${res.scoredBy}, loser:${res.loser}, frames:${res.frames}}`
+    );
+  }
+
+  // 5) set 로직 + autosave (Eval에서는 OFF 권장/필수)
+  if (cfg.updateSetAndAutosave) {
+    // 여기 블록은 기존 start()의
+    // - set score 업데이트
+    // - 세트 종료 처리(P1 bestMargin 저장/졸업/flush/리셋)
+    // - autosave
+    // 를 그대로 옮기면 됨.
+    // set score 업데이트
+    if (res.ok && (res.scoredBy === 1 || res.scoredBy === 2)) {
+      if (res.scoredBy === 1) this.currentSet.p1++;
+      else this.currentSet.p2++;
+    }
+
+    // 세트 종료 처리
+    if (this._isSetFinished()) {
+      const p1Won = this._didP1WinSet();
+
+      // Phase1: margin-based "current" snapshot rule
+      const margin = (this.currentSet.p1 | 0) - (this.currentSet.p2 | 0);
+      if (margin > (this.phase1BestMargin | 0)) {
+        this.phase1BestMargin = margin;
+        // save immediately so the best margin snapshot is persisted
+        await this.storage.setCheckpoint('model_state', this.policy.saveState());
+        await this._saveStats();
+        logDebug(`[P1] new bestMargin=${this.phase1BestMargin} (score ${this.currentSet.p1}-${this.currentSet.p2}) -> saved current`);
+      }
+
+      if (p1Won) this.consecutiveSetWins++;
+      else this.consecutiveSetWins = 0;
+
+      // 졸업 조건: 3세트 연속 승리 -> Phase2 준비 완료(아직 Phase2는 미구현)
+      if (this.consecutiveSetWins >= this.consecutiveSetWinsToGraduate) {
+        this.graduated = true;
+        this.mode = 'PHASE2';
+        this.running = false;
+        // flush remaining rollout buffer before finalize
+        await this._flushRollout(true);
+        await this._saveStats();
+        logDebug('[P1->P2] graduated via 3 consecutive set wins; mode set to PHASE2');
+      }
+
+      // 다음 세트로
+      this._resetSet();
+    }
+
+    // autosave: stats + model_state
+    if ((this.totalEpisodes % this.autosaveEveryEpisodes) === 0) {
+      await this._saveStats();
+      await this.storage.setCheckpoint('model_state', this.policy.saveState());
+    }
+  }
+
+  return res;
+}
+
+
+  _setAgentMode(mode) {
+  // prev 저장해두면, start() 밖에서 eval 돌릴 때도 안전
+  const prev = { det: !!this.agent.deterministic, eps: Number(this.agent.epsilon ?? 0) };
+
+  if (mode === 'eval') {
+    this.agent.deterministic = true;
+    this.agent.epsilon = 0;
+  } else {
+    this.agent.deterministic = false;
+    this.agent.epsilon = 0.02;
+  }
+
+  return prev;
+}
+
+_restoreAgentMode(prev) {
+  if (!prev) return;
+  this.agent.deterministic = !!prev.det;
+  this.agent.epsilon = Number(prev.eps ?? 0);
+}
+
+async runPoints(n, mode) {
+  const points = Math.max(0, n | 0);
+
+  // ---- 모드 토글 + 시작 로그(체크포인트) ----
+  const prev = this._setAgentMode(mode);
+
+  // ---- 학습 OFF 검증용 스냅샷 ----
+  const ppoFlushBefore = this.ppoFlushCount || 0;
+  const ppoStepsBefore = this.ppoFlushSteps || 0;
+  const batchFlushBefore = this.flushCount || 0;
+  const rolloutBefore = (this.rollout?.length ?? 0);
+
+  if (mode === 'eval') {
+    logDebug(`[EVAL] begin points=${points} learningOff=true eps=0 det=true ` +
+            `ppoFlush=${ppoFlushBefore} batchFlush=${batchFlushBefore} rollout=${rolloutBefore}`);
+  } else {
+    logDebug(`[TRAIN] begin points=${points} learningOn=true eps=${this.agent.epsilon} det=${this.agent.deterministic}`);
+  }
+
+  let wins = 0;
+  let losses = 0;
+
+  // Eval은 “절대 학습/저장/세트/autosave”가 돌면 안 됨
+  const cfg = (mode === 'eval')
+    ? {
+        tag: 'EVAL',
+        learn: false,
+        saveEpisode: false,
+        saveReplay: false,
+        updateGlobalStats: false,
+        updateRecent1000: false,
+        updateSetAndAutosave: false,
+      }
+    : {
+        tag: 'TRAIN',
+        learn: true,
+        saveEpisode: true,
+        saveReplay: true,
+        updateGlobalStats: true,
+        updateRecent1000: true,
+        updateSetAndAutosave: true,
+      };
+
+  // Eval 동안 “ppo flush가 0회”인지 확인하려면 아래 카운터를 start 전에 잡아둬도 좋음
+  // const flushBefore = this.policy?.debug?.updateCount ?? 0; (없으면 생략)
+
+  for (let i = 0; i < points; i++) {
+    const res = await this._runOnePointWithMode(cfg);
+    if (!res || !res.ok) continue;
+
+    const isWin = (res.scoredBy === this.learningPlayer);
+    if (isWin) wins++;
+    else losses++;
+  }
+
+  const winrate = (wins + losses) > 0 ? (wins / (wins + losses)) : 0;
+
+  const ppoFlushAfter = this.ppoFlushCount || 0;
+  const ppoStepsAfter = this.ppoFlushSteps || 0;
+  const batchFlushAfter = this.flushCount || 0;
+  const rolloutAfter = (this.rollout?.length ?? 0);
+
+  const dPpoFlush = ppoFlushAfter - ppoFlushBefore;
+  const dPpoSteps = ppoStepsAfter - ppoStepsBefore;
+  const dBatchFlush = batchFlushAfter - batchFlushBefore;
+  const dRollout = rolloutAfter - rolloutBefore;
+
+  if (mode === 'eval') {
+    logDebug(`[EVAL] end points=${points} wins=${wins} losses=${losses} winrate=${winrate.toFixed(4)} learningOff=true eps=0 det=true ` +
+            `dPpoFlush=${dPpoFlush} dPpoSteps=${dPpoSteps} dBatchFlush=${dBatchFlush} dRollout=${dRollout}`);
+  } else {
+    logDebug(`[TRAIN] end points=${points} wins=${wins} losses=${losses} winrate=${winrate.toFixed(4)}`);
+  }
+
+  this._restoreAgentMode(prev);
+  return { points, wins, losses, winrate };
+}
+
+
+
 
 _flushBatch(allRemaining = false) {
   const n = allRemaining ? this.pointBuffer.length : this.batchPoints;
@@ -1320,9 +1439,13 @@ _buildPointReplay(res) {
         this.policy.computeGAE(batch);
 
         const stats = this.policy.ppoUpdate(batch, {
-        epochs: this.ppoEpochs,
-        minibatch: this.ppoMinibatch,
+          epochs: this.ppoEpochs,
+          minibatch: this.ppoMinibatch,
         });
+
+        // ---- PPO flush 카운터 ----
+        this.ppoFlushCount++;
+        this.ppoFlushSteps += (stats?.steps ?? batch.length);
 
         // ---- PPO logs ----
         logDebug(`[PPO] flush steps=${stats.steps} updates=${stats.updates} approxKL=${stats.approxKl.toFixed(6)}`);
