@@ -107,7 +107,18 @@ function clip(x, lo, hi) {
   return Math.max(lo, Math.min(hi, x));
 }
 
-function powerHitGate(obs, playerIndex) {
+function powerHitGate(obs, playerIndex, gateParams) {
+  // ✅ genome 없을 때도 기존과 동일하게 동작하도록 기본값
+  const g = gateParams ?? {
+    air_dx_max: 0.30,
+    air_dy_max: 0.50,
+    air_tLand_max: 0.55,
+    ground_tLand_max: 0.70,
+    ground_dLand_min: 0.20,
+    ground_dLand_max: 0.90,
+    ballOnMySide_margin: 0.05,
+  };
+
   const me = obs?.me ?? {};
   const ball = obs?.ball ?? {};
 
@@ -133,31 +144,28 @@ function powerHitGate(obs, playerIndex) {
 
   const tLand = Number(ball.timeToLand ?? 1);
 
-  // landingX는 우리가 추가했을 수도 있고, 없으면 expectedX로 대체
   const landingX = Number(ball.landingX ?? ball.expectedX ?? 0);
   const dLand = Math.abs(landingX - mx);
 
-  // 내 코트쪽 판정(정규화 좌표 기준: 중앙이 0)
-  // 약간의 여유(±0.05)로 중앙선 튕김/판정 흔들림 흡수
+  // ✅ 중앙선 여유(margin)를 유전자에서
   const isP2 = (me.isP2 !== undefined) ? !!me.isP2 : (playerIndex === 2);
-  const ballOnMySide = isP2 ? (bx >= -0.05) : (bx <= 0.05);
+  const m = Number(g.ballOnMySide_margin ?? 0.05);
+  const ballOnMySide = isP2 ? (bx >= -m) : (bx <= m);
 
-  // 1) 공중 파워샷(스파이크/강타): 공이 충분히 근접 + 착지 임박
+  // ✅ air gate 임계값을 유전자에서
   const airOK =
     isAir &&
-    (dx <= 0.30) &&
-    (dy <= 0.50) &&
-    (tLand <= 0.55);
+    (dx <= Number(g.air_dx_max ?? 0.30)) &&
+    (dy <= Number(g.air_dy_max ?? 0.50)) &&
+    (tLand <= Number(g.air_tLand_max ?? 0.55));
 
-  // 2) 지상 다이빙: 공이 내 코트에 떨어질 예정 + 다이빙 의미가 있는 거리
-  // - 너무 가까우면 그냥 걸어가면 됨(불필요 파워히트)
-  // - 너무 멀면 어차피 못 닿음(무의미 파워히트)
+  // ✅ ground gate 임계값을 유전자에서
   const groundOK =
     (!isAir) &&
     ballOnMySide &&
-    (tLand <= 0.70) &&
-    (dLand >= 0.20) &&
-    (dLand <= 0.90);
+    (tLand <= Number(g.ground_tLand_max ?? 0.70)) &&
+    (dLand >= Number(g.ground_dLand_min ?? 0.20)) &&
+    (dLand <= Number(g.ground_dLand_max ?? 0.90));
 
   const allow =
     canAct &&
@@ -165,21 +173,9 @@ function powerHitGate(obs, playerIndex) {
     !isDiving &&
     (airOK || groundOK);
 
-  return {
-    allow,
-    airOK,
-    groundOK,
-    canAct,
-    isLying,
-    isDiving,
-    isAir,
-    dx,
-    dy,
-    tLand,
-    dLand,
-    ballOnMySide,
-  };
+  return { allow, airOK, groundOK, canAct, isLying, isDiving, isAir, dx, dy, tLand, dLand, ballOnMySide };
 }
+
 
 export class PpoPolicyV1 {
   /**
@@ -196,12 +192,26 @@ export class PpoPolicyV1 {
    *   entCoef?: number,
    *   gamma?: number,
    *   gaeLambda?: number,
+   *   genome?: { powerHitGate?: any }, // ✅ 추가
    * }} opts
    */
   constructor(opts = {}) {
     this.kind = 'ppo_policy_v1';
     // buildFeatures가 0..23까지 쓰므로 최소 24는 보장해야 함
     this.featureLen = Math.max(24, (opts.featureLen ?? 24) | 0);
+
+    // ✅ 주입 지점에서 들어온 genome 저장 (없으면 기본값)
+    this.genome = opts.genome ?? {
+      powerHitGate: {
+        air_dx_max: 0.30,
+        air_dy_max: 0.50,
+        air_tLand_max: 0.55,
+        ground_tLand_max: 0.70,
+        ground_dLand_min: 0.20,
+        ground_dLand_max: 0.90,
+        ballOnMySide_margin: 0.05,
+      },
+    };
 
     // debug/diagnostics counters (for training stability)
     this.debug = {
@@ -726,7 +736,7 @@ act(obs, playerIndex, opts = {}) {
 
   // ✅ Power-hit gate 제거(소프트 억제/근접/TTL gate 전부 제거)
   // ✅ 하드 금지 조건은 오직 lying/diving
-  const gate = powerHitGate(obs, playerIndex);
+  const gate = powerHitGate(obs, playerIndex, this.genome?.powerHitGate);
   const allowPowerHit = gate.allow;
 
 
@@ -942,7 +952,7 @@ logpValue(obs, playerIndex, action) {
   // ✅ act()와 동일한 규칙:
   // - powerHit 하드 금지는 오직 lying/diving
   // - 지상/공중, 근접/TTL 조건으로는 막지 않음
-  const gate = powerHitGate(obs, playerIndex);
+  const gate = powerHitGate(obs, playerIndex, this.genome?.powerHitGate);
   const allowPowerHit = gate.allow;
 
 
