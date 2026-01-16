@@ -190,6 +190,10 @@ export class Trainer {
     // ---- PBT(P1) ----
     this.pbtEnabled = (opts.pbtEnabled !== undefined) ? !!opts.pbtEnabled : true;
     this.pbtCycle = 0;
+
+    // ✅ BEST 초기값은 0으로 (avg=0일 때 SAVE 방지)
+    this.pbtBestScore = 0.0;
+
     this.pbtBestScore = -1; // -1이면 첫 eval에서 바로 SAVE 될 수 있음
     this.pbtBestGenome = null;
     this.pbtCurrentGenome = null;
@@ -277,7 +281,13 @@ export class Trainer {
     // ---- PBT checkpoints (best/current genome + best score + best weights) ----
     // NOTE: BEST 롤백은 "가중치(model_state) + genome"만 되돌린다.
     const bestScore = await this.storage.getCheckpoint('pbt_best_score');
-    if (typeof bestScore === 'number') this.pbtBestScore = bestScore;
+    if (typeof bestScore === 'number') {
+      // ✅ 과거 -1 같은 값이 남아있으면 0으로 정규화
+      this.pbtBestScore = Math.max(0, bestScore);
+      if (bestScore < 0) {
+        await this.storage.setCheckpoint('pbt_best_score', this.pbtBestScore);
+      }
+    }
 
     const bestGenome = await this.storage.getCheckpoint('pbt_best_genome');
     if (bestGenome && typeof bestGenome === 'object') this.pbtBestGenome = bestGenome;
@@ -905,7 +915,20 @@ export class Trainer {
       const ppoFlushBeforeEval = this.ppoFlushCount || 0;
       const ppoStepsBeforeEval = this.ppoFlushSteps || 0;
 
-      await this._flushRollout(true);
+      // ✅ force-flush 정책:
+      // - rollout이 충분하면(>=minRolloutToUpdate) 업데이트해서 최신 가중치로 만든다
+      // - 부족하면(<minRolloutToUpdate) 평가 일관성을 위해 rollout을 DROP(업데이트 없이 비움)
+      let flushAction = 'NONE';
+      let dropped = 0;
+
+      if (rolloutBeforeEval >= this.minRolloutToUpdate) {
+        flushAction = 'UPDATE';
+        await this._flushRollout(true);
+      } else if (rolloutBeforeEval > 0) {
+        flushAction = 'DROP';
+        dropped = rolloutBeforeEval;
+        this.rollout.length = 0;
+      }
 
       const ppoFlushAfterEval = this.ppoFlushCount || 0;
       const ppoStepsAfterEval = this.ppoFlushSteps || 0;
@@ -914,7 +937,8 @@ export class Trainer {
 
       logDebug(
         `[PBT-FLUSH] cycle=${this.pbtCycle} afterTrain ` +
-        `rolloutBefore=${rolloutBeforeEval} dPpoFlush=${dFlush} dPpoSteps=${dSteps} sig=${this._policySig()}`
+        `rolloutBefore=${rolloutBeforeEval} action=${flushAction} dropped=${dropped} ` +
+        `dPpoFlush=${dFlush} dPpoSteps=${dSteps} sig=${this._policySig()}`
       );
 
       // 2) eval 30 x3 (learning OFF)
