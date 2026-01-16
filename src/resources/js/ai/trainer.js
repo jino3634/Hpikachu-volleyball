@@ -919,6 +919,34 @@ export class Trainer {
                 `sampledApplied=${sampledApplied} sampledAppliedRate=${div(sampledApplied, frames)}`
               );
 
+              // --- P0-3 HEAD-DIAG (power head learning check) ---
+              {
+                const pol = /** @type {any} */ (this.policy);
+                const Wp = pol.Wp;
+                const bp = pol.bp;
+
+                let wpSumSq = 0;
+                if (Array.isArray(Wp)) {
+                  for (let k = 0; k < Wp.length; k++) {
+                    const row = Wp[k];
+                    if (row && row.length) {
+                      for (let i = 0; i < row.length; i++) {
+                        const v = Number(row[i] ?? 0);
+                        wpSumSq += v * v;
+                      }
+                    }
+                  }
+                }
+
+                const wpNorm = Math.sqrt(wpSumSq);
+                const b0 = Number(bp?.[0] ?? 0);
+                const b1 = Number(bp?.[1] ?? 0);
+                const bDiff = b1 - b0;
+
+                logDebug(`[HEAD-DIAG] WpNorm=${wpNorm.toFixed(6)} bp0=${b0.toFixed(6)} bp1=${b1.toFixed(6)} bpDiff=${bDiff.toFixed(6)}`);
+              }
+
+
               // Observation sanity
               {
                   const os = /** @type {any} */ (this.policy.debug.obsStats || {});
@@ -1391,25 +1419,6 @@ _buildPointReplay(res) {
         dbg.powerHitSampled = 0;
         dbg.powerMasked = 0;
 
-        // reset powerGate counters (있을 때만)
-        if (dbg.powerGate) {
-          dbg.powerGate.requested = 0;
-          dbg.powerGate.allowed = 0;
-          dbg.powerGate.blockedNotAir = 0;
-          dbg.powerGate.blockedDX = 0;
-          dbg.powerGate.blockedDY = 0;
-          dbg.powerGate.blockedTTL = 0;
-
-          // ✅ ground 원인분해 카운터 reset
-          dbg.powerGate.blockedBallSide = 0;
-          dbg.powerGate.blockedGroundTTL = 0;
-          dbg.powerGate.blockedDLandLow = 0;
-          dbg.powerGate.blockedDLandHigh = 0;
-
-          dbg.powerGate.sumDX_req = 0; dbg.powerGate.sumDY_req = 0; dbg.powerGate.sumTTL_req = 0; dbg.powerGate.count_req = 0;
-          dbg.powerGate.sumDX_allow = 0; dbg.powerGate.sumDY_allow = 0; dbg.powerGate.sumTTL_allow = 0; dbg.powerGate.count_allow = 0;
-          dbg.powerGate.sumDX_block = 0; dbg.powerGate.sumDY_block = 0; dbg.powerGate.sumTTL_block = 0; dbg.powerGate.count_block = 0;
-        }
 
         // reset actionStats (있을 때만)
         if (dbg.actionStats) {
