@@ -555,32 +555,45 @@ export class PikachuVolleyball {
     );
 
     // ✅ P0-2: powerHit "진짜 성공" ground truth 계측 (충돌 + isPowerHit)
+    // 정합 규칙: applied 1회당 contact/success는 최대 1회만 카운트
     {
       const gameAny = /** @type {any} */ (this);
       const ds = gameAny.debugStats;
       if (ds) {
-        // TTL 감소는 “현재 프레임 판정 후”에 줄이는 게 직관적
         const ttl1 = ds._phTTL1 | 0;
         const ttl2 = ds._phTTL2 | 0;
 
         const c1 = !!this.physics.player1.isCollisionWithBallHappened;
         const c2 = !!this.physics.player2.isCollisionWithBallHappened;
 
-        // physics.js에서 ball.isPowerHit는 "충돌 프레임 + playerState===2"일 때만 true
+        // ball.isPowerHit는 "그 충돌 프레임에서 playerState===2"일 때만 true
         const isPH = !!this.physics.ball.isPowerHit;
 
-        if (ttl1 > 0 && c1) {
-          ds.powerHitContact = (ds.powerHitContact | 0) + 1;
-          if (isPH) ds.powerHitSuccess = (ds.powerHitSuccess | 0) + 1;
-        }
-        if (ttl2 > 0 && c2) {
-          ds.powerHitContact = (ds.powerHitContact | 0) + 1;
-          if (isPH) ds.powerHitSuccess = (ds.powerHitSuccess | 0) + 1;
+        // player1 window
+        if (ttl1 > 0) {
+          if (c1) {
+            ds.powerHitContact = (ds.powerHitContact | 0) + 1;
+            if (isPH) ds.powerHitSuccess = (ds.powerHitSuccess | 0) + 1;
+
+            // ✅ 한 번 카운트했으면 이 applied window 종료(중복 contact 방지)
+            ds._phTTL1 = 0;
+          } else {
+            ds._phTTL1 = ttl1 - 1;
+          }
         }
 
-        // TTL tick down
-        if (ttl1 > 0) ds._phTTL1 = ttl1 - 1;
-        if (ttl2 > 0) ds._phTTL2 = ttl2 - 1;
+        // player2 window
+        if (ttl2 > 0) {
+          if (c2) {
+            ds.powerHitContact = (ds.powerHitContact | 0) + 1;
+            if (isPH) ds.powerHitSuccess = (ds.powerHitSuccess | 0) + 1;
+
+            // ✅ 한 번 카운트했으면 이 applied window 종료(중복 contact 방지)
+            ds._phTTL2 = 0;
+          } else {
+            ds._phTTL2 = ttl2 - 1;
+          }
+        }
       }
     }
 
