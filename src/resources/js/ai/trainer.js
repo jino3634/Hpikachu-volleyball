@@ -179,7 +179,7 @@ export class Trainer {
       stateLearn: { canAct:0, air:0, ground:0, diving:0, lying:0 },
     };
     this.rolloutSteps = 2048;
-    this.minRolloutToUpdate = 512; // flush threshold for remaining rollout steps
+    this.minRolloutToUpdate = 256; // flush threshold for remaining rollout steps
 
     this.ppoEpochs = 4;
     this.ppoMinibatch = 256;

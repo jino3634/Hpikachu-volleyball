@@ -294,6 +294,8 @@ export class OnePointEpisodeRunner {
         let saveEligible = true;      // save 보상을 받을 수 있는 상태인가?
         let dangerArmed = false;      // “위기 공”을 감지해서 보상 대기중인가?
         let prevLastTouch = 0;        // lastTouch 변화 감지용
+        // ✅ held input: 한 포인트 동안 유지되어야 함 (phase=1용)
+        let heldTuple = { xDirection: 0, yDirection: 0, powerHit: 0 };
 
         while (true) {
           // ✅ 전체 stepLogic 안전장치: round가 아니어도 증가
@@ -353,6 +355,10 @@ export class OnePointEpisodeRunner {
           if (this._traceEnabled && frames === 0) {
             this._traceBuf = [];
           }
+          // ✅ 라운드 시작에만 hold 입력 초기화
+          if (frames === 0) {
+            heldTuple = { xDirection: 0, yDirection: 0, powerHit: 0 };
+          }
 
           // If cannot act (lying/diving/etc), skip *decision sampling itself*.
           // (obs.me.canAct is produced by getObservation() and is 0 when state > 3)
@@ -365,8 +371,6 @@ export class OnePointEpisodeRunner {
 
           // action: prefer tuple-based API
           let aLearn = 0;
-          // (추가) held input (phase=1에서 유지할 x/y)
-          let heldTuple = { xDirection: 0, yDirection: 0, powerHit: 0 };
 
           // (추가) decision phase 읽기: powerHit는 phase=0에서만 의미가 있음
           const phase = (this.game && typeof this.game._decisionPhase === 'number')
