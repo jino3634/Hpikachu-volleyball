@@ -194,6 +194,7 @@ export class Trainer {
 
     // ✅ BEST 초기값은 0으로 (avg=0일 때 SAVE 방지)
     this.pbtBestScore = 0.0;
+    this.pbtSaveCount = 0;
 
     this.pbtBestGenome = null;
     this.pbtCurrentGenome = null;
@@ -288,6 +289,15 @@ export class Trainer {
       if (bestScore < 0) {
         await this.storage.setCheckpoint('pbt_best_score', this.pbtBestScore);
       }
+    }
+    const saveCount = await this.storage.getCheckpoint('pbt_save_count');
+    if (typeof saveCount === 'number') {
+      this.pbtSaveCount = Math.max(0, saveCount | 0);
+      if (saveCount < 0) await this.storage.setCheckpoint('pbt_save_count', this.pbtSaveCount);
+    } else {
+      // 첫 실행이면 0을 만들어두는게 UI/디버깅에 편함
+      this.pbtSaveCount = 0;
+      await this.storage.setCheckpoint('pbt_save_count', 0);
     }
 
     const bestGenome = await this.storage.getCheckpoint('pbt_best_genome');
@@ -968,6 +978,9 @@ export class Trainer {
         await this.storage.setCheckpoint('pbt_best_score', this.pbtBestScore);
         await this.storage.setCheckpoint('pbt_best_genome', this.pbtBestGenome);
         await this.storage.setCheckpoint('pbt_best_model_state', this.policy.saveState());
+
+        this.pbtSaveCount = (this.pbtSaveCount ?? 0) + 1;
+        await this.storage.setCheckpoint('pbt_save_count', this.pbtSaveCount);
 
         const sigAfterSave = (typeof this._policySig === 'function') ? this._policySig() : 'n/a';
         const gSig = (typeof this._genomeSig === 'function') ? this._genomeSig(this.pbtBestGenome) : JSON.stringify(this.pbtBestGenome);
