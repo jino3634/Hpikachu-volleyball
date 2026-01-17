@@ -516,29 +516,41 @@ export class PpoPolicyV1 {
     const oppIsDiving = !!opp.isDiving || oppState === 3;
     const oppIsAir = (opp.isAir !== undefined) ? !!opp.isAir : (oppState === 1 || oppState === 2);
 
+    // ------------------------------------------------------------
+    // Feature normalization helpers (for tanh stability)
+    // ------------------------------------------------------------
+    const GROUND_W = 432;
+    const GROUND_H = 304;
+
+    const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+    const nx = (x) => (Number(x) / GROUND_W) * 2 - 1; // 0..432 -> -1..1
+    const ny = (y) => (Number(y) / GROUND_H) * 2 - 1; // 0..304 -> -1..1
+    const nv = (v, scale) => clamp(Number(v) / scale, -1, 1);
+
     // Fill (guarded)
-    f[0] = Number(me.x ?? 0);
-    f[1] = Number(me.y ?? 0);
-    f[2] = Number(me.yV ?? me.yv ?? 0);
-    f[3] = meIsAir ? 1 : 0;
-    f[4] = meIsDiving ? 1 : 0;
-    f[5] = meIsLying ? 1 : 0;
-    f[6] = meCanAct ? 1 : 0;
-    f[7] = Math.max(0, Math.min(1, meState / 4));
+    // positions: [-1, 1]
+    f[0] = nx(me.x ?? 0);
+    f[1] = ny(me.y ?? 0);
 
-    f[8] = Number(opp.x ?? 0);
-    f[9] = Number(opp.y ?? 0);
-    f[10] = Number(opp.yV ?? opp.yv ?? 0);
-    f[11] = oppIsAir ? 1 : 0;
-    f[12] = oppIsDiving ? 1 : 0;
-    f[13] = oppIsLying ? 1 : 0;
+    // velocities: clamp to [-1, 1]
+    f[2] = nv(me.yV ?? me.yv ?? 0, 20);
 
-    f[14] = Number(ball.x ?? 0);
-    f[15] = Number(ball.y ?? 0);
-    f[16] = Number(ball.xV ?? ball.xv ?? 0);
-    f[17] = Number(ball.yV ?? ball.yv ?? 0);
-    f[18] = Number(ball.landingX ?? ball.expectedX ?? 0);
-    f[19] = Number(ball.timeToLand ?? 0);
+    f[8] = nx(opp.x ?? 0);
+    f[9] = ny(opp.y ?? 0);
+    f[10] = nv(opp.yV ?? opp.yv ?? 0, 20);
+
+    f[14] = nx(ball.x ?? 0);
+    f[15] = ny(ball.y ?? 0);
+    f[16] = nv(ball.xV ?? ball.xv ?? 0, 25);
+    f[17] = nv(ball.yV ?? ball.yv ?? 0, 35);
+
+    // landingX: [-1, 1]
+    f[18] = nx(ball.landingX ?? ball.expectedX ?? 0);
+
+    // timeToLand: convert 0..1 -> -1..1 (and clamp)
+    const ttl = clamp(Number(ball.timeToLand ?? 0), 0, 1);
+    f[19] = ttl * 2 - 1;
+    
     f[20] = (ball.isPowerHit !== undefined) ? (ball.isPowerHit ? 1 : 0) : 0;
 
     // divingDir is typically -1/0/1 (player-centric). Clamp to [-1,1].
