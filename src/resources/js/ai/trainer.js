@@ -636,14 +636,28 @@ export class Trainer {
     const buffer = [];
 
     gameAny.onAfterPhysicsFrame = (info) => {
-      // collect only during round-like state to avoid menu noise
+      // collect only during round state
       if (!info || info.stateName !== 'round') return;
-      if (!info.obsP1) return;
-      if (!info.inputP1) return;
+
+      // ✅ decision frame only (1 decision per decisionInterval)
+      // stepLogic에서 decisionPhase를 넘기도록 1단계에서 추가했음.
+      if ((info.decisionPhase | 0) !== 0) return;
+
+      const obs = info.obsP1;
+      const label = info.inputP1;
+      if (!obs || !label) return;
+
+      // ✅ filter out "cannot act" / noisy states
+      const me = obs.me || {};
+      const canAct = (me.canAct !== undefined) ? !!me.canAct : true;
+      const isDiving = !!me.isDiving || (Number(me.state ?? 0) === 3);
+      const isLying  = !!me.isLying  || (Number(me.state ?? 0) === 4);
+      if (!canAct) return;
+      if (isDiving || isLying) return;
 
       buffer.push({
-        obs: info.obsP1,
-        label: info.inputP1,
+        obs,
+        label,
         createdAt: Date.now(),
       });
       collected++;

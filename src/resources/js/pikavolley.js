@@ -302,35 +302,46 @@ export class PikachuVolleyball {
     // ✅ after-physics hook (warmup/diagnostics)
     const gameAny = /** @type {any} */ (this);
     if (typeof gameAny.onAfterPhysicsFrame === 'function') {
-      // stateName을 현재 state 함수로부터 구성
+      // 현재 state 함수로부터 stateName 결정
       let stateName = 'other';
       if (this.state === this.round) stateName = 'round';
       else if (this.state === this.afterEndOfRound) stateName = 'afterEndOfRound';
       else if (this.state === this.beforeStartOfNextRound) stateName = 'beforeStartOfNextRound';
-      else if (this.state === this.intro) stateName = 'intro';
-      else if (this.state === this.menu) stateName = 'menu';
       else if (this.state === this.startOfNewGame) stateName = 'startOfNewGame';
+      else if (this.state === this.menu) stateName = 'menu';
+      else if (this.state === this.intro) stateName = 'intro';
 
-      // round-like일 때만 관측/라벨 제공 (getObservation이 여기서 안전)
-      const roundLike = this._isRoundLikeState();
-      const obsP1 = roundLike ? this.getObservation(1) : null;
+      // round-like일 때만 관측/라벨 제공 (다른 상태는 null)
+      const roundLikeNow = this._isRoundLikeState();
 
-      // builtin 입력 라벨: keyboardArray가 이미 getInput() 끝낸 상태라 여기서 읽으면 됨
+      // builtin / external 모두에서 "이번 프레임에 실제로 적용된 입력" 라벨
       const kb1 = this.keyboardArray[0];
-      const inputP1 = roundLike ? {
-        xDirection: kb1.xDirection | 0,
-        yDirection: kb1.yDirection | 0,
-        powerHit: kb1.powerHit | 0,
-      } : null;
+      const kb2 = this.keyboardArray[1];
 
       gameAny.onAfterPhysicsFrame({
         stateName,
-        obsP1,
-        inputP1,
+        // 2단계에서 쓰려고 같이 넘김 (지금은 값이 0일 수도 있음)
+        decisionPhase: this._decisionPhase | 0,
+        decisionInterval: this.decisionInterval | 0,
+
+        obsP1: roundLikeNow ? this.getObservation(1) : null,
+        inputP1: roundLikeNow ? {
+          xDirection: kb1.xDirection | 0,
+          yDirection: kb1.yDirection | 0,
+          powerHit: kb1.powerHit | 0,
+        } : null,
+
+        // (있어도 해 안 됨: 나중에 확장용)
+        obsP2: roundLikeNow ? this.getObservation(2) : null,
+        inputP2: roundLikeNow ? {
+          xDirection: kb2.xDirection | 0,
+          yDirection: kb2.yDirection | 0,
+          powerHit: kb2.powerHit | 0,
+        } : null,
       });
     }
 
-    return true;
+return true;
 
   }
 
