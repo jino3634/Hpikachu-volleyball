@@ -517,40 +517,58 @@ export class PpoPolicyV1 {
     const oppIsAir = (opp.isAir !== undefined) ? !!opp.isAir : (oppState === 1 || oppState === 2);
 
     // ------------------------------------------------------------
-    // Feature normalization helpers (for tanh stability)
+    // Feature scaling helpers
+    // - If obs is already normalized (-1..1), DO NOT normalize again.
+    // - If obs is raw pixels, normalize here.
     // ------------------------------------------------------------
     const GROUND_W = 432;
     const GROUND_H = 304;
 
     const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
-    const nx = (x) => (Number(x) / GROUND_W) * 2 - 1; // 0..432 -> -1..1
-    const ny = (y) => (Number(y) / GROUND_H) * 2 - 1; // 0..304 -> -1..1
-    const nv = (v, scale) => clamp(Number(v) / scale, -1, 1);
+    const nxRaw = (x) => (Number(x) / GROUND_W) * 2 - 1; // 0..432 -> -1..1
+    const nyRaw = (y) => (Number(y) / GROUND_H) * 2 - 1; // 0..304 -> -1..1
+    const nvRaw = (v, scale) => clamp(Number(v) / scale, -1, 1);
+
+    // Heuristic: normalized obs has positions roughly in [-1..1].
+    const meX = Number(me.x ?? 0);
+    const oppX = Number(opp.x ?? 0);
+    const ballX = Number(ball.x ?? 0);
+    const landX = Number(ball.landingX ?? ball.expectedX ?? 0);
+    const isNormalizedObs =
+      Math.abs(meX) <= 1.5 &&
+      Math.abs(oppX) <= 1.5 &&
+      Math.abs(ballX) <= 1.5 &&
+      Math.abs(landX) <= 1.5;
+
+    // Unified accessors
+    const posX = (x) => isNormalizedObs ? clamp(Number(x ?? 0), -1, 1) : nxRaw(x ?? 0);
+    const posY = (y) => isNormalizedObs ? clamp(Number(y ?? 0), -1, 1) : nyRaw(y ?? 0);
+    const velN = (v, scale) => isNormalizedObs ? clamp(Number(v ?? 0), -1, 1) : nvRaw(v ?? 0, scale);
 
     // Fill (guarded)
     // positions: [-1, 1]
-    f[0] = nx(me.x ?? 0);
-    f[1] = ny(me.y ?? 0);
+    f[0] = posX(me.x ?? 0);
+    f[1] = posY(me.y ?? 0);
 
-    // velocities: clamp to [-1, 1]
-    f[2] = nv(me.yV ?? me.yv ?? 0, 20);
+    // velocities: already normalized in getObservationNormalized()
+    f[2] = velN(me.yV ?? me.yv ?? 0, 20);
 
-    f[8] = nx(opp.x ?? 0);
-    f[9] = ny(opp.y ?? 0);
-    f[10] = nv(opp.yV ?? opp.yv ?? 0, 20);
+    f[8]  = posX(opp.x ?? 0);
+    f[9]  = posY(opp.y ?? 0);
+    f[10] = velN(opp.yV ?? opp.yv ?? 0, 20);
 
-    f[14] = nx(ball.x ?? 0);
-    f[15] = ny(ball.y ?? 0);
-    f[16] = nv(ball.xV ?? ball.xv ?? 0, 25);
-    f[17] = nv(ball.yV ?? ball.yv ?? 0, 35);
+    f[14] = posX(ball.x ?? 0);
+    f[15] = posY(ball.y ?? 0);
+    f[16] = velN(ball.xV ?? ball.xv ?? 0, 25);
+    f[17] = velN(ball.yV ?? ball.yv ?? 0, 35);
 
     // landingX: [-1, 1]
-    f[18] = nx(ball.landingX ?? ball.expectedX ?? 0);
+    f[18] = posX(ball.landingX ?? ball.expectedX ?? 0);
 
     // timeToLand: convert 0..1 -> -1..1 (and clamp)
     const ttl = clamp(Number(ball.timeToLand ?? 0), 0, 1);
     f[19] = ttl * 2 - 1;
-    
+
     f[20] = (ball.isPowerHit !== undefined) ? (ball.isPowerHit ? 1 : 0) : 0;
 
     // divingDir is typically -1/0/1 (player-centric). Clamp to [-1,1].
