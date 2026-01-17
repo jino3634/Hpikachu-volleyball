@@ -324,7 +324,7 @@ export class PikachuVolleyball {
         decisionPhase: this._decisionPhase | 0,
         decisionInterval: this.decisionInterval | 0,
 
-        obsP1: roundLikeNow ? this.getObservation(1) : null,
+        obsP1: roundLikeNow ? this.getObservationNormalized(1) : null,
         inputP1: roundLikeNow ? {
           xDirection: kb1.xDirection | 0,
           yDirection: kb1.yDirection | 0,
@@ -332,7 +332,7 @@ export class PikachuVolleyball {
         } : null,
 
         // (있어도 해 안 됨: 나중에 확장용)
-        obsP2: roundLikeNow ? this.getObservation(2) : null,
+        obsP2: roundLikeNow ? this.getObservationNormalized(2) : null,
         inputP2: roundLikeNow ? {
           xDirection: kb2.xDirection | 0,
           yDirection: kb2.yDirection | 0,

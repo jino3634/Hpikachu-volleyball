@@ -87,6 +87,18 @@ export class IndexedDBStorage extends StorageIface {
     if (!this.db) throw new Error('IndexedDBStorage not initialized. Call init() first.');
   }
 
+  async clearImitationSamples() {
+    this._assert();
+    const tx = this.db.transaction(['imit_samples'], 'readwrite');
+    const os = tx.objectStore('imit_samples');
+    os.clear();
+    await new Promise((resolve, reject) => {
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error);
+    });
+  }
+
   async getMeta() {
     this._assert();
     const tx = this.db.transaction([STORE_META], 'readonly');

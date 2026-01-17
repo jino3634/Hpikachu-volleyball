@@ -248,6 +248,42 @@ export class Trainer {
       });
     }
 
+    // ---- warmup dataset format versioning ----
+    // We switched warmup obs to normalized. Old datasets (raw pixel obs) must be cleared.
+    const WANT_WARMUP_FMT = 'norm_v1';
+    const warmupFmt = await this.storage.getCheckpoint('warmup_format');
+
+    if (warmupFmt !== WANT_WARMUP_FMT) {
+      // Clear old imitation samples to avoid mixing raw+normalized
+      if (typeof this.storage.clearImitationSamples === 'function') {
+        await this.storage.clearImitationSamples();
+      } else {
+        // fallback: if no clear method exists, force user to clear DB manually
+        console.warn('[WARMUP] storage.clearImitationSamples() missing; old samples may remain.');
+      }
+
+      // Reset warmup states
+      this.warmup.done = false;
+      this.warmup.trained = false;
+
+      await this.storage.setCheckpoint('warmup', {
+        done: false,
+        targetSamples: this.warmup.targetSamples,
+        updatedAt: Date.now(),
+      });
+
+      await this.storage.setCheckpoint('warmup_train', {
+        trained: false,
+        trainEpochs: this.warmup.trainEpochs,
+        trainBatch: this.warmup.trainBatch,
+        updatedAt: Date.now(),
+      });
+
+      await this.storage.setCheckpoint('warmup_format', WANT_WARMUP_FMT);
+
+      console.log('[WARMUP] format changed -> cleared imitation samples and reset warmup checkpoints:', warmupFmt, '=>', WANT_WARMUP_FMT);
+    }
+
     // stats checkpoint
     const stats = await this.storage.getCheckpoint('train_stats');
     if (stats) {
