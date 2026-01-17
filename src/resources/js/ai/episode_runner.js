@@ -236,6 +236,7 @@ export class OnePointEpisodeRunner {
       stepsAdded: 0,                // builder.addStep executed
       stepsSkippedNoDecisionInfo: 0,// canAct=true & hasChooseInput=true but no decisionInfo
       stepsSkippedForcedIdle: 0,    // decisionInfo.forcedIdle => skipped
+      auxMoveToLandingX: 0,         // teacher 라벨이 적용된 transition 수
     };
 
     try {
@@ -563,7 +564,22 @@ export class OnePointEpisodeRunner {
 
           // builder step (reward는 builder가 roundEvents로 내부 계산)
           // Only create decisionInfo if we actually sampled a decision this frame.
+          /** @type {null | {
+           *   logp: number;
+           *   value: number;
+           *   forcedIdle: boolean;
+           *   forcedIdleReason: any;
+           *   aux?: {
+           *     moveToLandingX: 0|1|2;
+           *     mask: 0|1;
+           *     dx: number;
+           *     meX: number;
+           *     landingX: number;
+           *     ttl: number;
+           *   };
+           * }} */
           let decisionInfo = null;
+
 
           // ✅ “이번 프레임에 실제로 샘플링한 결정”만 PPO transition으로 만든다
           if (sampledDecision && agent && agent.policy && typeof agent.policy.logpValue === 'function') {
@@ -610,6 +626,64 @@ export class OnePointEpisodeRunner {
               } : null,
             });
             if (this._traceBuf.length > this._traceMax) this._traceBuf.shift();
+          }
+
+          // ------------------------------------------------------------
+          // [STEP3] Teacher label: move toward landingX on danger frames
+          // Attach to decisionInfo.aux so it is stored per-transition.
+          // ------------------------------------------------------------
+          if (sampledDecision && decisionInfo) {
+            // 기본값(teacher 비적용)
+            /** @type {{ moveToLandingX: 0|1|2; mask: 0|1; dx: number; meX: number; landingX: number; ttl: number; }} */
+            const aux = {
+              moveToLandingX: 1, // 0=left, 1=neutral, 2=right
+              mask: 0,
+              dx: 0,
+              meX: 0,
+              landingX: 0,
+              ttl: 0,
+            };
+
+            // dangerArmed는 위에서 이미 계산됨:
+            // - 상대가 마지막 터치
+            // - landingX < 0 (내 코트로 떨어질 예정)
+            if (dangerArmed) {
+              const meX = Number(obs?.me?.x ?? 0);
+              const lx = Number(
+                // nextObs가 있으면 그걸 우선, 없으면 obs
+                nextObs?.ball?.landingX ?? obs?.ball?.landingX ?? 0
+              );
+              const ttl = Number(nextObs?.ball?.timeToLand ?? obs?.ball?.timeToLand ?? 0);
+
+              // 방어 라벨을 너무 넓게 걸면 학습이 왜곡되니 “진짜로 급한 구간”만 걸기
+              // - ttl이 너무 크면 아직 예측/이동이 불확실
+              // - lx < 0은 기존 코드의 “내 코트” 판정과 일치
+              if (
+                Number.isFinite(meX) && Number.isFinite(lx) && Number.isFinite(ttl) &&
+                ttl > 0 && ttl <= 0.85 && // 필요시 0.70~0.95 사이에서 조정
+                lx < 0
+              ) {
+                const dx = lx - meX;
+
+                // deadzone(너무 가까울 땐 중립)
+                const TH = 0.08; // normalized 기준. 필요시 0.06~0.12로 조정
+                /** @type {0|1|2} */
+                let cls = 1;     // neutral
+                if (dx > TH) cls = 2;
+                else if (dx < -TH) cls = 0;
+
+                aux.moveToLandingX = cls;
+                aux.mask = 1;
+                aux.dx = dx;
+                aux.meX = meX;
+                aux.landingX = lx;
+                aux.ttl = ttl;
+
+                epDiag.auxMoveToLandingX++;
+              }
+            }
+
+            decisionInfo.aux = aux;
           }
 
           if (sampledDecision && !decisionInfo) {
