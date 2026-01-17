@@ -346,6 +346,30 @@ function createTrainingControlPanel({ trainer, ticker }) {
   panel.appendChild(rowWarm);
   panel.appendChild(warmupInput);
 
+  // ✅ warmup 끝나면 저장 여부 묻기 옵션
+  let askSaveWarmupAfter = true;
+
+  const askWrap = document.createElement('label');
+  askWrap.style.display = 'flex';
+  askWrap.style.alignItems = 'center';
+  askWrap.style.gap = '6px';
+  askWrap.style.marginBottom = '8px';
+
+  const askCb = document.createElement('input');
+  askCb.type = 'checkbox';
+  askCb.checked = true;
+  askCb.onchange = () => { askSaveWarmupAfter = !!askCb.checked; };
+
+  const askTxt = document.createElement('span');
+  askTxt.textContent = 'Ask to save warmup when done';
+  askTxt.style.opacity = '0.9';
+
+  askWrap.appendChild(askCb);
+  askWrap.appendChild(askTxt);
+
+  // panel에 어디 붙일지: Warmup 버튼 줄(rowWarm) 바로 아래가 보기 좋음
+  panel.appendChild(askWrap);
+
   // Debug log (download full diagnostics; avoids losing logs due to DevTools buffer)
   const rowDbg = document.createElement('div');
   rowDbg.style.display = 'flex';
@@ -431,7 +455,8 @@ function createTrainingControlPanel({ trainer, ticker }) {
   btnStart.onclick = startTraining;
   btnStop.onclick = stopTraining;
 
-  btnSaveWarm.onclick = async () => {
+  // ✅ Save warmup snapshot (공용 함수로 분리)
+  const saveWarmupSnapshot = async () => {
     try {
       const snap = await trainer.exportWarmupSnapshot();
       const blob = new Blob([JSON.stringify(snap, null, 2)], { type: 'application/json' });
@@ -448,6 +473,28 @@ function createTrainingControlPanel({ trainer, ticker }) {
       alert('Save warmup snapshot failed: ' + (e?.message ?? String(e)));
     }
   };
+
+  // 버튼은 공용 함수 호출만
+  btnSaveWarm.onclick = async (e) => {
+    try { e?.preventDefault?.(); } catch {}
+    await saveWarmupSnapshot();
+  };
+
+  // ✅ warmup 학습이 끝나면 저장할지 confirm 띄우기 (OK면 Save 실행)
+  const trainerAny = /** @type {any} */ (trainer);
+  trainerAny.__warmupAskShown = false;
+
+  trainerAny.onWarmupTrained = async () => {
+    if (!askSaveWarmupAfter) return;
+    if (trainerAny.__warmupAskShown) return; // 중복 방지
+    trainerAny.__warmupAskShown = true;
+
+    const ok = window.confirm('Warmup이 끝났어.\nWarmup snapshot 저장할까?');
+    if (!ok) return;
+
+    await saveWarmupSnapshot(); // ✅ onclick 직접 호출하지 않음
+  };
+
 
   btnLoadWarm.onclick = () => warmupInput.click();
 

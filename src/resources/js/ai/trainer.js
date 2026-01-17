@@ -200,6 +200,9 @@ export class Trainer {
     this.pbtCurrentGenome = null;
 
     this.disableWarmup = !!opts.disableWarmup;
+
+    /** @type {null | (() => (void|Promise<void>))} */
+    this.onWarmupTrained = null;
   }
 
   async init() {
@@ -701,6 +704,14 @@ export class Trainer {
     this.game.externalEnabledP2 = prev.externalEnabledP2;
     if (this.game.physics?.player1) this.game.physics.player1.isComputer = prev.isComp1;
     if (this.game.physics?.player2) this.game.physics.player2.isComputer = prev.isComp2;
+
+    // ✅ Restore agents for TRAIN (warmup에서 null로 뗐기 때문에 반드시 다시 붙여야 함)
+    if (typeof this.game.setAgents === 'function') {
+      this.game.setAgents(this.agent, null);
+    } else {
+      this.game.agent1 = this.agent;
+      this.game.agent2 = null;
+    }
   }
 
   /**
@@ -727,6 +738,17 @@ export class Trainer {
     samples.reverse();
 
     const N = samples.length;
+
+    // ✅ Warmup 동안만 하드룰/마스크 OFF
+    const policyAnyToggle = /** @type {any} */ (this.policy);
+    const prevHardRules = policyAnyToggle.hardRulesEnabled;
+    if (typeof policyAnyToggle.setHardRulesEnabled === 'function') {
+      policyAnyToggle.setHardRulesEnabled(false);
+    } else {
+      policyAnyToggle.hardRulesEnabled = false;
+    }
+    logDebug('[WARMUP] hardRulesEnabled=false (raw probs)');
+
     logDebug(`[WARMUP-TRAIN] start. samples=${N}, epochs=${epochs}, batch=${batchSize}`);
     // ---- BC/WARMUP DIAGNOSTICS ----
     // Label distribution / validity check (helps catch mapping or off-by-one bugs)
@@ -888,7 +910,22 @@ export class Trainer {
     this.warmup.trained = true;
     await this.storage.setCheckpoint('warmup_train', { trained: true, trainEpochs: epochs, trainBatch: batchSize, updatedAt: Date.now() });
 
+    // ✅ warmup 끝나면 원래대로 복구
+    if (typeof policyAnyToggle.setHardRulesEnabled === 'function') {
+      policyAnyToggle.setHardRulesEnabled(prevHardRules);
+    } else {
+      policyAnyToggle.hardRulesEnabled = prevHardRules;
+    }
+    logDebug(`[WARMUP] hardRulesEnabled=${!!prevHardRules} (restore)`);
     logDebug('[WARMUP-TRAIN] done. model_state saved.');
+
+    // ✅ notify UI: warmup training finished (ask-save prompt target)
+    try {
+      const cb = /** @type {any} */ (this).onWarmupTrained;
+      if (typeof cb === 'function') await cb();
+    } catch (e) {
+      console.warn('[WARMUP] onWarmupTrained callback error', e);
+    }
   }
 
 

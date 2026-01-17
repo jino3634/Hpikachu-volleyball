@@ -361,9 +361,16 @@ export class PpoPolicyV1 {
     this.Wv = new Float32Array(this.hidden2); // [H2]
     this.bv = 0;
 
+    // ✅ Warmup(BC) 때는 하드룰/마스크를 끌 수 있게 스위치 추가
+    this.hardRulesEnabled = true;
+
     this._initWeights();
     
   }
+
+    setHardRulesEnabled(v) {
+      this.hardRulesEnabled = !!v;
+    }
 
     /**
      * ✅ PBT/진화용: 런타임 genome 적용(가중치 변경 없음)
@@ -628,6 +635,16 @@ export class PpoPolicyV1 {
     return { feat, h1, z1, h2, z2, lx, ly, lp, v };
   }
 
+  _rawProbs(logitsX, logitsY, logitsP) {
+    const mx = new Float32Array(logitsX);
+    const my = new Float32Array(logitsY);
+    const mp = new Float32Array(logitsP);
+    const px = softmax(mx);
+    const py = softmax(my);
+    const pp = softmax(mp);
+    return { px, py, pp };
+  }
+
   /**
    * Apply action constraints by masking logits.
    * @param {Float32Array} logitsX
@@ -710,8 +727,12 @@ _maskedProbs(logitsX, logitsY, logitsP, obs) {
   evaluate(obs, playerIndex) {
     const feat = this.buildFeatures(obs, playerIndex);
     const fwd = this._forward(feat);
-    const { px, py, pp } = this._maskedProbs(fwd.lx, fwd.ly, fwd.lp, obs);
-    return { px, py, pp, value: fwd.v, feat, fwd };
+
+    const probs = this.hardRulesEnabled
+      ? this._maskedProbs(fwd.lx, fwd.ly, fwd.lp, obs)
+      : this._rawProbs(fwd.lx, fwd.ly, fwd.lp);
+
+    return { px: probs.px, py: probs.py, pp: probs.pp, value: fwd.v, feat, fwd };
   }
 
   /**
