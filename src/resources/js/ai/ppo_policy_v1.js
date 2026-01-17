@@ -111,9 +111,9 @@ function powerHitGate(obs, playerIndex, gateParams) {
   // ✅ 기본값(유전자 없을 때)
   const g = gateParams ?? {
     // P0-2: 충돌 예측 gate 파라미터
-    kFrames: 4,          // 몇 프레임 ahead로 충돌 가능성 볼지
-    dxMarginPx: 6,       // 충돌 박스 여유(px)
-    dyMarginPx: 10,      // 충돌 박스 여유(px)
+    kFrames: 8,          // 몇 프레임 ahead로 충돌 가능성 볼지
+    dxMarginPx: 12,       // 충돌 박스 여유(px)
+    dyMarginPx: 16,      // 충돌 박스 여유(px)
   };
 
   const toFinite = (v, fb = 0) => {
@@ -161,10 +161,8 @@ function powerHitGate(obs, playerIndex, gateParams) {
   const thrX = PH + mx;
   const thrY = PH + my;
 
-  // ✅ “진짜 성공”에 맞추려면: 공중 공격(powerHit)만 우선 학습 (groundOK 제거)
   let airOK = false;
   if (isAir && canAct && !isLying && !isDiving) {
-    // K프레임 안에 공이 내 충돌 박스에 들어오면 허용
     for (let i = 0; i <= k; i++) {
       const bx = bX0 + bVX * i;
       const by = bY0 + bVY * i;
@@ -177,8 +175,26 @@ function powerHitGate(obs, playerIndex, gateParams) {
     }
   }
 
-  const groundOK = false;      // ✅ P0-2에서는 지상 powerHit(=다이브 혼입) 제거
-  const allow = airOK;         // ✅ allow는 airOK만
+  // ✅ 지상 파워는 "서있는 상태(대개 state=0)"에서만 아주 제한적으로 허용
+  let groundOK = false;
+  if (!isAir && canAct && !isLying && !isDiving && state === 0) {
+    // 지상에서는 너무 멀리 예측하면 노이즈니까, k를 줄여서(예: 최대 3프레임)만 본다
+    const kg = Math.min(3, k);
+    for (let i = 0; i <= kg; i++) {
+      const bx = bX0 + bVX * i;
+      const by = bY0 + bVY * i;
+      const dxPx = Math.abs(bx - meX);
+      const dyPx = Math.abs(by - meY);
+      if (dxPx <= thrX && dyPx <= thrY) {
+        groundOK = true;
+        break;
+      }
+    }
+  }
+
+  // ✅ allow는 air 또는 ground
+  const allow = (airOK || groundOK);
+
 
   // dLand/ballOnMySide는 기존 구조 유지용 더미(통계 NaN 방지)
   const dLand = 0;

@@ -338,6 +338,13 @@ export class Trainer {
     // ✅ P1 external / P2 builtin 확정 + agent 연결
     if (typeof this.game.setExternalVsBuiltin === 'function') {
       this.game.setExternalVsBuiltin(true, false); // P2 builtin
+      // ✅ 학습에서는 결정을 매 프레임 수행(phase=0을 매 프레임으로)
+      if (typeof this.game.decisionInterval === 'number') {
+        this.game.decisionInterval = 1;
+      }
+      if (typeof this.game._decisionPhase === 'number') {
+        this.game._decisionPhase = 0; // 정렬
+      }
     } else {
       // fallback
       this.game.setControlMode('external');
@@ -497,7 +504,10 @@ export class Trainer {
     const dy = (gate.dyMarginPx ?? 10) | 0;
     gate.dxMarginPx = Math.max(0, Math.min(30, dx + ((Math.random() < 0.5) ? -1 : 1)));
     gate.dyMarginPx = Math.max(0, Math.min(40, dy + ((Math.random() < 0.5) ? -2 : 2)));
-    gate.kFrames = (gate.kFrames ?? 4) | 0;
+    const k0 = (gate.kFrames ?? 4) | 0;
+    // 4~12 범위에서 ±1 변이
+    gate.kFrames = Math.max(2, Math.min(12, k0 + ((Math.random() < 0.5) ? -1 : 1)));
+
 
     console.log(`[PBT-MUTATE] from=${JSON.stringify(before)} to=${JSON.stringify(g)}`);
     logDebug(`[PBT-MUTATE] from=${JSON.stringify(baseGenome)} to=${JSON.stringify(g)}`);
