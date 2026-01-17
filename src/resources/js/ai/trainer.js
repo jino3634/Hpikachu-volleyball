@@ -376,6 +376,7 @@ export class Trainer {
 
       // ✅ UI 표시용
       pbtCycle: (this.pbtCycle ?? 0) | 0,
+      pbtSaveCount: (this.pbtSaveCount ?? 0) | 0,
       bestScore: Number(this.pbtBestScore ?? 0),
 
       totalEpisodes: total,

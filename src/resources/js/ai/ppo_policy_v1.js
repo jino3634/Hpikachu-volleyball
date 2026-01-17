@@ -976,12 +976,14 @@ act(obs, playerIndex, opts = {}) {
     apRaw = sampleCategorical(ppRaw);
   }
 
-    // 2) (실제 행동용) ap: gate 반영된 분포에서 샘플
-    if (deterministic) {
-      ap = _chooseDeterministic(ppEff, TIE_EPS_P);
-    } else {
-      ap = sampleCategorical(ppEff);
-    }
+  // 2) (실제 행동용) ap: gate 반영된 분포에서 샘플
+  if (deterministic) {
+    // ✅ deterministic에서도 power는 argmax 고정 대신 "seed 고정 샘플링" 사용
+    // allowPowerHit=false면 ppEff=[1,0]이라 어차피 0만 나옴
+    ap = _sampleCategoricalRng(ppEff);
+  } else {
+    ap = sampleCategorical(ppEff);
+  }
 
 
   // 2) conditional X distribution: if ground && ap==1 => forbid x=0 (class 1)
