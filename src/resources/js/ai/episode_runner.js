@@ -378,14 +378,16 @@ export class OnePointEpisodeRunner {
             : 0;
 
           let inputTuple = heldTuple; // 기본은 hold
+          let sampledDecision = false; // ✅ 이번 프레임에 실제로 정책 결정을 샘플링했는가?
 
           if (canAct && phase === 0) {
             try {
               if (hasChooseInput) {
                 epDiag.framesDecisionSampled++;
+                sampledDecision = true; // ✅ decision frame임을 기록
+
                 const raw = agent.chooseInput(obs, this.learningPlayer, this.game);
                 if (raw && typeof raw === 'object') {
-                  // hold 갱신: phase=0 결정값
                   heldTuple = {
                     xDirection: Number(raw.xDirection ?? 0) | 0,
                     yDirection: Number(raw.yDirection ?? 0) | 0,
@@ -394,15 +396,17 @@ export class OnePointEpisodeRunner {
                 }
                 inputTuple = heldTuple;
               } else {
-                // legacy chooseAction 경로(필요하면 나중에 별도 정리)
+                // legacy chooseAction 경로도 “샘플링”으로 볼 거면 true
                 epDiag.framesDecisionSampled++;
                 epDiag.framesLegacyAction++;
+                sampledDecision = true; // ✅ (legacy도 학습시키려면 true 유지)
+
                 let aLearn = 0;
                 try { aLearn = agent.chooseAction(obs, this.learningPlayer, this.game) | 0; } catch (_) {}
-                // legacy는 여기서 tuple 변환이 빠져있었음. (지금은 우선 neutral로 둬도 됨)
-                inputTuple = heldTuple;
+                inputTuple = heldTuple; // (지금은 legacy tuple 변환 없음)
               }
             } catch (_) {
+              sampledDecision = false;
               // keep hold
             }
           }
@@ -561,11 +565,10 @@ export class OnePointEpisodeRunner {
           // Only create decisionInfo if we actually sampled a decision this frame.
           let decisionInfo = null;
 
-          if (canAct && hasChooseInput && agent && agent.policy && typeof agent.policy.logpValue === 'function') {
+          // ✅ “이번 프레임에 실제로 샘플링한 결정”만 PPO transition으로 만든다
+          if (sampledDecision && agent && agent.policy && typeof agent.policy.logpValue === 'function') {
             try {
               const out = agent.policy.logpValue(obs, this.learningPlayer, inputTuple);
-
-              // out이 { logp, value, forcedIdle, forcedIdleReason } 형태면 그대로 normalize
               if (out && typeof out === 'object') {
                 decisionInfo = {
                   logp: Number(out.logp ?? 0),
@@ -609,17 +612,19 @@ export class OnePointEpisodeRunner {
             if (this._traceBuf.length > this._traceMax) this._traceBuf.shift();
           }
 
+          if (sampledDecision && !decisionInfo) {
+            epDiag.stepsSkippedNoDecisionInfo++;
+          }
+
           // PPO requires decisionInfo (logp/value). If missing => skip creating a transition.
-          if (!decisionInfo) {
-            if (canAct && hasChooseInput) epDiag.stepsSkippedNoDecisionInfo++;
-          } else {
+          if (sampledDecision && decisionInfo) {
             builder.addStep({
               t: frames,
               obs,
-              action: inputTuple,    // ✅ sanitize된 action 저장
+              action: inputTuple,
               nextObs,
               done: false,
-              info: decisionInfo,    // ✅ logp/value가 action과 일치
+              info: decisionInfo,
               roundEvents: ev,
             });
             epDiag.stepsAdded++;

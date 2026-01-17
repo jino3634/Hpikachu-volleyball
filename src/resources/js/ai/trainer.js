@@ -966,7 +966,8 @@ export class Trainer {
       const prevBest = Number(this.pbtBestScore ?? -1);
       let decision = 'HOLD';
 
-      if (avg >= (prevBest + 0.05)) {
+      const SAVE_DELTA = 0.005; // 0.5%p만 좋아져도 SAVE
+      if (avg >= (prevBest + SAVE_DELTA)) {
         decision = 'SAVE';
 
         // (optional) SAVE 직전 sig
