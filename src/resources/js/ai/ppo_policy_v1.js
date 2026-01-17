@@ -854,8 +854,22 @@ act(obs, playerIndex, opts = {}) {
     return (s > 1e-12) ? [a / s, b / s] : [0.5, 0.5];
   })();
 
-  // ✅ Power gate probabilities: gate가 false면 실제 샘플링 분포는 [1,0]
-  const ppEff = (!allowPowerHit) ? [1, 0] : ppRaw;
+  // ✅ allowPowerHit일 때도 power=0으로 붕괴하니까, 행동분포를 혼합으로 만든다.
+  // mix=0.15면: 85%는 모델, 15%는 50:50 탐색(=power도 가끔 눌러봄)
+  const POWER_MIX = 0.15;
+
+  const ppEff = (!allowPowerHit)
+    ? [1, 0]
+    : (() => {
+        const p0 = ppRaw[0];
+        const p1 = ppRaw[1];
+        const m = POWER_MIX;
+        const q0 = p0 * (1 - m) + 0.5 * m;
+        const q1 = p1 * (1 - m) + 0.5 * m;
+        const s = q0 + q1;
+        return (s > 1e-12) ? [q0 / s, q1 / s] : [0.5, 0.5];
+      })();
+
 
   // --- TIE-DIAG (POWER) INSERT HERE ---
   const as2 = this.debug?.actionStats;
@@ -1142,12 +1156,26 @@ logpValue(obs, playerIndex, action) {
 
   const { px, py, pp, value } = this.evaluate(obs, playerIndex);
 
-  // ✅ allowPowerHit=false(=lying/diving)일 때만 powerHit=1을 확률 0으로 처리
-  const ppEff = (!allowPowerHit) ? [1, 0] : (() => {
-    const a0 = clamp01(pp[0] ?? 0), b0 = clamp01(pp[1] ?? 0);
+  const ppRaw2 = (!allowPowerHit) ? [1, 0] : (() => {
+    const a0 = clamp01(pp[0] ?? 0);
+    const b0 = clamp01(pp[1] ?? 0);
     const s0 = a0 + b0;
     return (s0 > 1e-12) ? [a0 / s0, b0 / s0] : [0.5, 0.5];
   })();
+
+  const POWER_MIX = 0.15;
+
+  const ppEff = (!allowPowerHit)
+    ? [1, 0]
+    : (() => {
+        const p0 = ppRaw2[0], p1 = ppRaw2[1];
+        const m = POWER_MIX;
+        const q0 = p0 * (1 - m) + 0.5 * m;
+        const q1 = p1 * (1 - m) + 0.5 * m;
+        const s = q0 + q1;
+        return (s > 1e-12) ? [q0 / s, q1 / s] : [0.5, 0.5];
+      })();
+
 
   const pxEff = (() => {
     const a0 = clamp01(px[0] ?? 0), b0 = clamp01(px[1] ?? 0), c0 = clamp01(px[2] ?? 0);
