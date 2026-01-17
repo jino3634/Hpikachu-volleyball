@@ -1306,7 +1306,7 @@ logpValue(obs, playerIndex, action) {
     // Value diagnostics accumulators (reset each ppoUpdate)
     this._vSum=0; this._rSum=0; this._vSum2=0; this._rSum2=0; this._vrSum=0; this._vrCount=0;
     this._advPos=0; this._advNeg=0; this._advZero=0;
-    let stats = { steps: batch.length, updates: 0, approxKl: 0, policyLoss: 0, valueLoss: 0, clipFrac: 0, gradNorm: 0, wNorm: 0, advMean: 0, advStd: 0, retMean: 0, retStd: 0, rewMean: 0, rewStd: 0, vrCorr: 0 };
+    let stats = { steps: batch.length, updates: 0, approxKl: 0, policyLoss: 0, valueLoss: 0, clipFrac: 0, gradNorm: 0, wNorm: 0, advMean: 0, advStd: 0, retMean: 0, retStd: 0, rewMean: 0, rewStd: 0, vrCorr: 0, auxLoss: 0, auxCount: 0 };
 
     for (let ep = 0; ep < epochs; ep++) {
       // shuffle indices
@@ -1333,6 +1333,8 @@ logpValue(obs, playerIndex, action) {
         let advSum = 0, advSum2 = 0;
         let retSum = 0, retSum2 = 0;
         let rewSum = 0, rewSum2 = 0;
+        let auxLoss = 0;
+        let auxCount = 0;
 
         for (const id of slice) {
           const it = batch[id];
@@ -1394,6 +1396,27 @@ logpValue(obs, playerIndex, action) {
 
           // backprop for policy (via chosen actions) and value
           this._accumulateGrads(g, obs, it.playerIndex ?? 1, action, dL_dlogp, dL_dv);
+
+          // ------------------------------------------------------------
+          // [STEP4] Aux teacher loss (X-only)
+          // ------------------------------------------------------------
+          const AUX_COEF = 0.03; // 시작값 추천(0.02~0.05)
+          const aux = it.aux;
+
+          if (AUX_COEF > 0 && aux && aux.mask === 1) {
+            const t = aux.moveToLandingX;
+            // teacherCls must be 0/1/2
+            const teacherCls = (t === 0 || t === 1 || t === 2) ? t : 1;
+
+            // loss for logging: -log p(teacher)
+            // (px는 _accumulateAuxX에서도 다시 계산하지만, log용은 가벼운 비용이라 OK)
+            const evAux = this.evaluate(obs, it.playerIndex ?? 1);
+            auxLoss += -logProbFromProbs(evAux.px, teacherCls);
+            auxCount++;
+
+            // gradient: add CE on X head only
+            this._accumulateAuxX(g, obs, it.playerIndex ?? 1, teacherCls, AUX_COEF);
+          }
         }
 
         // apply grads
@@ -1427,6 +1450,9 @@ logpValue(obs, playerIndex, action) {
         stats.gradNorm += gradNorm;
         stats.wNorm += wNorm;
 
+        stats.auxLoss += (auxCount > 0) ? (auxLoss / auxCount) : 0;
+        stats.auxCount += auxCount;
+
         stats.updates++;
         stats.approxKl += klSum / Math.max(1, slice.length);
       }
@@ -1446,6 +1472,7 @@ logpValue(obs, playerIndex, action) {
     stats.retStd /= u;
     stats.rewMean /= u;
     stats.rewStd /= u;
+    stats.auxLoss /= u;
 
     this.debug.lastUpdate = {
       policyLoss: stats.policyLoss,
@@ -1641,6 +1668,82 @@ logpValue(obs, playerIndex, action) {
       }
     }
   }
+
+  // ------------------------------------------------------------
+  // [STEP4] Auxiliary supervised loss on X head only (CE)
+  // dL/dlogits = (probs - onehot)
+  // ------------------------------------------------------------
+  _accumulateAuxX(g, obs, playerIndex, teacherCls, weight) {
+    const w = Number(weight ?? 0);
+    if (!isFinite(w) || w === 0) return;
+
+    // forward with caches
+    const feat = this.buildFeatures(obs, playerIndex);
+    const fwd = this._forward(feat);
+
+    // use the SAME masking rule as PPO (hardRulesEnabled path uses masked probs in _accumulateGrads)
+    const { px } = this._maskedProbs(fwd.lx, fwd.ly, fwd.lp, obs);
+
+    // dL/dlogitsX = w * (px - onehot(teacher))
+    const dlogitsX = new Float32Array(3);
+    for (let i = 0; i < 3; i++) {
+      dlogitsX[i] = w * (px[i] - (i === teacherCls ? 1 : 0));
+    }
+
+    // grads for X head + accumulate dh2
+    const dh2 = new Float32Array(this.hidden2);
+
+    for (let k = 0; k < 3; k++) {
+      const grad = dlogitsX[k];
+      g.dbx[k] += grad;
+      const wRow = this.Wx[k];
+      const gw = g.dWx[k];
+      for (let j = 0; j < this.hidden2; j++) {
+        gw[j] += grad * fwd.h2[j];
+        dh2[j] += grad * wRow[j];
+      }
+    }
+
+    // backprop through tanh at layer2
+    const dz2 = new Float32Array(this.hidden2);
+    for (let i = 0; i < this.hidden2; i++) {
+      const act = fwd.h2[i];
+      const der = (this.activation === 'linear') ? 1 : (1 - act * act);
+      dz2[i] = dh2[i] * der;
+      g.db2[i] += dz2[i];
+    }
+
+    // W2 grads and dh1
+    const dh1 = new Float32Array(this.hidden1);
+    for (let i = 0; i < this.hidden2; i++) {
+      const grad = dz2[i];
+      const wRow = this.W2[i];
+      const gw = g.dW2[i];
+      for (let j = 0; j < this.hidden1; j++) {
+        gw[j] += grad * fwd.h1[j];
+        dh1[j] += grad * wRow[j];
+      }
+    }
+
+    // backprop through tanh at layer1
+    const dz1 = new Float32Array(this.hidden1);
+    for (let i = 0; i < this.hidden1; i++) {
+      const act = fwd.h1[i];
+      const der = (this.activation === 'linear') ? 1 : (1 - act * act);
+      dz1[i] = dh1[i] * der;
+      g.db1[i] += dz1[i];
+    }
+
+    // W1 grads
+    for (let i = 0; i < this.hidden1; i++) {
+      const grad = dz1[i];
+      const gw = g.dW1[i];
+      for (let j = 0; j < this.featureLen; j++) {
+        gw[j] += grad * feat[j];
+      }
+    }
+  }
+
 
   _applyGrads(g, scale) {
     const lr = this.learningRate * scale;

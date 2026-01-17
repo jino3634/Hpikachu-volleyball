@@ -1264,13 +1264,14 @@ export class Trainer {
           if (isLying) this.learnDiag.stateLearn.lying++;
           this.rollout.push({
             obs: tr.obs ?? null,
-          action: tr.action ?? null,
-          reward: Number(tr.reward ?? 0),
-          done: !!tr.done,
-          oldLogp: Number(info.logp ?? 0),
-          value: Number(info.value ?? 0),
-          playerIndex: this.learningPlayer,
-        });
+            action: tr.action ?? null,
+            reward: Number(tr.reward ?? 0),
+            done: !!tr.done,
+            oldLogp: Number(info.logp ?? 0),
+            value: Number(info.value ?? 0),
+            playerIndex: this.learningPlayer,
+            aux: info.aux ?? null, // ✅ STEP4: teacher label payload
+          });
         pushedThisPoint++;
         this.learnDiag.pushedSteps++;
       }
