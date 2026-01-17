@@ -7,6 +7,7 @@
 // - hardSafety는 "학습 프레임(round 프레임)" 기준으로만 카운트
 
 import { EpisodeBuilder } from './rl_episode_builder.js';
+import { SHAPING } from './rl_shaping_config.js';
 
 // 프로젝트에 따라 존재할 수 있어: 없으면 이 파일 내 trace 배열로만 유지
 // import { TraceBuffer } from '../replay/TraceBuffer.js';
@@ -472,7 +473,7 @@ export class OnePointEpisodeRunner {
                   : (bx0 >= NET_X && bx1 < NET_X);
                 if (crossed) {
                   serveCrossedNet = true;
-                  shapingReward += 0.30;
+                  shapingReward += SHAPING.SERVE_CROSS_NET;
                 }
               }
 
@@ -486,7 +487,7 @@ export class OnePointEpisodeRunner {
                     : (bx0 >= NET_X && bx1 < NET_X);
                   if (crossedBack) {
                     returnCrossedNet = true;
-                    shapingReward += 0.30;
+                    shapingReward += SHAPING.RETURN_CROSS_NET;
                   }
                 }
               }
@@ -526,7 +527,7 @@ export class OnePointEpisodeRunner {
             // ✅ 해소(보상 지급): 위기 상태에서 lastTouch가 “나”로 바뀌는 순간 1회
             if (dangerArmed) {
               if (prevLastTouch !== me && lastTouch === me) {
-                shapingReward += 0.20;     // R_save
+                shapingReward += SHAPING.DEFENSIVE_SAVE;     // R_save
                 dangerArmed = false;
                 saveEligible = false;      // 잠금: 상대가 다시 공격권 잡을 때까지
               }
@@ -547,8 +548,8 @@ export class OnePointEpisodeRunner {
           const scoredByNow = (ev && typeof ev.scoredBy === 'number') ? ev.scoredBy : ((ev && typeof ev.scored === 'number') ? ev.scored : 0);
           if ((scoredByNow === 1 || scoredByNow === 2) && ev && typeof ev === 'object') {
             let terminalShaping = 0;
-            if (learningServing && !serveCrossedNet && scoredByNow !== this.learningPlayer) terminalShaping -= 0.10;
-            if (!learningServing && sawBallOnMySide && !returnCrossedNet && scoredByNow !== this.learningPlayer) terminalShaping -= 0.10;
+            if (learningServing && !serveCrossedNet && scoredByNow !== this.learningPlayer) terminalShaping -= SHAPING.TERMINAL_FAIL;
+            if (!learningServing && sawBallOnMySide && !returnCrossedNet && scoredByNow !== this.learningPlayer) terminalShaping -= SHAPING.TERMINAL_FAIL;
             if (terminalShaping !== 0) ev.terminalShapingReward = terminalShaping;
           }
 
