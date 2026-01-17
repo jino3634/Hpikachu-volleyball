@@ -299,7 +299,39 @@ export class PikachuVolleyball {
     // 상태 실행
     this.state();
 
+    // ✅ after-physics hook (warmup/diagnostics)
+    const gameAny = /** @type {any} */ (this);
+    if (typeof gameAny.onAfterPhysicsFrame === 'function') {
+      // stateName을 현재 state 함수로부터 구성
+      let stateName = 'other';
+      if (this.state === this.round) stateName = 'round';
+      else if (this.state === this.afterEndOfRound) stateName = 'afterEndOfRound';
+      else if (this.state === this.beforeStartOfNextRound) stateName = 'beforeStartOfNextRound';
+      else if (this.state === this.intro) stateName = 'intro';
+      else if (this.state === this.menu) stateName = 'menu';
+      else if (this.state === this.startOfNewGame) stateName = 'startOfNewGame';
+
+      // round-like일 때만 관측/라벨 제공 (getObservation이 여기서 안전)
+      const roundLike = this._isRoundLikeState();
+      const obsP1 = roundLike ? this.getObservation(1) : null;
+
+      // builtin 입력 라벨: keyboardArray가 이미 getInput() 끝낸 상태라 여기서 읽으면 됨
+      const kb1 = this.keyboardArray[0];
+      const inputP1 = roundLike ? {
+        xDirection: kb1.xDirection | 0,
+        yDirection: kb1.yDirection | 0,
+        powerHit: kb1.powerHit | 0,
+      } : null;
+
+      gameAny.onAfterPhysicsFrame({
+        stateName,
+        obsP1,
+        inputP1,
+      });
+    }
+
     return true;
+
   }
 
   /**

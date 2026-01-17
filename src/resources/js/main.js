@@ -186,7 +186,7 @@ async function setup() {
 
   // ✅ Trainer
   const trainer = new Trainer(pikaVolley, {
-    disableWarmup: true,
+    disableWarmup: false,
   });
 
   await trainer.init();
