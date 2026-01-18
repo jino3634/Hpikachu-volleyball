@@ -50,6 +50,28 @@ function softmax(logits) {
   return exps;
 }
 
+function softmaxInto(logits, out) {
+  let max = -Infinity;
+  for (let i = 0; i < logits.length; i++) if (logits[i] > max) max = logits[i];
+
+  let sum = 0;
+  for (let i = 0; i < logits.length; i++) {
+    const v = Math.exp(logits[i] - max);
+    out[i] = v;
+    sum += v;
+  }
+
+  if (sum <= 0) {
+    const p = 1 / logits.length;
+    for (let i = 0; i < logits.length; i++) out[i] = p;
+    return out;
+  }
+
+  const inv = 1 / sum;
+  for (let i = 0; i < logits.length; i++) out[i] *= inv;
+  return out;
+}
+
 function sampleCategorical(probs) {
   const r = Math.random();
   let acc = 0;
@@ -331,6 +353,36 @@ export class PpoPolicyV1 {
     this.hidden2 = Math.max(1, (opts.hidden2 ?? 64) | 0);
     this.activation = (opts.activation === 'linear') ? 'linear' : 'tanh';
 
+    // ------------------------------------------------------------
+    // Inference scratch buffers (avoid per-frame allocations)
+    // ------------------------------------------------------------
+    this._infer = {
+      feat: new Float32Array(this.featureLen),
+
+      // forward caches
+      fwd: {
+        feat: null,
+        h1: new Float32Array(this.hidden1),
+        z1: new Float32Array(this.hidden1),
+        h2: new Float32Array(this.hidden2),
+        z2: new Float32Array(this.hidden2),
+        lx: new Float32Array(3),
+        ly: new Float32Array(3),
+        lp: new Float32Array(2),
+        v: 0,
+      },
+
+      // masking temp logits + probs (reused)
+      tmp: {
+        mx: new Float32Array(3),
+        my: new Float32Array(3),
+        mp: new Float32Array(2),
+        px: new Float32Array(3),
+        py: new Float32Array(3),
+        pp: new Float32Array(2),
+      },
+    };
+
     this.learningRate = Number(opts.learningRate ?? 3e-4);
     // imitation(BC) 전용 lr. 지정 안 하면 learningRate 사용
      this.imitationLr = Number(opts.imitationLr ?? this.learningRate);
@@ -471,7 +523,7 @@ export class PpoPolicyV1 {
    * @param {1|2} playerIndex
    * @returns {Float32Array}
    */
-  buildFeatures(obs, playerIndex) {
+  buildFeatures(obs, playerIndex, out = null) {
     const me = obs?.me ?? {};
     const opp = obs?.opp ?? {};
     const ball = obs?.ball ?? {};
@@ -501,7 +553,9 @@ export class PpoPolicyV1 {
     // 21 me.divingDirNorm (-1..1)
     // 22 opp.stateNorm (0..1)
     // 23 me.isServe (0/1) if provided else 0
-    const f = new Float32Array(this.featureLen);
+    // ✅ out이 있으면 재사용, 없으면 기존처럼 새로 생성(학습 경로 호환)
+    const f = (out && out.length === this.featureLen) ? out : new Float32Array(this.featureLen);
+
 
     const meState = Number(me.state ?? 0);
     const oppState = Number(opp.state ?? 0);
@@ -612,10 +666,16 @@ export class PpoPolicyV1 {
     return f;
   }
 
-  _forward(feat) {
+  _forward(feat, out = null) {
+    const h1 = out ? out.h1 : new Float32Array(this.hidden1);
+    const z1 = out ? out.z1 : new Float32Array(this.hidden1);
+    const h2 = out ? out.h2 : new Float32Array(this.hidden2);
+    const z2 = out ? out.z2 : new Float32Array(this.hidden2);
+    const lx = out ? out.lx : new Float32Array(3);
+    const ly = out ? out.ly : new Float32Array(3);
+    const lp = out ? out.lp : new Float32Array(2);
+
     // trunk: feat -> h1 -> h2
-    const h1 = new Float32Array(this.hidden1);
-    const z1 = new Float32Array(this.hidden1);
     for (let i = 0; i < this.hidden1; i++) {
       let sum = this.b1[i];
       const w = this.W1[i];
@@ -624,8 +684,6 @@ export class PpoPolicyV1 {
       h1[i] = (this.activation === 'linear') ? sum : tanh(sum);
     }
 
-    const h2 = new Float32Array(this.hidden2);
-    const z2 = new Float32Array(this.hidden2);
     for (let i = 0; i < this.hidden2; i++) {
       let sum = this.b2[i];
       const w = this.W2[i];
@@ -635,10 +693,6 @@ export class PpoPolicyV1 {
     }
 
     // logits
-    const lx = new Float32Array(3);
-    const ly = new Float32Array(3);
-    const lp = new Float32Array(2);
-
     for (let k = 0; k < 3; k++) {
       let sum = this.bx[k];
       const w = this.Wx[k];
@@ -662,16 +716,19 @@ export class PpoPolicyV1 {
     let v = this.bv;
     for (let j = 0; j < this.hidden2; j++) v += this.Wv[j] * h2[j];
 
+    if (out) {
+      out.feat = feat;
+      out.v = v;
+      return out;
+    }
     return { feat, h1, z1, h2, z2, lx, ly, lp, v };
   }
 
   _rawProbs(logitsX, logitsY, logitsP) {
-    const mx = new Float32Array(logitsX);
-    const my = new Float32Array(logitsY);
-    const mp = new Float32Array(logitsP);
-    const px = softmax(mx);
-    const py = softmax(my);
-    const pp = softmax(mp);
+    const t = this._infer.tmp;
+    const px = softmaxInto(logitsX, t.px);
+    const py = softmaxInto(logitsY, t.py);
+    const pp = softmaxInto(logitsP, t.pp);
     return { px, py, pp };
   }
 
@@ -717,34 +774,34 @@ _maskedProbs(logitsX, logitsY, logitsP, obs) {
     os.sumAbsDy += (typeof dy === 'number' ? dy : 0);
   }
 
+  const t = this._infer.tmp;
+
   // If cannot act at all, force IDLE effectively.
   if (!canAct) {
-    const px = new Float32Array([0, 1, 0]);
-    const py = new Float32Array([0, 1, 0]);
-    const pp = new Float32Array([1, 0]);
-    return { px, py, pp };
+    t.px[0]=0; t.px[1]=1; t.px[2]=0;
+    t.py[0]=0; t.py[1]=1; t.py[2]=0;
+    t.pp[0]=1; t.pp[1]=0;
+    return { px: t.px, py: t.py, pp: t.pp };
   }
 
-  const mx = new Float32Array(logitsX);
-  const my = new Float32Array(logitsY);
-  const mp = new Float32Array(logitsP);
+  // copy logits into tmp (because we will mutate for masks)
+  for (let i=0;i<3;i++) t.mx[i] = logitsX[i];
+  for (let i=0;i<3;i++) t.my[i] = logitsY[i];
+  for (let i=0;i<2;i++) t.mp[i] = logitsP[i];
 
-  // Base constraint: on ground, forbid DOWN (+1). Jump is y=-1.
+  // Base constraint: on ground, forbid DOWN (+1).
   if (!isAir) {
-    // y classes: 0->-1 (jump), 1->0 (idle), 2->+1 (down)
-    my[2] = -1e9;
+    t.my[2] = -1e9;
   }
 
-  // ✅ 우리가 합의한 하드 금지 규칙(소프트 억제 없음):
-  // - lying 또는 diving 상태에서는 powerHit=1을 하드 금지
-  // - 그 외(지상/공중 포함)는 powerHit 완전 허용
+  // lying/diving: forbid powerHit=1
   if (isLying || isDiving) {
-    mp[1] = -1e9;
+    t.mp[1] = -1e9;
   }
 
-  const px0 = softmax(mx);
-  const py0 = softmax(my);
-  const pp0 = softmax(mp);
+  const px0 = softmaxInto(t.mx, t.px);
+  const py0 = softmaxInto(t.my, t.py);
+  const pp0 = softmaxInto(t.mp, t.pp);
   return { px: px0, py: py0, pp: pp0 };
 }
 
@@ -755,8 +812,8 @@ _maskedProbs(logitsX, logitsY, logitsP, obs) {
    * @param {1|2} playerIndex
    */
   evaluate(obs, playerIndex) {
-    const feat = this.buildFeatures(obs, playerIndex);
-    const fwd = this._forward(feat);
+    const feat = this.buildFeatures(obs, playerIndex, this._infer.feat);
+    const fwd = this._forward(feat, this._infer.fwd);
 
     const probs = this.hardRulesEnabled
       ? this._maskedProbs(fwd.lx, fwd.ly, fwd.lp, obs)
