@@ -383,6 +383,23 @@ export class PpoPolicyV1 {
       },
     };
 
+    // ------------------------------------------------------------
+    // Training scratch buffers (avoid per-sample allocations)
+    // ------------------------------------------------------------
+    this._train = {
+      dlogitsX: new Float32Array(3),
+      dlogitsY: new Float32Array(3),
+      dlogitsP: new Float32Array(2),
+
+      dh2: new Float32Array(this.hidden2),
+      dz2: new Float32Array(this.hidden2),
+      dh1: new Float32Array(this.hidden1),
+      dz1: new Float32Array(this.hidden1),
+
+      // aux uses X only (can reuse dlogitsX but keeping separate is clearer)
+      auxDlogitsX: new Float32Array(3),
+    };
+
     this.learningRate = Number(opts.learningRate ?? 3e-4);
     // imitation(BC) 전용 lr. 지정 안 하면 learningRate 사용
      this.imitationLr = Number(opts.imitationLr ?? this.learningRate);
@@ -1361,22 +1378,31 @@ logpValue(obs, playerIndex, action) {
     const mb = Math.max(8, (opts.minibatch ?? 256) | 0);
 
     // Value diagnostics accumulators (reset each ppoUpdate)
-    this._vSum=0; this._rSum=0; this._vSum2=0; this._rSum2=0; this._vrSum=0; this._vrCount=0;
-    this._advPos=0; this._advNeg=0; this._advZero=0;
+    this._vSum = 0; this._rSum = 0; this._vSum2 = 0; this._rSum2 = 0; this._vrSum = 0; this._vrCount = 0;
+    this._advPos = 0; this._advNeg = 0; this._advZero = 0;
     let stats = { steps: batch.length, updates: 0, approxKl: 0, policyLoss: 0, valueLoss: 0, clipFrac: 0, gradNorm: 0, wNorm: 0, advMean: 0, advStd: 0, retMean: 0, retStd: 0, rewMean: 0, rewStd: 0, vrCorr: 0, auxLoss: 0, auxCount: 0 };
 
+    // ------------------------------------------------------------
+    // ✅ 1단계 alloc 제거: index buffer 재사용 + slice 제거
+    // ------------------------------------------------------------
+    const n = batch.length | 0;
+    let idxs = this._ppoIdxs;
+    if (!idxs || idxs.length !== n) {
+      idxs = new Int32Array(n);
+      this._ppoIdxs = idxs;
+    }
+    for (let i = 0; i < n; i++) idxs[i] = i;
+
     for (let ep = 0; ep < epochs; ep++) {
-      // shuffle indices
-      const idxs = new Array(batch.length);
-      for (let i = 0; i < idxs.length; i++) idxs[i] = i;
-      for (let i = idxs.length - 1; i > 0; i--) {
+      // shuffle indices in-place (Fisher–Yates)
+      for (let i = n - 1; i > 0; i--) {
         const j = (Math.random() * (i + 1)) | 0;
         const t = idxs[i]; idxs[i] = idxs[j]; idxs[j] = t;
       }
 
-      for (let start = 0; start < idxs.length; start += mb) {
-        const end = Math.min(idxs.length, start + mb);
-        const slice = idxs.slice(start, end);
+      for (let start = 0; start < n; start += mb) {
+        const end = Math.min(n, start + mb);
+        const nMb = Math.max(1, end - start);
 
         // accumulate grads
         const g = this._zeroGrads();
@@ -1393,7 +1419,8 @@ logpValue(obs, playerIndex, action) {
         let auxLoss = 0;
         let auxCount = 0;
 
-        for (const id of slice) {
+        for (let t = start; t < end; t++) {
+          const id = idxs[t];
           const it = batch[id];
           const obs = it.obs;
           const action = it.action;
@@ -1405,8 +1432,8 @@ logpValue(obs, playerIndex, action) {
           const evalNow = this.logpValue(obs, it.playerIndex ?? 1, action);
           const logp = evalNow.logp;
           const v = evalNow.value;
-          this._vSum += v; this._vSum2 += v*v;
-          this._rSum += ret; this._rSum2 += ret*ret;
+          this._vSum += v; this._vSum2 += v * v;
+          this._rSum += ret; this._rSum2 += ret * ret;
           this._vrSum += v * ret;
           this._vrCount++;
           const ratio = Math.exp(clip(logp - oldLogp, -10, 10));
@@ -1416,7 +1443,6 @@ logpValue(obs, playerIndex, action) {
           retSum += ret; retSum2 += ret * ret;
           const rwd = Number(it.reward ?? 0);
           rewSum += rwd; rewSum2 += rwd * rwd;
-
 
           // PPO clipped objective: L = -min(ratio*adv, clip(ratio)*adv)
           const clipEps = this.clipEps;
@@ -1461,14 +1487,12 @@ logpValue(obs, playerIndex, action) {
           const aux = it.aux;
 
           if (AUX_COEF > 0 && aux && aux.mask === 1) {
-            const t = aux.moveToLandingX;
+            const tt = aux.moveToLandingX;
             // teacherCls must be 0/1/2
-            const teacherCls = (t === 0 || t === 1 || t === 2) ? t : 1;
+            const teacherCls = (tt === 0 || tt === 1 || tt === 2) ? tt : 1;
 
-            // loss for logging: -log p(teacher)
-            // (px는 _accumulateAuxX에서도 다시 계산하지만, log용은 가벼운 비용이라 OK)
-            const evAux = this.evaluate(obs, it.playerIndex ?? 1);
-            auxLoss += -logProbFromProbs(evAux.px, teacherCls);
+            // ✅ 중복 evaluate 제거: 이미 계산된 evalNow.px 재사용
+            auxLoss += -logProbFromProbs(evalNow.px, teacherCls);
             auxCount++;
 
             // gradient: add CE on X head only
@@ -1477,11 +1501,11 @@ logpValue(obs, playerIndex, action) {
         }
 
         // apply grads
-        const scale = 1 / Math.max(1, slice.length);
+        const scale = 1 / Math.max(1, nMb);
         this._applyGrads(g, scale);
 
         // finalize minibatch metrics
-        const nS = Math.max(1, slice.length);
+        const nS = Math.max(1, nMb);
         const advMean = advSum / nS;
         const retMean = retSum / nS;
         const rewMean = rewSum / nS;
@@ -1511,7 +1535,7 @@ logpValue(obs, playerIndex, action) {
         stats.auxCount += auxCount;
 
         stats.updates++;
-        stats.approxKl += klSum / Math.max(1, slice.length);
+        stats.approxKl += klSum / Math.max(1, nMb);
       }
     }
 
@@ -1545,7 +1569,6 @@ logpValue(obs, playerIndex, action) {
       rewStd: stats.rewStd,
     };
 
-    
     // value-return correlation
     let corr = 0;
     if (this._vrCount > 1) {
@@ -1633,9 +1656,10 @@ logpValue(obs, playerIndex, action) {
 
     // dL/dlogits for each head from dL/dlogp:
     // d logp / d logits = onehot - probs
-    const dlogitsX = new Float32Array(3);
-    const dlogitsY = new Float32Array(3);
-    const dlogitsP = new Float32Array(2);
+    const tmp = this._train;
+    const dlogitsX = tmp.dlogitsX; dlogitsX.fill(0);
+    const dlogitsY = tmp.dlogitsY; dlogitsY.fill(0);
+    const dlogitsP = tmp.dlogitsP; dlogitsP.fill(0);
 
     if (dL_dlogp !== 0) {
       // d logp / d logits = onehot - probs
@@ -1646,7 +1670,7 @@ logpValue(obs, playerIndex, action) {
     }
 
     // grads for heads + accumulate dh2
-    const dh2 = new Float32Array(this.hidden2);
+    const dh2 = tmp.dh2; dh2.fill(0);
 
     for (let k = 0; k < 3; k++) {
       const grad = dlogitsX[k];
@@ -1687,7 +1711,7 @@ logpValue(obs, playerIndex, action) {
     }
 
     // backprop through tanh at layer2
-    const dz2 = new Float32Array(this.hidden2);
+    const dz2 = tmp.dz2; dz2.fill(0);
     for (let i = 0; i < this.hidden2; i++) {
       const act = fwd.h2[i];
       const der = (this.activation === 'linear') ? 1 : (1 - act * act);
@@ -1696,7 +1720,7 @@ logpValue(obs, playerIndex, action) {
     }
 
     // W2 grads and dh1
-    const dh1 = new Float32Array(this.hidden1);
+    const dh1 = tmp.dh1; dh1.fill(0);
     for (let i = 0; i < this.hidden2; i++) {
       const grad = dz2[i];
       const w = this.W2[i];
@@ -1708,7 +1732,7 @@ logpValue(obs, playerIndex, action) {
     }
 
     // backprop through tanh at layer1
-    const dz1 = new Float32Array(this.hidden1);
+    const dz1 = tmp.dz1; dz1.fill(0);
     for (let i = 0; i < this.hidden1; i++) {
       const act = fwd.h1[i];
       const der = (this.activation === 'linear') ? 1 : (1 - act * act);
@@ -1742,13 +1766,14 @@ logpValue(obs, playerIndex, action) {
     const { px } = this._maskedProbs(fwd.lx, fwd.ly, fwd.lp, obs);
 
     // dL/dlogitsX = w * (px - onehot(teacher))
-    const dlogitsX = new Float32Array(3);
+    const tmp = this._train;
+    const dlogitsX = tmp.auxDlogitsX; dlogitsX.fill(0);
     for (let i = 0; i < 3; i++) {
       dlogitsX[i] = w * (px[i] - (i === teacherCls ? 1 : 0));
     }
 
     // grads for X head + accumulate dh2
-    const dh2 = new Float32Array(this.hidden2);
+    const dh2 = tmp.dh2; dh2.fill(0);
 
     for (let k = 0; k < 3; k++) {
       const grad = dlogitsX[k];
@@ -1762,7 +1787,7 @@ logpValue(obs, playerIndex, action) {
     }
 
     // backprop through tanh at layer2
-    const dz2 = new Float32Array(this.hidden2);
+    const dz2 = tmp.dz2; dz2.fill(0);
     for (let i = 0; i < this.hidden2; i++) {
       const act = fwd.h2[i];
       const der = (this.activation === 'linear') ? 1 : (1 - act * act);
@@ -1771,7 +1796,7 @@ logpValue(obs, playerIndex, action) {
     }
 
     // W2 grads and dh1
-    const dh1 = new Float32Array(this.hidden1);
+    const dh1 = tmp.dh1; dh1.fill(0);
     for (let i = 0; i < this.hidden2; i++) {
       const grad = dz2[i];
       const wRow = this.W2[i];
@@ -1783,7 +1808,7 @@ logpValue(obs, playerIndex, action) {
     }
 
     // backprop through tanh at layer1
-    const dz1 = new Float32Array(this.hidden1);
+    const dz1 = tmp.dz1; dz1.fill(0);
     for (let i = 0; i < this.hidden1; i++) {
       const act = fwd.h1[i];
       const der = (this.activation === 'linear') ? 1 : (1 - act * act);
