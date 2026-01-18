@@ -1477,27 +1477,36 @@ logpValue(obs, playerIndex, action) {
           // accumulate KL for logging (approx)
           klSum += (oldLogp - logp);
 
-          // backprop for policy (via chosen actions) and value
-          this._accumulateGrads(g, obs, it.playerIndex ?? 1, action, dL_dlogp, dL_dv);
-
           // ------------------------------------------------------------
           // [STEP4] Aux teacher loss (X-only)
           // ------------------------------------------------------------
-          const AUX_COEF = 0.03; // 시작값 추천(0.02~0.05)
+          const AUX_COEF = 0.03;
           const aux = it.aux;
+
+          let auxTeacherCls = -1;
+          let auxW = 0;
 
           if (AUX_COEF > 0 && aux && aux.mask === 1) {
             const tt = aux.moveToLandingX;
-            // teacherCls must be 0/1/2
-            const teacherCls = (tt === 0 || tt === 1 || tt === 2) ? tt : 1;
+            auxTeacherCls = (tt === 0 || tt === 1 || tt === 2) ? tt : 1;
+            auxW = AUX_COEF;
 
-            // ✅ 중복 evaluate 제거: 이미 계산된 evalNow.px 재사용
-            auxLoss += -logProbFromProbs(evalNow.px, teacherCls);
+            // log only (이미 evalNow.px 사용)
+            auxLoss += -logProbFromProbs(evalNow.px, auxTeacherCls);
             auxCount++;
-
-            // gradient: add CE on X head only
-            this._accumulateAuxX(g, obs, it.playerIndex ?? 1, teacherCls, AUX_COEF);
           }
+
+          // ✅ 한 번의 forward/backprop에서 PPO+aux를 같이 누적
+          this._accumulateGrads(
+            g,
+            obs,
+            it.playerIndex ?? 1,
+            action,
+            dL_dlogp,
+            dL_dv,
+            auxTeacherCls,
+            auxW
+          );
         }
 
         // apply grads
@@ -1642,7 +1651,7 @@ logpValue(obs, playerIndex, action) {
     return g;
   }
 
-  _accumulateGrads(g, obs, playerIndex, action, dL_dlogp, dL_dv) {
+  _accumulateGrads(g, obs, playerIndex, action, dL_dlogp, dL_dv, auxTeacherCls, auxW) {
     // forward with caches
     const feat = this.buildFeatures(obs, playerIndex);
     const fwd = this._forward(feat);
@@ -1667,6 +1676,18 @@ logpValue(obs, playerIndex, action) {
       for (let i = 0; i < 3; i++) dlogitsX[i] = dL_dlogp * ((i === ax ? 1 : 0) - px[i]);
       for (let i = 0; i < 3; i++) dlogitsY[i] = dL_dlogp * ((i === ay ? 1 : 0) - py[i]);
       for (let i = 0; i < 2; i++) dlogitsP[i] = dL_dlogp * ((i === ap ? 1 : 0) - pp[i]);
+    }
+
+    // ------------------------------------------------------------
+    // ✅ Aux CE on X head only: dL/dlogitsX += w * (px - onehot(teacher))
+    // (기존 _accumulateAuxX와 수학 동일)
+    // ------------------------------------------------------------
+    const wAux = Number(auxW ?? 0);
+    const tAux = auxTeacherCls | 0;
+    if (wAux !== 0 && (tAux === 0 || tAux === 1 || tAux === 2)) {
+      for (let i = 0; i < 3; i++) {
+        dlogitsX[i] += wAux * (px[i] - (i === tAux ? 1 : 0));
+      }
     }
 
     // grads for heads + accumulate dh2
