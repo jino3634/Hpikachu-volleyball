@@ -1363,9 +1363,6 @@ export class Trainer {
           minibatch: this.ppoMinibatch,
         });
 
-        // Return feature buffers to pool after update
-        this._freeRolloutItems(batch);
-
         // Return feature buffers to pool after update (even if stats missing)
         this._freeRolloutItems(batch);
 

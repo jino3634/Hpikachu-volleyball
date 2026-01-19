@@ -88,6 +88,115 @@ function logProbFromProbs(probs, idx) {
 }
 
 
+// ------------------------------------------------------------
+// Deterministic RNG (no closure) + argmax/top2 helpers
+// ------------------------------------------------------------
+function rngSeed(state, seed) {
+  state.a = (seed >>> 0);
+}
+function rngNext(state) {
+  // mulberry32 step
+  let a = state.a | 0;
+  a = (a + 0x6D2B79F5) | 0;
+  let t = Math.imul(a ^ (a >>> 15), 1 | a);
+  t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+  state.a = a;
+  return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+}
+function hashObs32(obs, playerIndex) {
+  const me = obs?.me ?? {};
+  const ball = obs?.ball ?? {};
+  const q = (v, s) => (Math.floor((Number(v) || 0) * s) | 0);
+  let h = 2166136261 | 0;
+  const mix = (x) => { h ^= (x | 0); h = Math.imul(h, 16777619); };
+  mix(playerIndex | 0);
+  mix(q(me.x, 1000));
+  mix(q(me.y, 1000));
+  mix(q(ball.x, 1000));
+  mix(q(ball.y, 1000));
+  mix(q(ball.timeToLand, 1000));
+  mix(q(ball.landingX, 1000));
+  return h >>> 0;
+}
+function sampleCategoricalRng(probs, state) {
+  let sum = 0;
+  for (let i = 0; i < probs.length; i++) sum += Math.max(0, Number(probs[i] ?? 0));
+  if (!(sum > 0)) return 0;
+  let r = rngNext(state) * sum;
+  for (let i = 0; i < probs.length; i++) {
+    r -= Math.max(0, Number(probs[i] ?? 0));
+    if (r <= 0) return i;
+  }
+  return probs.length - 1;
+}
+function argmax(arr) {
+  let mx = -Infinity, mi = 0;
+  for (let i = 0; i < arr.length; i++) {
+    const v = Number(arr[i] ?? -Infinity);
+    if (v > mx) { mx = v; mi = i; }
+  }
+  return mi;
+}
+function top2Margin(arr) {
+  let a = -Infinity, b = -Infinity;
+  for (let i = 0; i < arr.length; i++) {
+    const v = Number(arr[i] ?? -Infinity);
+    if (v > a) { b = a; a = v; }
+    else if (v > b) { b = v; }
+  }
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return Infinity;
+  return a - b;
+}
+function chooseDeterministic(probs, tieEps, rngState) {
+  const m = top2Margin(probs);
+  if (m < tieEps) return sampleCategoricalRng(probs, rngState);
+  return argmax(probs);
+}
+function renorm2Into(out2, a, b) {
+  const s = a + b;
+  if (!(s > 1e-12)) { out2[0] = 0.5; out2[1] = 0.5; return out2; }
+  const inv = 1 / s;
+  out2[0] = a * inv;
+  out2[1] = b * inv;
+  return out2;
+}
+function renorm3Into(out3, a, b, c) {
+  const s = a + b + c;
+  if (!(s > 1e-12)) { out3[0] = 1/3; out3[1] = 1/3; out3[2] = 1/3; return out3; }
+  const inv = 1 / s;
+  out3[0] = a * inv;
+  out3[1] = b * inv;
+  out3[2] = c * inv;
+  return out3;
+}
+
+function recordActionStats(as, pxE, pyE, ppE, ax, ay, ap) {
+  if (!as) return;
+  as.n++;
+  as.entX += entropyFromProbs(pxE);
+  as.entY += entropyFromProbs(pyE);
+  as.entP += entropyFromProbs(ppE);
+  as.maxX += maxProb(pxE);
+  as.maxY += maxProb(pyE);
+  as.maxP += maxProb(ppE);
+  as.axCounts[ax] = (as.axCounts[ax] ?? 0) + 1;
+  as.ayCounts[ay] = (as.ayCounts[ay] ?? 0) + 1;
+  as.apCounts[ap] = (as.apCounts[ap] ?? 0) + 1;
+}
+function makeEmptyPowerGate() {
+  return {
+    frames: 0,
+    eligibleFrames: 0,
+    blockedFrames: 0,
+    sumPPower: 0,
+    sumPPowerEligible: 0,
+    expectedApplied: 0,
+    sampledApplied: 0,
+    blockedNoContactWindow: 0,
+  };
+}
+
+
 function clamp01(x) {
   return (x < 0) ? 0 : (x > 1 ? 1 : x);
 }
@@ -380,6 +489,13 @@ export class PpoPolicyV1 {
         px: new Float32Array(3),
         py: new Float32Array(3),
         pp: new Float32Array(2),
+
+        // act() scratch (avoid per-decision allocations)
+        ppRaw2: new Float32Array(2),
+        ppEff2: new Float32Array(2),
+        pxEff3: new Float32Array(3),
+        pyEff3: new Float32Array(3),
+        rngState: { a: 0 },
       },
     };
 
@@ -914,300 +1030,200 @@ act(obs, playerIndex, opts = {}) {
 
   const { px, py, pp, value } = this.evaluate(obs, playerIndex);
   if (this.debug.maskStats) this.debug.maskStats.n++;
+
+  // Reusable temp buffers (NO allocations per decision)
+  const tmp = this._infer.tmp;
+  const ppRaw = tmp.ppRaw2;
+  const ppEff = tmp.ppEff2;
+  const pxEff = tmp.pxEff3;
+  const pyEff = tmp.pyEff3;
   const as = this.debug.actionStats;
-  const recordActionStats = (pxEff, pyEff, ppEff, ax, ay, ap) => {
-    as.n++;
-    as.entX += entropyFromProbs(pxEff);
-    as.entY += entropyFromProbs(pyEff);
-    as.entP += entropyFromProbs(ppEff);
-    as.maxX += maxProb(pxEff);
-    as.maxY += maxProb(pyEff);
-    as.maxP += maxProb(ppEff);
 
-    as.axCounts[ax] = (as.axCounts[ax] ?? 0) + 1;
-    as.ayCounts[ay] = (as.ayCounts[ay] ?? 0) + 1;
-    as.apCounts[ap] = (as.apCounts[ap] ?? 0) + 1;
-
-  };
-
-  // ✅ Power-hit gate 제거(소프트 억제/근접/TTL gate 전부 제거)
-  // ✅ 하드 금지 조건은 오직 lying/diving
+  // power gate
   const gate = powerHitGate(obs, playerIndex, this.genome?.powerHitGate);
   const allowPowerHit = gate.allow;
 
-
-  // (아래 dxN/dyN/tLandN는 기존 디버그/통계에서 쓰이므로 "남겨도 됨")
-  // powerGate 디버그는 기존 allowPowerHit(근접+TTL) 기준을 전제로 만들어졌으니,
-  // 이 버전에서는 의미가 바뀐다. (원하면 아래 디버그 블록도 같이 정리해야 함)
-  const ballN = obs?.ball ?? {};
-  const dxN = Math.abs(Number(ballN.x ?? 0) - Number(me.x ?? 0));
-  const dyN = Math.abs(Number(ballN.y ?? 0) - Number(me.y ?? 0));
-  const tLandN = Number(ballN.timeToLand ?? 1);
-
-  // epsilon random exploration (still valid)
+  // epsilon random exploration
   if (!deterministic && epsRand > 0 && Math.random() < epsRand) {
-    // 0) epsilon 랜덤 액션 먼저 결정 (유효성 최소 보장)
-    let ax = (Math.random() * 3) | 0; // 0..2
-    let ay = (Math.random() * 3) | 0; // 0..2
+    let ax = (Math.random() * 3) | 0;
+    let ay = (Math.random() * 3) | 0;
     let ap = (Math.random() < 0.5) ? 1 : 0;
 
-    // 공중에서는 y=-1(클래스0) 금지(네 정책과 동일)
     if (isAir && ay === 0) ay = 1;
-
-    // ✅ powerHit gate: lying/diving일 때만 막기
     if (!allowPowerHit) ap = 0;
 
-    const powerHit = ap ? 1 : 0;
-
-    // 1) logp 계산용 eff 분포 구성(메인 경로와 일치)
-    const ppEff = (!allowPowerHit) ? [1, 0] : (() => {
+    // ppRaw
+    {
       const a0 = clamp01(pp[0] ?? 0);
       const b0 = clamp01(pp[1] ?? 0);
-      const s0 = a0 + b0;
-      return (s0 > 1e-12) ? [a0 / s0, b0 / s0] : [0.5, 0.5];
-    })();
+      renorm2Into(ppRaw, a0, b0);
+    }
 
-    const pxEff = (() => {
-      const a0 = clamp01(px[0] ?? 0), b0 = clamp01(px[1] ?? 0), c0 = clamp01(px[2] ?? 0);
-      // ✅ 지상 powerHit=1 & x=0 하드 금지(이미 너가 채택한 룰)
-      if (!isAir && ap === 1) return renorm3(a0, 0, c0);
-      const s0 = a0 + b0 + c0;
-      return (s0 > 1e-12) ? [a0 / s0, b0 / s0, c0 / s0] : [1/3, 1/3, 1/3];
-    })();
+    // ppEff
+    if (!allowPowerHit) {
+      ppEff[0] = 1; ppEff[1] = 0;
+    } else {
+      const POWER_MIX = 0.15;
+      const p0 = ppRaw[0];
+      const p1 = ppRaw[1];
+      const m = POWER_MIX;
+      const q0 = p0 * (1 - m) + 0.5 * m;
+      const q1 = p1 * (1 - m) + 0.5 * m;
+      renorm2Into(ppEff, q0, q1);
+    }
 
-    const pyEff = (() => {
-      const a0 = clamp01(py[0] ?? 0), b0 = clamp01(py[1] ?? 0), c0 = clamp01(py[2] ?? 0);
-      if (isAir) {
-        const s0 = b0 + c0;
-        return (s0 > 1e-12) ? [0, b0 / s0, c0 / s0] : [0, 0.5, 0.5];
+    // pxEff
+    {
+      const a0 = clamp01(px[0] ?? 0);
+      const b0 = clamp01(px[1] ?? 0);
+      const c0 = clamp01(px[2] ?? 0);
+      if (!isAir && ap === 1) {
+        if (this.debug.maskStats) { this.debug.maskStats.xZeroMaskedCount++; this.debug.maskStats.xZeroMaskedMass += (px[1] ?? 0); }
+        renorm3Into(pxEff, a0, 0, c0);
+      } else {
+        renorm3Into(pxEff, a0, b0, c0);
       }
-      const s0 = a0 + b0 + c0;
-      return (s0 > 1e-12) ? [a0 / s0, b0 / s0, c0 / s0] : [1/3, 1/3, 1/3];
-    })();
+    }
 
-    // 2) 이제 안전하게 기록/로그확률 계산 가능
-    recordActionStats(pxEff, pyEff, ppEff, ax, ay, ap);
+    // pyEff
+    {
+      const a0 = clamp01(py[0] ?? 0);
+      const b0 = clamp01(py[1] ?? 0);
+      const c0 = clamp01(py[2] ?? 0);
+      if (isAir) {
+        if (this.debug.maskStats) { this.debug.maskStats.yNegMaskedCount++; this.debug.maskStats.yNegMaskedMass += (py[0] ?? 0); }
+        pyEff[0] = 0;
+        renorm2Into(pyEff.subarray(1, 3), b0, c0);
+      } else {
+        renorm3Into(pyEff, a0, b0, c0);
+      }
+    }
+
+    recordActionStats(as, pxEff, pyEff, ppEff, ax, ay, ap);
     const logp =
       logProbFromProbs(pxEff, ax) +
       logProbFromProbs(pyEff, ay) +
       logProbFromProbs(ppEff, ap);
 
     return {
-      action: { xDirection: mapClassToXDir(ax), yDirection: mapClassToYDir(ay), powerHit },
+      action: { xDirection: mapClassToXDir(ax), yDirection: mapClassToYDir(ay), powerHit: ap ? 1 : 0 },
       logp,
       value,
       meta: { epsRandom: true, ax, ay, ap, forcedIdle: skipLearn, reason: (skipLearn ? (isLying ? 'lying' : 'diving') : null) },
     };
   }
 
-  // deterministic = argmax, else sample (with conditional masks applied consistently to sampling + logp)
-  let ax = 1, ay = 1, ap = 0;
+  // deterministic RNG state (no closure alloc)
+  rngSeed(tmp.rngState, (hashObs32(obs, playerIndex) ^ (this._detStep | 0)) >>> 0);
 
-  // 0) 마스킹 전 "원본" pp 정규화 (계측용)
-  const ppRaw = (() => {
-    const a = clamp01(pp[0] ?? 0);
-    const b = clamp01(pp[1] ?? 0);
-    const s = a + b;
-    return (s > 1e-12) ? [a / s, b / s] : [0.5, 0.5];
-  })();
+  // ppRaw
+  {
+    const a0 = clamp01(pp[0] ?? 0);
+    const b0 = clamp01(pp[1] ?? 0);
+    renorm2Into(ppRaw, a0, b0);
+  }
 
-  // ✅ allowPowerHit일 때도 power=0으로 붕괴하니까, 행동분포를 혼합으로 만든다.
-  // mix=0.15면: 85%는 모델, 15%는 50:50 탐색(=power도 가끔 눌러봄)
-  const POWER_MIX = 0.15;
+  // ppEff (mixed to avoid power collapse)
+  if (!allowPowerHit) {
+    ppEff[0] = 1; ppEff[1] = 0;
+  } else {
+    const POWER_MIX = 0.15;
+    const p0 = ppRaw[0];
+    const p1 = ppRaw[1];
+    const m = POWER_MIX;
+    const q0 = p0 * (1 - m) + 0.5 * m;
+    const q1 = p1 * (1 - m) + 0.5 * m;
+    renorm2Into(ppEff, q0, q1);
+  }
 
-  const ppEff = (!allowPowerHit)
-    ? [1, 0]
-    : (() => {
-        const p0 = ppRaw[0];
-        const p1 = ppRaw[1];
-        const m = POWER_MIX;
-        const q0 = p0 * (1 - m) + 0.5 * m;
-        const q1 = p1 * (1 - m) + 0.5 * m;
-        const s = q0 + q1;
-        return (s > 1e-12) ? [q0 / s, q1 / s] : [0.5, 0.5];
-      })();
-
-
-  // --- TIE-DIAG (POWER) INSERT HERE ---
+  // --- TIE-DIAG (POWER) ---
   const as2 = this.debug?.actionStats;
-
-  // ✅ EPS=1e-6은 너무 빡빡해서 사실상 0만 나옴
-  const EPS_TIE = 1e-6;   // "완전 동점"용(그대로 둬도 됨)
-  const EPS_NEAR = 1e-3;  // ✅ "거의 동점"용(이게 핵심)
-
+  const EPS_TIE = 1e-6;
+  const EPS_NEAR = 1e-3;
   if (as2) {
-    // gate 관찰
     if (allowPowerHit) as2.gateAllowN = (as2.gateAllowN | 0) + 1;
     else as2.gateBlockN = (as2.gateBlockN | 0) + 1;
 
     if (deterministic) {
       const marginP = Math.abs(ppEff[1] - ppEff[0]);
       as2.marginPSum += marginP;
-
       if (marginP < EPS_TIE) as2.tieP = (as2.tieP | 0) + 1;
       if (marginP < EPS_NEAR) as2.nearTieP = (as2.nearTieP | 0) + 1;
     }
   }
-  // --- END ---
-  // ✅ deterministic에서 near-tie면 argmax 고정 대신 "고정 seed" 샘플링(결정론 유지)
-  const TIE_EPS_P = 1e-3; // power near-tie
-  const TIE_EPS_X = 1e-3; // x near-tie
-  const TIE_EPS_Y = 1e-3; // y near-tie
 
-  function _mulberry32(seed) {
-    let a = seed >>> 0;
-    return function () {
-      a |= 0; a = (a + 0x6D2B79F5) | 0;
-      let t = Math.imul(a ^ (a >>> 15), 1 | a);
-      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-    };
-  }
+  const TIE_EPS_P = 1e-3;
+  const TIE_EPS_X = 1e-3;
+  const TIE_EPS_Y = 1e-3;
 
-  function _hashObs32(obs, playerIndex) {
-    const me2 = obs?.me ?? {};
-    const ball2 = obs?.ball ?? {};
-    const q = (v, s) => (Math.floor((Number(v) || 0) * s) | 0);
-
-    let h = 2166136261 | 0;
-    const mix = (x) => { h ^= (x | 0); h = Math.imul(h, 16777619); };
-
-    mix(playerIndex | 0);
-    mix(q(me2.x, 1000));
-    mix(q(me2.y, 1000));
-    mix(q(ball2.x, 1000));
-    mix(q(ball2.y, 1000));
-    mix(q(ball2.timeToLand, 1000));
-    mix(q(ball2.landingX, 1000));
-    return h >>> 0;
-  }
-
-  const rng = _mulberry32(
-    (_hashObs32(obs, playerIndex) ^ (this._detStep | 0)) >>> 0
-  );
-
-  function _sampleCategoricalRng(probs) {
-    let sum = 0;
-    for (let i = 0; i < probs.length; i++) sum += Math.max(0, Number(probs[i] ?? 0));
-    if (!(sum > 0)) return 0;
-
-    let r = rng() * sum;
-    for (let i = 0; i < probs.length; i++) {
-      r -= Math.max(0, Number(probs[i] ?? 0));
-      if (r <= 0) return i;
-    }
-    return probs.length - 1;
-  }
-
-  function _top2Margin(arr) {
-    let a = -Infinity, b = -Infinity;
-    for (let i = 0; i < arr.length; i++) {
-      const v = Number(arr[i] ?? -Infinity);
-      if (v > a) { b = a; a = v; }
-      else if (v > b) { b = v; }
-    }
-    if (!Number.isFinite(a) || !Number.isFinite(b)) return Infinity;
-    return a - b;
-  }
-
-  function _argmax(arr) {
-    let mx = -Infinity, mi = 0;
-    for (let i = 0; i < arr.length; i++) {
-      const v = Number(arr[i] ?? -Infinity);
-      if (v > mx) { mx = v; mi = i; }
-    }
-    return mi;
-  }
-
-  function _chooseDeterministic(probs, tieEps) {
-    const m = _top2Margin(probs);
-    if (m < tieEps) return _sampleCategoricalRng(probs); // ✅ near-tie면 seed 샘플
-    return _argmax(probs);                               // ✅ 아니면 argmax
-  }
-
-  // 1) (계측용) apRaw: "원래 정책이 원했을" powerHit 샘플
+  // ap selection
+  let ap = 0;
   let apRaw = 0;
   if (deterministic) {
     apRaw = (ppRaw[1] > ppRaw[0]) ? 1 : 0;
+    ap = chooseDeterministic(ppEff, TIE_EPS_P, tmp.rngState);
   } else {
     apRaw = sampleCategorical(ppRaw);
-  }
-
-  // 2) (실제 행동용) ap: gate 반영된 분포에서 샘플
-  if (deterministic) {
-    // ✅ deterministic에서도 power는 argmax 고정 대신 "seed 고정 샘플링" 사용
-    // allowPowerHit=false면 ppEff=[1,0]이라 어차피 0만 나옴
-    ap = _sampleCategoricalRng(ppEff);
-  } else {
     ap = sampleCategorical(ppEff);
   }
 
-
-  // 2) conditional X distribution: if ground && ap==1 => forbid x=0 (class 1)
-  const pxEff = (() => {
-    const a = clamp01(px[0] ?? 0);
-    const b = clamp01(px[1] ?? 0);
-    const c = clamp01(px[2] ?? 0);
+  // pxEff
+  {
+    const a0 = clamp01(px[0] ?? 0);
+    const b0 = clamp01(px[1] ?? 0);
+    const c0 = clamp01(px[2] ?? 0);
     if (!isAir && ap === 1) {
       if (this.debug.maskStats) { this.debug.maskStats.xZeroMaskedCount++; this.debug.maskStats.xZeroMaskedMass += (px[1] ?? 0); }
-      return renorm3(a, 0, c);
+      renorm3Into(pxEff, a0, 0, c0);
+    } else {
+      renorm3Into(pxEff, a0, b0, c0);
     }
-    const s = a + b + c;
-    return (s > 1e-12) ? [a / s, b / s, c / s] : [1/3, 1/3, 1/3];
-  })();
-
-  // --- TIE-DIAG (X) INSERT HERE ---
-  if (as2 && deterministic) {
-    // top1-top2 margin
-    const a = pxEff[0], b = pxEff[1], c = pxEff[2];
-    const s = [a,b,c].slice().sort((x,y)=>y-x);
-    const marginX = s[0] - s[1];
-    as2.marginXSum += marginX;
-
-    // 완전 동점(거의 안 나옴)
-    if (marginX < 1e-6) as2.tieX = (as2.tieX | 0) + 1;
-
-    // ✅ near-tie (이게 의미 있음)
-    if (marginX < 1e-3) as2.nearTieX = (as2.nearTieX | 0) + 1;
   }
-  // --- END ---
 
+  // --- TIE-DIAG (X) without allocations ---
+  if (as2 && deterministic) {
+    const mX = top2Margin(pxEff);
+    as2.marginXSum += mX;
+    if (mX < 1e-6) as2.tieX = (as2.tieX | 0) + 1;
+    if (mX < 1e-3) as2.nearTieX = (as2.nearTieX | 0) + 1;
+  }
+
+  // ax selection
+  let ax = 1;
   if (deterministic) {
-    ax = _chooseDeterministic(pxEff, TIE_EPS_X);
+    ax = chooseDeterministic(pxEff, TIE_EPS_X, tmp.rngState);
     if (!isAir && ap === 1 && ax === 1 && this.debug.maskStats) this.debug.maskStats.illegalXSampledPrevented++;
   } else {
     ax = sampleCategorical(pxEff);
     if (!isAir && ap === 1 && ax === 1 && this.debug.maskStats) this.debug.maskStats.illegalXSampledPrevented++;
   }
 
-  // 3) Y distribution (keep current behavior: if air forbid y=-1 to avoid double-jump)
-  const pyEff = (() => {
-    const a = clamp01(py[0] ?? 0);
-    const b = clamp01(py[1] ?? 0);
-    const c = clamp01(py[2] ?? 0);
+  // pyEff
+  {
+    const a0 = clamp01(py[0] ?? 0);
+    const b0 = clamp01(py[1] ?? 0);
+    const c0 = clamp01(py[2] ?? 0);
     if (isAir) {
       if (this.debug.maskStats) { this.debug.maskStats.yNegMaskedCount++; this.debug.maskStats.yNegMaskedMass += (py[0] ?? 0); }
-      const s = b + c;
-      return (s > 1e-12) ? [0, b / s, c / s] : [0, 0.5, 0.5];
+      pyEff[0] = 0;
+      renorm2Into(pyEff.subarray(1, 3), b0, c0);
+    } else {
+      renorm3Into(pyEff, a0, b0, c0);
     }
-    const s = a + b + c;
-    return (s > 1e-12) ? [a / s, b / s, c / s] : [1/3, 1/3, 1/3];
-  })();
-
-  // --- TIE-DIAG (Y) INSERT HERE ---
-  if (as2 && deterministic) {
-    const a = pyEff[0], b = pyEff[1], c = pyEff[2];
-    const s = [a,b,c].slice().sort((x,y)=>y-x);
-    const marginY = s[0] - s[1];
-    as2.marginYSum += marginY;
-
-    if (marginY < 1e-6) as2.tieY = (as2.tieY | 0) + 1;
-    if (marginY < 1e-3) as2.nearTieY = (as2.nearTieY | 0) + 1;
   }
-  // --- END ---
 
+  // --- TIE-DIAG (Y) without allocations ---
+  if (as2 && deterministic) {
+    const mY = top2Margin(pyEff);
+    as2.marginYSum += mY;
+    if (mY < 1e-6) as2.tieY = (as2.tieY | 0) + 1;
+    if (mY < 1e-3) as2.nearTieY = (as2.nearTieY | 0) + 1;
+  }
+
+  // ay selection
+  let ay = 1;
   if (deterministic) {
-    ay = _chooseDeterministic(pyEff, TIE_EPS_Y);
+    ay = chooseDeterministic(pyEff, TIE_EPS_Y, tmp.rngState);
     if (isAir && ay === 0 && this.debug.maskStats) this.debug.maskStats.illegalYSampledPrevented++;
   } else {
     ay = sampleCategorical(pyEff);
@@ -1220,11 +1236,14 @@ act(obs, playerIndex, opts = {}) {
     yc[ay] = (yc[ay] ?? 0) + 1;
   }
 
-  const logp = logProbFromProbs(pxEff, ax) + logProbFromProbs(pyEff, ay) + logProbFromProbs(ppEff, ap);
+  const logp =
+    logProbFromProbs(pxEff, ax) +
+    logProbFromProbs(pyEff, ay) +
+    logProbFromProbs(ppEff, ap);
+
   const action = { xDirection: mapClassToXDir(ax), yDirection: mapClassToYDir(ay), powerHit: ap ? 1 : 0 };
 
-  // diagnostics: count sampled power-hit actions (main policy path)
-  // (선택) powerHit gate 디버그 카운트 개선
+  // diagnostics: per-frame, expectation-based
   function makeEmptyPowerGate() {
     return {
       frames: 0,
@@ -1238,44 +1257,34 @@ act(obs, playerIndex, opts = {}) {
     };
   }
 
-  // --- P0-2 power gate diagnostics: per-frame, expectation-based ---
   if (!this.debug.powerGate) this.debug.powerGate = makeEmptyPowerGate();
   const pg = this.debug.powerGate;
-
-  // 모집단: act 호출 프레임
   pg.frames += 1;
 
   if (allowPowerHit) {
     pg.eligibleFrames += 1;
   } else {
     pg.blockedFrames += 1;
-    pg.blockedNoContactWindow += 1; // 현재 gate는 사실상 이 이유 하나
+    pg.blockedNoContactWindow += 1;
   }
 
-  // 정책의 power 선호도(샘플이 아니라 확률)
   const pPower = Number(ppRaw[1] ?? 0);
   pg.sumPPower += pPower;
   if (allowPowerHit) pg.sumPPowerEligible += pPower;
-
-  // 기댓값 기준 실제 적용량
   pg.expectedApplied += allowPowerHit ? pPower : 0;
-
-  // 샘플 기준 실제 행동(ap==1)
   if (ap === 1) pg.sampledApplied += 1;
 
-
-  // ✅ "실제로 실행된" powerHit=1 샘플은 기존처럼 따로 유지
   if (ap === 1) {
     this.debug.powerHitSampled = (this.debug.powerHitSampled ?? 0) + 1;
 
-    const as = this.debug.actionStats;
-    as.powerHitAllowed = (as.powerHitAllowed ?? 0) + (allowPowerHit ? 1 : 0);
-    as.powerHitAir = (as.powerHitAir ?? 0) + (gate.airOK ? 1 : 0);
-    as.powerHitGround = (as.powerHitGround ?? 0) + (gate.groundOK ? 1 : 0);
+    const as3 = this.debug.actionStats;
+    as3.powerHitAllowed = (as3.powerHitAllowed ?? 0) + (allowPowerHit ? 1 : 0);
+    as3.powerHitAir = (as3.powerHitAir ?? 0) + (gate.airOK ? 1 : 0);
+    as3.powerHitGround = (as3.powerHitGround ?? 0) + (gate.groundOK ? 1 : 0);
   }
 
-  recordActionStats(pxEff, pyEff, ppEff, ax, ay, ap);
-  return { action, logp, value, meta: { ax, ay, ap, forcedIdle: skipLearn, reason: (skipLearn ? (isLying ? 'lying' : 'diving') : null) } };
+  recordActionStats(as, pxEff, pyEff, ppEff, ax, ay, ap);
+  return { action, logp, value, meta: { ax, ay, ap, apRaw, forcedIdle: skipLearn, reason: (skipLearn ? (isLying ? 'lying' : 'diving') : null) } };
 }
 
 
