@@ -1290,7 +1290,15 @@ export class Trainer {
 
         okInfoThisPoint++;
 
-        const me = tr.obs?.me ?? {};
+        const obsAny = tr.obs;
+
+        // ✅ Memory/GC optimization:
+        // Episode transitions may already store compact features (Float32Array) instead of full obs.
+        const isObsFeat = (obsAny instanceof Float32Array) && ((obsAny.length | 0) === (this._featLen | 0));
+
+        if (!isObsFeat) {
+          // Only update state-learn breakdown when we still have full obs.
+          const me = obsAny?.me ?? {};
           const st = Number(me.state ?? 0);
           const isLying = !!me.isLying || st === 4;
           const isDiving = !!me.isDiving || st === 3;
@@ -1301,15 +1309,20 @@ export class Trainer {
           if (!isAir && canAct) this.learnDiag.stateLearn.ground++;
           if (isDiving) this.learnDiag.stateLearn.diving++;
           if (isLying) this.learnDiag.stateLearn.lying++;
-          // Build features into a reusable buffer (rollout stores feat only)
-          const feat = this._allocFeat();
+        }
+
+        // Build features into a reusable buffer (rollout stores feat only)
+        // - If obs is already a feature vector, take ownership and skip buildFeatures.
+        // - Otherwise, build into a pooled buffer.
+        const feat = isObsFeat ? obsAny : this._allocFeat();
+        if (!isObsFeat) {
           try {
             // Prefer out-parameter if available to avoid allocations.
             if (this.policy && typeof this.policy.buildFeatures === 'function') {
               if ((this.policy.buildFeatures.length | 0) >= 3) {
-                this.policy.buildFeatures(tr.obs, this.learningPlayer, feat);
+                this.policy.buildFeatures(obsAny, this.learningPlayer, feat);
               } else {
-                const tmp = this.policy.buildFeatures(tr.obs, this.learningPlayer);
+                const tmp = this.policy.buildFeatures(obsAny, this.learningPlayer);
                 if (tmp && tmp.length === feat.length) feat.set(tmp);
               }
             }
@@ -1319,6 +1332,7 @@ export class Trainer {
             skippedBadFields++;
             continue;
           }
+        }
 
           this.rollout.push({
             feat,

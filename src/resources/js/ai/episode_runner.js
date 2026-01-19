@@ -38,6 +38,35 @@ export class OnePointEpisodeRunner {
     this._maxTotalSteps = 200000;        // 전체 stepLogic 호출 상한
   }
 
+  // ============================================================
+  // Feature extraction (memory/GC optimization)
+  // - Store compact Float32Array features in Episode transitions
+  //   instead of full obs objects.
+  // ============================================================
+  _buildFeatForObs(policy, obs) {
+    try {
+      if (!policy || typeof policy.buildFeatures !== 'function') return null;
+      if (!obs) return null;
+
+      const len = (typeof policy.featureLen === 'number') ? (policy.featureLen | 0) : 24;
+      if (len <= 0) return null;
+
+      const feat = new Float32Array(len);
+
+      // Prefer out-parameter to avoid allocations.
+      if ((policy.buildFeatures.length | 0) >= 3) {
+        policy.buildFeatures(obs, this.learningPlayer, feat);
+      } else {
+        const tmp = policy.buildFeatures(obs, this.learningPlayer);
+        if (!tmp || tmp.length !== feat.length) return null;
+        feat.set(tmp);
+      }
+      return feat;
+    } catch (_) {
+      return null;
+    }
+  }
+
   // ─────────────────────────────────────────────────────────────
   // 상태/입력 헬퍼
   // ─────────────────────────────────────────────────────────────
@@ -693,11 +722,19 @@ export class OnePointEpisodeRunner {
 
           // PPO requires decisionInfo (logp/value). If missing => skip creating a transition.
           if (sampledDecision && decisionInfo) {
+            // ✅ Memory optimization: store compact features instead of full obs objects.
+            // PPO training does not need the full obs tree; a fixed-length Float32Array is enough.
+            const policy = agent?.policy;
+            const obsFeat = this._buildFeatForObs(policy, obs);
+            const nextFeat = this._buildFeatForObs(policy, nextObs);
+
             builder.addStep({
               t: frames,
-              obs,
+              // Prefer features; fall back to obs if feature extraction fails.
+              obs: obsFeat ?? obs,
               action: inputTuple,
-              nextObs,
+              // nextObs is unused by PPO core currently; keep only compact features.
+              nextObs: nextFeat,
               done: false,
               info: decisionInfo,
               roundEvents: ev,
