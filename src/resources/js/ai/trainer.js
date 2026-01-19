@@ -157,6 +157,15 @@ export class Trainer {
 
     // PPO rollout settings
     this.rollout = [];
+
+    // ------------------------------------------------------------------
+    // Rollout memory optimization
+    // - Store only feature vectors (Float32Array) in rollout instead of full obs.
+    // - Reuse feature buffers via a small pool to avoid per-step allocations.
+    // ------------------------------------------------------------------
+    this._featLen = (this.policy && typeof this.policy.featureLen === 'number') ? (this.policy.featureLen | 0) : 24;
+    this._featPool = [];
+    this._featPoolMax = 4096; // will be tuned after rolloutSteps is set
     this.learnDiag = {
       episodes: 0,
       transitions: 0,
@@ -180,6 +189,9 @@ export class Trainer {
     };
     this.rolloutSteps = 2048;
     this.minRolloutToUpdate = 256; // flush threshold for remaining rollout steps
+
+    // Pool size heuristic (keep a little headroom for partial rollout + batching)
+    this._featPoolMax = Math.max(1024, Math.min(16384, (this.rolloutSteps | 0) * 2));
 
     this.ppoEpochs = 4;
     this.ppoMinibatch = 256;
@@ -433,6 +445,28 @@ export class Trainer {
       currentSet: this.currentSet,
       lastResult: this.lastResult,
     };
+  }
+
+  // ==============================
+  // Rollout feature buffer pool
+  // ==============================
+  _allocFeat() {
+    const f = this._featPool && this._featPool.length ? this._featPool.pop() : null;
+    return f || new Float32Array(this._featLen | 0);
+  }
+
+  _freeFeat(f) {
+    if (!f) return;
+    if (!this._featPool) this._featPool = [];
+    if (this._featPool.length < (this._featPoolMax | 0)) this._featPool.push(f);
+  }
+
+  _freeRolloutItems(items) {
+    if (!items || !items.length) return;
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i];
+      if (it && it.feat) this._freeFeat(it.feat);
+    }
   }
 
   // ==============================
@@ -1040,6 +1074,8 @@ export class Trainer {
       } else if (rolloutBeforeEval > 0) {
         flushAction = 'DROP';
         dropped = rolloutBeforeEval;
+        // Free pooled feature buffers before dropping rollout
+        this._freeRolloutItems(this.rollout);
         this.rollout.length = 0;
       }
 
@@ -1249,6 +1285,9 @@ export class Trainer {
         if (!info) { skippedNoInfo++; continue; }
         if (typeof info.logp !== 'number' || typeof info.value !== 'number') { skippedBadFields++; continue; }
 
+        // We require obs to build features for PPO.
+        if (!tr.obs) { skippedBadFields++; continue; }
+
         okInfoThisPoint++;
 
         const me = tr.obs?.me ?? {};
@@ -1262,8 +1301,27 @@ export class Trainer {
           if (!isAir && canAct) this.learnDiag.stateLearn.ground++;
           if (isDiving) this.learnDiag.stateLearn.diving++;
           if (isLying) this.learnDiag.stateLearn.lying++;
+          // Build features into a reusable buffer (rollout stores feat only)
+          const feat = this._allocFeat();
+          try {
+            // Prefer out-parameter if available to avoid allocations.
+            if (this.policy && typeof this.policy.buildFeatures === 'function') {
+              if ((this.policy.buildFeatures.length | 0) >= 3) {
+                this.policy.buildFeatures(tr.obs, this.learningPlayer, feat);
+              } else {
+                const tmp = this.policy.buildFeatures(tr.obs, this.learningPlayer);
+                if (tmp && tmp.length === feat.length) feat.set(tmp);
+              }
+            }
+          } catch (e) {
+            // If feature build fails, free buffer and skip.
+            this._freeFeat(feat);
+            skippedBadFields++;
+            continue;
+          }
+
           this.rollout.push({
-            obs: tr.obs ?? null,
+            feat,
             action: tr.action ?? null,
             reward: Number(tr.reward ?? 0),
             done: !!tr.done,
@@ -1304,6 +1362,12 @@ export class Trainer {
           epochs: this.ppoEpochs,
           minibatch: this.ppoMinibatch,
         });
+
+        // Return feature buffers to pool after update
+        this._freeRolloutItems(batch);
+
+        // Return feature buffers to pool after update (even if stats missing)
+        this._freeRolloutItems(batch);
 
         if (!stats) { logDebug('[PPO] flush stats missing'); continue; }
         const akl = (typeof stats.approxKl === 'number') ? stats.approxKl.toFixed(6) : 'NA';
@@ -1990,12 +2054,21 @@ _buildPointReplay(res) {
           minibatch: this.ppoMinibatch,
         });
 
+        // Return feature buffers to pool after update
+        this._freeRolloutItems(batch);
+
+        if (!stats) {
+          logDebug('[PPO] flush stats missing');
+          continue;
+        }
+
         // ---- PPO flush 카운터 ----
         this.ppoFlushCount++;
-        this.ppoFlushSteps += (stats?.steps ?? batch.length);
+        this.ppoFlushSteps += (stats.steps ?? batch.length);
 
         // ---- PPO logs ----
-        logDebug(`[PPO] flush steps=${stats.steps} updates=${stats.updates} approxKL=${stats.approxKl.toFixed(6)}`);
+        const akl = (typeof stats.approxKl === 'number') ? stats.approxKl.toFixed(6) : 'NA';
+        logDebug(`[PPO] flush steps=${stats.steps ?? 'NA'} updates=${stats.updates ?? 'NA'} approxKL=${akl}`);
         if (stats && typeof stats.policyLoss === 'number') {
         logDebug(
             `[PPO-LOSS] policyLoss=${stats.policyLoss.toFixed(6)} ` +
