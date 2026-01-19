@@ -1521,7 +1521,9 @@ logpValue(obs, playerIndex, action) {
           // ------------------------------------------------------------
           // [STEP4] Aux teacher loss (X-only)
           // ------------------------------------------------------------
-          const AUX_COEF = 0.03;
+          // Aux teacher loss weight (keep VERY small; this is a stabilizing bias, not a new objective)
+          // Recommended range: 0.005 ~ 0.03. Start at 0.01.
+          const AUX_COEF = 0.01;
           const aux = it.aux;
 
           let auxTeacherCls = -1;
