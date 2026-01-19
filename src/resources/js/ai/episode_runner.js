@@ -856,9 +856,6 @@ export class OnePointEpisodeRunner {
               if (typeof this.game.gameEnded === 'boolean') this.game.gameEnded = false;
             } catch (_) {}
 
-            // Episode boundary: ensure last transition has done=true
-            if (typeof builder.applyTerminal === 'function') builder.applyTerminal(this.game?._lastRoundEvents ?? null);
-
             // Episode boundary: ensure last transition has done=true (reward may be 0 here)
             if (typeof builder.applyTerminal === 'function') builder.applyTerminal(this.game?._lastRoundEvents ?? null);
 

@@ -1392,7 +1392,6 @@ export class Trainer {
       this.learnDiag.skippedNoInfo += skippedNoInfo;
       this.learnDiag.skippedBadFields += skippedBadFields;
       this.learnDiag.skippedFilteredState += skippedFilteredState;
-      this.learnDiag.skippedFilteredState += skippedFilteredState;
 
       // update when enough rollout steps are collected
       while (this.rollout.length >= this.rolloutSteps) {
@@ -1423,6 +1422,11 @@ export class Trainer {
         if (stats.vrCorr !== undefined) logDebug(`[VALUE-DIAG] corr=${stats.vrCorr.toFixed(4)}`);
         if (stats.advPos !== undefined) logDebug(`[ADV-SIGN] pos=${stats.advPos} neg=${stats.advNeg} zero=${stats.advZero}`);
         logDebug(`[PPO-ADV] advMean=${stats.advMean.toFixed(6)} advStd=${stats.advStd.toFixed(6)} retMean=${stats.retMean.toFixed(6)} retStd=${stats.retStd.toFixed(6)} rewMean=${stats.rewMean.toFixed(6)} rewStd=${stats.rewStd.toFixed(6)}`);
+        if ((stats.auxCount ?? 0) > 0) {
+          logDebug(`[AUX] count=${stats.auxCount} loss=${stats.auxLoss.toFixed(6)}`);
+        } else {
+          logDebug(`[AUX] count=0`);
+        }
         }
 
         // ---- learnDiag logging + reset (한 번만) ----
