@@ -703,6 +703,19 @@ export class PpoPolicyV1 {
     const oppIsDiving = !!opp.isDiving || oppState === 3;
     const oppIsAir = (opp.isAir !== undefined) ? !!opp.isAir : (oppState === 1 || oppState === 2);
 
+    // ✅ FIX: actually write state flags into feature slots (was missing).
+    // me flags
+    f[3] = meIsAir ? 1 : 0;
+    f[4] = meIsDiving ? 1 : 0;
+    f[5] = meIsLying ? 1 : 0;
+    f[6] = meCanAct ? 1 : 0;
+    f[7] = Math.max(0, Math.min(1, meState / 4));
+
+    // opp flags
+    f[11] = oppIsAir ? 1 : 0;
+    f[12] = oppIsDiving ? 1 : 0;
+    f[13] = oppIsLying ? 1 : 0;
+
     // ------------------------------------------------------------
     // Feature scaling helpers
     // - If obs is already normalized (-1..1), DO NOT normalize again.
