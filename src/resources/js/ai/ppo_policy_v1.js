@@ -641,6 +641,8 @@ export class PpoPolicyV1 {
     // ✅ Warmup(BC) 때는 하드룰/마스크를 끌 수 있게 스위치 추가
     this.hardRulesEnabled = true;
 
+    this.auxCoef = 0.01;
+
     this._initWeights();
     
   }
@@ -1646,7 +1648,7 @@ logpValue(obsOrFeat, playerIndex, action) {
           // ------------------------------------------------------------
           // Aux teacher loss weight (keep VERY small; this is a stabilizing bias, not a new objective)
           // Recommended range: 0.005 ~ 0.03. Start at 0.01.
-          const AUX_COEF = 0.01;
+          const AUX_COEF = Number(this.auxCoef ?? 0);
           const aux = it.aux;
 
           let auxTeacherCls = -1;
