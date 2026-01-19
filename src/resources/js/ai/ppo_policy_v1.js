@@ -1541,13 +1541,6 @@ logpValue(obsOrFeat, playerIndex, action) {
     const epochs = Math.max(1, (opts.epochs ?? 4) | 0);
     const mb = Math.max(8, (opts.minibatch ?? 256) | 0);
 
-    // ------------------------------------------------------------
-    // Aux teacher loss weight (keep VERY small; this is a stabilizing bias, not a new objective)
-    // Recommended range: 0.005 ~ 0.03. Start at 0.01.
-    // You can override per-call via opts.auxCoef, or persist via this.auxCoef.
-    // ------------------------------------------------------------
-    const AUX_COEF = Math.max(0, Number(opts.auxCoef ?? this.auxCoef ?? 0.01));
-
     // Value diagnostics accumulators (reset each ppoUpdate)
     this._vSum = 0; this._rSum = 0; this._vSum2 = 0; this._rSum2 = 0; this._vrSum = 0; this._vrCount = 0;
     this._advPos = 0; this._advNeg = 0; this._advZero = 0;
@@ -1651,6 +1644,9 @@ logpValue(obsOrFeat, playerIndex, action) {
           // ------------------------------------------------------------
           // [STEP4] Aux teacher loss (X-only)
           // ------------------------------------------------------------
+          // Aux teacher loss weight (keep VERY small; this is a stabilizing bias, not a new objective)
+          // Recommended range: 0.005 ~ 0.03. Start at 0.01.
+          const AUX_COEF = 0.01;
           const aux = it.aux;
 
           let auxTeacherCls = -1;

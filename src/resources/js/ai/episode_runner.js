@@ -456,47 +456,9 @@ export class OnePointEpisodeRunner {
                 epDiag.framesLegacyAction++;
                 sampledDecision = true; // ✅ (legacy도 학습시키려면 true 유지)
 
-                // -----------------------------------------------------------------
-                // ✅ legacy actionId(0..14) -> tuple(xDirection,yDirection,powerHit)
-                // NOTE: mapping is kept consistent with pikavolley.js:_applyActionToKeyboard
-                // -----------------------------------------------------------------
-                try { aLearn = agent.chooseAction(obs, this.learningPlayer, this.game) | 0; } catch (_) { aLearn = 0; }
-
-                let x = 0, y = 0, p = 0;
-                switch (aLearn | 0) {
-                  case 0: break;                 // IDLE
-                  case 1: x = -1; break;         // LEFT
-                  case 2: x = 1; break;          // RIGHT
-                  case 3: y = -1; break;         // JUMP
-                  case 4: x = -1; y = -1; break; // JUMP_LEFT
-                  case 5: x = 1; y = -1; break;  // JUMP_RIGHT
-
-                  // POWER 계열 (powerHit는 1프레임 트리거)
-                  case 6: p = 1; break;                          // POWER_NEUTRAL
-                  case 7: x = -1; p = 1; break;                  // POWER_LEFT
-                  case 8: x = 1; p = 1; break;                   // POWER_RIGHT
-
-                  case 9: y = -1; p = 1; break;                  // POWER_UP
-                  case 10: x = -1; y = -1; p = 1; break;         // POWER_UP_LEFT
-                  case 11: x = 1; y = -1; p = 1; break;          // POWER_UP_RIGHT
-
-                  case 12: y = 1; p = 1; break;                  // POWER_DOWN
-                  case 13: x = -1; y = 1; p = 1; break;          // POWER_DOWN_LEFT
-                  case 14: x = 1; y = 1; p = 1; break;           // POWER_DOWN_RIGHT
-                  default: break;
-                }
-
-                // POWER_DOWN은 공중에서만 의미: 지상이면 DOWN 제거
-                if ((aLearn | 0) === 12 || (aLearn | 0) === 13 || (aLearn | 0) === 14) {
-                  const me = obs?.me ?? {};
-                  const state = Number(me.state ?? 0);
-                  const isAir = (me.isAir !== undefined) ? !!me.isAir : (state === 1 || state === 2);
-                  if (!isAir) y = 0;
-                }
-
-                // NOTE: phase!=0 powerHit=0 처리는 아래 sanitize 블록이 최종 보장한다.
-                heldTuple = { xDirection: x, yDirection: y, powerHit: p ? 1 : 0 };
-                inputTuple = heldTuple;
+                let aLearn = 0;
+                try { aLearn = agent.chooseAction(obs, this.learningPlayer, this.game) | 0; } catch (_) {}
+                inputTuple = heldTuple; // (지금은 legacy tuple 변환 없음)
               }
             } catch (_) {
               sampledDecision = false;
