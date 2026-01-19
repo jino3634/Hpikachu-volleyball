@@ -1657,7 +1657,12 @@ logpValue(obsOrFeat, playerIndex, action) {
           if (AUX_COEF > 0 && aux && aux.mask === 1) {
             const tt = aux.moveToLandingX;
             auxTeacherCls = (tt === 0 || tt === 1 || tt === 2) ? tt : 1;
-            auxW = AUX_COEF;
+            // ✅ physics 기반 teacher: ttl이 클수록(=먼 미래) 오차/노이즈가 커지므로 가중치를 자동 감쇠
+            // ttl은 0..1 정규화 (env/agents/episode_runner에서 동일 스키마)
+            const ttl01 = clamp01(Number(aux.ttl ?? 0));
+            // near-term(착지 임박)에 가장 강하게, far-term은 거의 영향 없게
+            const ttlScale = Math.max(0, 1 - ttl01);
+            auxW = AUX_COEF * ttlScale;
 
             // log only (이미 evalNow.px 사용)
             auxLoss += -logProbFromProbs(evalNow.px, auxTeacherCls);

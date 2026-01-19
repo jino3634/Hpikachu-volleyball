@@ -726,9 +726,17 @@ export class OnePointEpisodeRunner {
             // dangerArmed는 “상대가 마지막 터치 + 내 코트로 떨어질 예정” 기반
             if (dangerArmed) epDiag.auxDangerArmedN++;
 
-            const meX = Number(obs?.me?.x ?? 0);
-            const lx = Number(nextObs?.ball?.landingX ?? obs?.ball?.landingX ?? 0);
+            // ✅ 좌우 기준 통일: "나는 항상 왼쪽" 좌표계
+            // learningPlayer=2이면 좌우 반전(flip=-1)
+            const flip = (this.learningPlayer === 1) ? 1 : -1;
+
+            const meX = Number(obs?.me?.x ?? 0) * flip;
+            const lx = Number(nextObs?.ball?.landingX ?? obs?.ball?.landingX ?? 0) * flip;
             const ttl = Number(nextObs?.ball?.timeToLand ?? obs?.ball?.timeToLand ?? 0);
+
+            // (선택) 공이 하강 중일 때만 teacher를 더 믿는다 (상승 중은 노이즈 가능)
+            const vy = Number(nextObs?.ball?.vy ?? obs?.ball?.vy ?? 1);
+            const falling = Number.isFinite(vy) ? (vy > 0.02) : true;
 
             const finiteOK =
               Number.isFinite(meX) && Number.isFinite(lx) && Number.isFinite(ttl);
@@ -742,7 +750,7 @@ export class OnePointEpisodeRunner {
             if (ttlOk) epDiag.auxTtlOkN++;
 
             // ✅ 최종 조건: dangerArmed OR (lxNeg && ttlOk)
-            if (finiteOK && ttlOk && (dangerArmed || lxNeg)) {
+            if (finiteOK && falling && ttlOk && (dangerArmed || lxNeg)) {
               const dx = lx - meX;
 
               // deadzone(너무 가까울 땐 중립)
