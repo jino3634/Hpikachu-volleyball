@@ -165,10 +165,17 @@ export class PikachuVolleyball {
       case 5: x = 1; y = -1; break;  // JUMP_RIGHT
 
       // POWER 계열 (powerHit는 1프레임 트리거)
-      case 6: p = 1; break;                  // POWER_NEUTRAL
-      case 7: x = -1; p = 1; break;          // POWER_LEFT
-      case 8: x = 1; p = 1; break;           // POWER_RIGHT
-      case 9: y = 1; p = 1; break;           // POWER_DOWN (공중에서만 의미)
+      case 6: p = 1; break;                         // POWER_NEUTRAL
+      case 7: x = -1; p = 1; break;                 // POWER_LEFT
+      case 8: x = 1; p = 1; break;                  // POWER_RIGHT
+
+      case 9: y = -1; p = 1; break;                 // POWER_UP
+      case 10: x = -1; y = -1; p = 1; break;        // POWER_UP_LEFT
+      case 11: x = 1; y = -1; p = 1; break;         // POWER_UP_RIGHT
+
+      case 12: y = 1; p = 1; break;                 // POWER_DOWN (공중에서만 의미)
+      case 13: x = -1; y = 1; p = 1; break;         // POWER_DOWN_LEFT
+      case 14: x = 1; y = 1; p = 1; break;          // POWER_DOWN_RIGHT
       default: break;
     }
 
@@ -178,7 +185,7 @@ export class PikachuVolleyball {
     }
 
     // ✅ POWER_DOWN은 공중에서만 의미: 지상이면 DOWN 제거
-    if (actionId === 9) {
+    if (actionId === 12 || actionId === 13 || actionId === 14) {
       const player = this.physics[`player${playerIndex}`];
       const isAir = player.y < 244; // physics.js의 PLAYER_TOUCHING_GROUND_Y_COORD = 244
       if (!isAir) y = 0;

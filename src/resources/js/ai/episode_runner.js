@@ -112,23 +112,38 @@ export class OnePointEpisodeRunner {
         const y = (inp.yDirection | 0);   // -1,0,1
         const p = inp.powerHit ? 1 : 0;   // 0/1
 
-        // Match pikavolley.js _applyActionToKeyboard mapping
+        
+// Match agents.js ACTION table (0..14)
         if (p === 1) {
-          if (y === 1) return 9;         // POWER_DOWN
-          if (x === -1) return 7;        // POWER_LEFT
-          if (x === 1) return 8;         // POWER_RIGHT
-          return 6;                      // POWER_NEUTRAL
+          // POWER_* are direction-sensitive
+          if (y === 1) {
+            if (x === -1) return 13;       // POWER_DOWN_LEFT
+            if (x === 1) return 14;        // POWER_DOWN_RIGHT
+            return 12;                      // POWER_DOWN
+          }
+          if (y === -1) {
+            if (x === -1) return 10;       // POWER_UP_LEFT
+            if (x === 1) return 11;        // POWER_UP_RIGHT
+            return 9;                       // POWER_UP
+          }
+          if (x === -1) return 7;          // POWER_LEFT
+          if (x === 1) return 8;           // POWER_RIGHT
+          return 6;                         // POWER_NEUTRAL
         }
 
+        // Non-power actions
         if (y === -1) {
-          if (x === -1) return 4;        // JUMP_LEFT
-          if (x === 1) return 5;         // JUMP_RIGHT
-          return 3;                      // JUMP
+          if (x === -1) return 4;          // JUMP_LEFT
+          if (x === 1) return 5;           // JUMP_RIGHT
+          return 3;                         // JUMP
         }
 
-        if (x === -1) return 1;          // LEFT
-        if (x === 1) return 2;           // RIGHT
-        return 0;                        // IDLE
+        // Note: y=+1 (DOWN without power) is currently treated as IDLE
+        // to avoid introducing new non-power DOWN actions.
+        if (x === -1) return 1;            // LEFT
+        if (x === 1) return 2;             // RIGHT
+        return 0;                           // IDLE
+
       };
 
       const p1Action = tupleToActionId(p1Input);
@@ -457,6 +472,28 @@ export class OnePointEpisodeRunner {
               xDirection: Number(inputTuple.xDirection ?? 0) | 0,
               yDirection: Number(inputTuple.yDirection ?? 0) | 0,
               powerHit: Number(inputTuple.powerHit ?? 0) ? 1 : 0,
+            };
+          }
+
+          // normalize directions to -1/0/1
+          {
+            const _x = (inputTuple.xDirection | 0);
+            const _y = (inputTuple.yDirection | 0);
+            inputTuple = {
+              xDirection: _x < 0 ? -1 : (_x > 0 ? 1 : 0),
+              yDirection: _y < 0 ? -1 : (_y > 0 ? 1 : 0),
+              powerHit: (inputTuple.powerHit | 0) ? 1 : 0,
+            };
+          }
+
+          // ✅ no-auto-repeat for powerHit across decision frames
+          // If we actually applied powerHit on this decision frame, clear heldTuple.powerHit
+          // so it won't automatically fire again on the next decision unless the policy chooses it again.
+          if (phase === 0 && sampledDecision && (inputTuple.powerHit | 0) === 1) {
+            heldTuple = {
+              xDirection: heldTuple.xDirection | 0,
+              yDirection: heldTuple.yDirection | 0,
+              powerHit: 0,
             };
           }
 
