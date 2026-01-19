@@ -34,7 +34,6 @@ class FakeKeyboard {
     this.xDirection = 0;
     this.yDirection = 0;
     this.powerHit = 0;
-
     // for edge-trigger power button
     this._prevPowerRequested = 0;
   }
@@ -49,8 +48,9 @@ class FakeKeyboard {
     this.xDirection = c.left === c.right ? 0 : (c.left ? -1 : 1);
     // up => jump (-1 matches your menu logic convention)
     this.yDirection = c.up ? -1 : 0;
-    // legacy 3bit에는 power/down이 없으므로 0
+    // A-only 정책이니까 powerHit은 0 고정
     this.powerHit = 0;
+    // for edge-trigger power button
     this._prevPowerRequested = 0;
   }
 
@@ -70,11 +70,11 @@ class FakeKeyboard {
     this.yDirection = yRaw < 0 ? -1 : (yRaw > 0 ? 1 : 0);
 
     // edge-trigger (no auto-repeat while held)
-    this.powerHit = (pReq === 1 && this._prevPowerRequested === 0) ? 1 : 0;
+    this.powerHit = (pReq == 1 && this._prevPowerRequested == 0) ? 1 : 0;
     this._prevPowerRequested = pReq;
   }
-}
 
+}
 
 /**
  * Replay ring buffer for most recent N games.
@@ -202,37 +202,74 @@ export class PikaEnv {
   /**
    * Observation for learning
    */
-  getObs() {
-    const b = this.physics.ball;
-    const p1 = this.physics.player1;
-    const p2 = this.physics.player2;
+getObs() {
+  const b  = this.physics.ball;
+  const p1 = this.physics.player1;
+  const p2 = this.physics.player2;
 
-    const vx1 = p1.x - this.prev.p1x;
-    const vy1 = p1.y - this.prev.p1y;
-    const vx2 = p2.x - this.prev.p2x;
-    const vy2 = p2.y - this.prev.p2y;
+  // ------------------------------------------------------------
+  // ✅ 상태/가능여부 파생값 (학습 편의)
+  // ------------------------------------------------------------
+  const derive = (p) => {
+    const state = Number(p?.state ?? 0) | 0;
+    const lying = Number(p?.lyingDownDurationLeft ?? 0) | 0;
+    const isDiving = (state === 3) ? 1 : 0;
+    const isLying = (state === 4 || lying > 0) ? 1 : 0;
+    const isAir = (state === 1 || state === 2) ? 1 : 0;
+    const canAct = (!isDiving && !isLying) ? 1 : 0;
+    return { state, canAct, isAir, isDiving, isLying };
+  };
+  const s1 = derive(p1);
+  const s2 = derive(p2);
 
-    return {
-      frame: this.frame,
-      ball: {
-        x: b.x,
-        y: b.y,
-        xVelocity: b.xVelocity,
-        yVelocity: b.yVelocity,
-        isPowerHit: b.isPowerHit ? 1 : 0,
+  const vx1 = p1.x - this.prev.p1x;
+  const vy1 = p1.y - this.prev.p1y;
+  const vx2 = p2.x - this.prev.p2x;
+  const vy2 = p2.y - this.prev.p2y;
+
+  return {
+    frame: this.frame,
+    ball: {
+      x: b.x,
+      y: b.y,
+      xVelocity: b.xVelocity,
+      yVelocity: b.yVelocity,
+      isPowerHit: b.isPowerHit ? 1 : 0,
+    },
+    players: [
+      {
+        x: p1.x,
+        y: p1.y,
+        vx: vx1,
+        vy: vy1,
+        yVelocity: p1.yVelocity,
+        state: s1.state,
+        canAct: s1.canAct,
+        isAir: s1.isAir,
+        isDiving: s1.isDiving,
+        isLying: s1.isLying,
       },
-      players: [
-        { x: p1.x, y: p1.y, vx: vx1, vy: vy1, yVelocity: p1.yVelocity },
-        { x: p2.x, y: p2.y, vx: vx2, vy: vy2, yVelocity: p2.yVelocity },
-      ],
-      tactical: {
-        ballSide: b.x < GROUND_HALF_WIDTH ? 1 : 2,
-        server: this.isPlayer2Serve ? 2 : 1,
+      {
+        x: p2.x,
+        y: p2.y,
+        vx: vx2,
+        vy: vy2,
+        yVelocity: p2.yVelocity,
+        state: s2.state,
+        canAct: s2.canAct,
+        isAir: s2.isAir,
+        isDiving: s2.isDiving,
+        isLying: s2.isLying,
       },
-      score: { p1: this.scores[0], p2: this.scores[1] },
-      done: this.gameEnded,
-    };
-  }
+    ],
+    tactical: {
+      ballSide: b.x < GROUND_HALF_WIDTH ? 1 : 2,
+      server: this.isPlayer2Serve ? 2 : 1,
+    },
+    score: { p1: this.scores[0], p2: this.scores[1] },
+    done: this.gameEnded,
+  };
+}
 
 
 
@@ -243,77 +280,77 @@ export class PikaEnv {
    * @returns {{obs:any, reward:number, done:boolean, info:any}}
    */
   step(p1Mask, p2Mask) {
-    if (this.gameEnded) {
-      return { obs: this.getObs(), reward: 0, done: true, info: { alreadyDone: true } };
-    }
-
-    const p1Full = (p1Mask | 0) & 0x7;
-    const p2Full = (p2Mask | 0) & 0x7;
-    this.currentReplay.frames.push({ p1Mask: p1Full, p2Mask: p2Full });
-
-    this.kb1.apply3(p1Full);
-    this.kb2.apply3(p2Full);
-
-    const isBallTouchingGround = this.physics.runEngineForNextFrame(this.keyboardArray);
-
-    // scoring 로직 (physics 결과 기반이므로 여기 둬도 됨)
-    let reward = 0;
-    if (isBallTouchingGround && !this.practiceMode && !this.roundEnded && !this.gameEnded) {
-      const punchX = this.physics.ball.punchEffectX;
-      if (punchX < GROUND_HALF_WIDTH) {
-        this.isPlayer2Serve = true;
-        this.scores[1] += 1;
-        reward = -1;
-        if (this.scores[1] >= this.winningScore) this._setWinner(2);
-        else this.roundEnded = true;
-      } else {
-        this.isPlayer2Serve = false;
-        this.scores[0] += 1;
-        reward = +1;
-        if (this.scores[0] >= this.winningScore) this._setWinner(1);
-        else this.roundEnded = true;
-      }
-
-      if (this.roundEnded && !this.gameEnded) {
-        this._startNextRound(); // 여기서 prev 동기화까지 해줄 예정
-      }
-    }
-
-    // ✅ 프레임 증가를 obs 생성 전에 해서 obs.frame이 "현재 상태"와 일치하게
-    this.frame++;
-
-    // ✅ obs는 prev(이전 프레임) 기준으로 속도를 계산해야 하므로, prev 업데이트 전에 만든다
-    const obs = this.getObs();
-
-    // ✅ prev는 마지막에 갱신 (다음 step의 속도 계산용)
-    this.prev.p1x = this.physics.player1.x;
-    this.prev.p1y = this.physics.player1.y;
-    this.prev.p2x = this.physics.player2.x;
-    this.prev.p2y = this.physics.player2.y;
-
-    // safety cap
-    if (!this.gameEnded && this.frame >= this.maxFramesPerGame) {
-      this.gameEnded = true;
-      this.currentReplay.endedBy = 'maxFrames';
-      this.currentReplay.finalScore = { p1: this.scores[0], p2: this.scores[1] };
-      this.replays.push(this.currentReplay);
-    }
-
-    const done = this.gameEnded;
-    const info = {
-      score: { p1: this.scores[0], p2: this.scores[1] },
-      winner: this.currentReplay.winner,
-      endedBy: this.currentReplay.endedBy,
-      lastAction: { p1Mask: p1Full, p2Mask: p2Full },
-    };
-
-    if (done && !this.currentReplay._pushed) {
-      this.replays.push(this.currentReplay);
-      this.currentReplay._pushed = true;
-    }
-
-    return { obs, reward, done, info };
+  if (this.gameEnded) {
+    return { obs: this.getObs(), reward: 0, done: true, info: { alreadyDone: true } };
   }
+
+  const p1Full = (p1Mask | 0) & 0x7;
+  const p2Full = (p2Mask | 0) & 0x7;
+  this.currentReplay.frames.push({ p1Mask: p1Full, p2Mask: p2Full });
+
+  this.kb1.apply3(p1Full);
+  this.kb2.apply3(p2Full);
+
+  const isBallTouchingGround = this.physics.runEngineForNextFrame(this.keyboardArray);
+
+  // scoring 로직 (physics 결과 기반이므로 여기 둬도 됨)
+  let reward = 0;
+  if (isBallTouchingGround && !this.practiceMode && !this.roundEnded && !this.gameEnded) {
+    const punchX = this.physics.ball.punchEffectX;
+    if (punchX < GROUND_HALF_WIDTH) {
+      this.isPlayer2Serve = true;
+      this.scores[1] += 1;
+      reward = -1;
+      if (this.scores[1] >= this.winningScore) this._setWinner(2);
+      else this.roundEnded = true;
+    } else {
+      this.isPlayer2Serve = false;
+      this.scores[0] += 1;
+      reward = +1;
+      if (this.scores[0] >= this.winningScore) this._setWinner(1);
+      else this.roundEnded = true;
+    }
+
+    if (this.roundEnded && !this.gameEnded) {
+      this._startNextRound(); // 여기서 prev 동기화까지 해줄 예정
+    }
+  }
+
+  // ✅ 프레임 증가를 obs 생성 전에 해서 obs.frame이 "현재 상태"와 일치하게
+  this.frame++;
+
+  // ✅ obs는 prev(이전 프레임) 기준으로 속도를 계산해야 하므로, prev 업데이트 전에 만든다
+  const obs = this.getObs();
+
+  // ✅ prev는 마지막에 갱신 (다음 step의 속도 계산용)
+  this.prev.p1x = this.physics.player1.x;
+  this.prev.p1y = this.physics.player1.y;
+  this.prev.p2x = this.physics.player2.x;
+  this.prev.p2y = this.physics.player2.y;
+
+  // safety cap
+  if (!this.gameEnded && this.frame >= this.maxFramesPerGame) {
+    this.gameEnded = true;
+    this.currentReplay.endedBy = 'maxFrames';
+    this.currentReplay.finalScore = { p1: this.scores[0], p2: this.scores[1] };
+    this.replays.push(this.currentReplay);
+  }
+
+  const done = this.gameEnded;
+  const info = {
+    score: { p1: this.scores[0], p2: this.scores[1] },
+    winner: this.currentReplay.winner,
+    endedBy: this.currentReplay.endedBy,
+    lastAction: { p1Mask: p1Full, p2Mask: p2Full },
+  };
+
+  if (done && !this.currentReplay._pushed) {
+    this.replays.push(this.currentReplay);
+    this.currentReplay._pushed = true;
+  }
+
+  return { obs, reward, done, info };
+}
 
   /**
    * Step one frame with tuple inputs.
@@ -327,21 +364,17 @@ export class PikaEnv {
       return { obs: this.getObs(), reward: 0, done: true, info: { alreadyDone: true } };
     }
 
-    const t1 = p1Input ?? { xDirection: 0, yDirection: 0, powerHit: 0 };
-    const t2 = p2Input ?? { xDirection: 0, yDirection: 0, powerHit: 0 };
-
-    // replay: store tuples (separate from mask-based replay)
+    // record (optional)
     this.currentReplay.frames.push({
-      p1Input: { xDirection: t1.xDirection | 0, yDirection: t1.yDirection | 0, powerHit: t1.powerHit ? 1 : 0 },
-      p2Input: { xDirection: t2.xDirection | 0, yDirection: t2.yDirection | 0, powerHit: t2.powerHit ? 1 : 0 },
+      p1Tuple: { xDirection: p1Input?.xDirection ?? 0, yDirection: p1Input?.yDirection ?? 0, powerHit: p1Input?.powerHit ?? 0 },
+      p2Tuple: { xDirection: p2Input?.xDirection ?? 0, yDirection: p2Input?.yDirection ?? 0, powerHit: p2Input?.powerHit ?? 0 },
     });
 
-    this.kb1.applyTuple(t1);
-    this.kb2.applyTuple(t2);
+    this.kb1.applyTuple(p1Input);
+    this.kb2.applyTuple(p2Input);
 
     const isBallTouchingGround = this.physics.runEngineForNextFrame(this.keyboardArray);
 
-    // scoring logic: same as step()
     let reward = 0;
     if (isBallTouchingGround && !this.practiceMode && !this.roundEnded && !this.gameEnded) {
       const punchX = this.physics.ball.punchEffectX;
@@ -384,7 +417,7 @@ export class PikaEnv {
       score: { p1: this.scores[0], p2: this.scores[1] },
       winner: this.currentReplay.winner,
       endedBy: this.currentReplay.endedBy,
-      lastAction: { p1Input: t1, p2Input: t2 },
+      lastAction: { p1Input, p2Input },
     };
 
     if (done && !this.currentReplay._pushed) {
@@ -394,6 +427,7 @@ export class PikaEnv {
 
     return { obs, reward, done, info };
   }
+
 
   _setWinner(winner /* 1|2 */) {
     this.gameEnded = true;
@@ -408,19 +442,19 @@ export class PikaEnv {
     this.physics.player2.gameEnded = true;
   }
 
-  _startNextRound() {
-    this.physics.player1.initializeForNewRound();
-    this.physics.player2.initializeForNewRound();
-    this.physics.ball.initializeForNewRound(this.isPlayer2Serve);
+_startNextRound() {
+  this.physics.player1.initializeForNewRound();
+  this.physics.player2.initializeForNewRound();
+  this.physics.ball.initializeForNewRound(this.isPlayer2Serve);
 
-    // ✅ 라운드 넘어갈 때 위치가 "순간이동"하므로 prev를 즉시 맞춰서 vx/vy 튐 방지
-    this.prev.p1x = this.physics.player1.x;
-    this.prev.p1y = this.physics.player1.y;
-    this.prev.p2x = this.physics.player2.x;
-    this.prev.p2y = this.physics.player2.y;
+  // ✅ 라운드 넘어갈 때 위치가 "순간이동"하므로 prev를 즉시 맞춰서 vx/vy 튐 방지
+  this.prev.p1x = this.physics.player1.x;
+  this.prev.p1y = this.physics.player1.y;
+  this.prev.p2x = this.physics.player2.x;
+  this.prev.p2y = this.physics.player2.y;
 
-    this.roundEnded = false;
-  }
+  this.roundEnded = false;
+}
 
   /**
    * Get the latest N replays (oldest->newest)
@@ -433,19 +467,20 @@ export class PikaEnv {
     return this.replays.last();
   }
 
-  saveRecentReplaysToFile(filepath = 'ai/replays.json') {
-    const data = {
-      createdAt: new Date().toISOString(),
-      replays: this.getRecentReplays(),
-    };
-    fs.mkdirSync(filepath.split('/').slice(0, -1).join('/'), { recursive: true });
-    fs.writeFileSync(filepath, JSON.stringify(data, null, 2), 'utf-8');
-  }
+saveRecentReplaysToFile(filepath = 'ai/replays.json') {
+  const data = {
+    createdAt: new Date().toISOString(),
+    replays: this.getRecentReplays(),
+  };
+  fs.mkdirSync(filepath.split('/').slice(0, -1).join('/'), { recursive: true });
+  fs.writeFileSync(filepath, JSON.stringify(data, null, 2), 'utf-8');
+}
 
-  saveLatestReplayToFile(filepath = 'ai/replay_latest.json') {
-    const rep = this.getLatestReplay();
-    fs.mkdirSync(filepath.split('/').slice(0, -1).join('/'), { recursive: true });
-    fs.writeFileSync(filepath, JSON.stringify(rep, null, 2), 'utf-8');
-  }
+saveLatestReplayToFile(filepath = 'ai/replay_latest.json') {
+  const rep = this.getLatestReplay();
+  fs.mkdirSync(filepath.split('/').slice(0, -1).join('/'), { recursive: true });
+  fs.writeFileSync(filepath, JSON.stringify(rep, null, 2), 'utf-8');
+}
+
 
 }

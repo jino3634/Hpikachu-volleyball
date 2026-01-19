@@ -165,17 +165,17 @@ export class PikachuVolleyball {
       case 5: x = 1; y = -1; break;  // JUMP_RIGHT
 
       // POWER 계열 (powerHit는 1프레임 트리거)
-      case 6: p = 1; break;                         // POWER_NEUTRAL
-      case 7: x = -1; p = 1; break;                 // POWER_LEFT
-      case 8: x = 1; p = 1; break;                  // POWER_RIGHT
+      case 6: p = 1; break;                          // POWER_NEUTRAL
+      case 7: x = -1; p = 1; break;                  // POWER_LEFT
+      case 8: x = 1; p = 1; break;                   // POWER_RIGHT
 
-      case 9: y = -1; p = 1; break;                 // POWER_UP
-      case 10: x = -1; y = -1; p = 1; break;        // POWER_UP_LEFT
-      case 11: x = 1; y = -1; p = 1; break;         // POWER_UP_RIGHT
+      case 9: y = -1; p = 1; break;                  // POWER_UP
+      case 10: x = -1; y = -1; p = 1; break;         // POWER_UP_LEFT
+      case 11: x = 1; y = -1; p = 1; break;          // POWER_UP_RIGHT
 
-      case 12: y = 1; p = 1; break;                 // POWER_DOWN (공중에서만 의미)
-      case 13: x = -1; y = 1; p = 1; break;         // POWER_DOWN_LEFT
-      case 14: x = 1; y = 1; p = 1; break;          // POWER_DOWN_RIGHT
+      case 12: y = 1; p = 1; break;                  // POWER_DOWN (공중에서만 의미)
+      case 13: x = -1; y = 1; p = 1; break;          // POWER_DOWN_LEFT (공중에서만 의미)
+      case 14: x = 1; y = 1; p = 1; break;           // POWER_DOWN_RIGHT (공중에서만 의미)
       default: break;
     }
 
@@ -983,11 +983,30 @@ return true;
     const opp = this.physics[`player${playerIndex === 1 ? 2 : 1}`];
     const b = this.physics.ball;
 
+    // ------------------------------------------------------------
+    // ✅ 상태/가능여부 파생값 (학습 편의)
+    // ------------------------------------------------------------
+    const derive = (p) => {
+      const state = Number(p?.state ?? 0) | 0;
+      const lying = Number(p?.lyingDownDurationLeft ?? 0) | 0;
+      const isDiving = (state === 3) ? 1 : 0;
+      const isLying = (state === 4 || lying > 0) ? 1 : 0;
+      const isAir = (state === 1 || state === 2) ? 1 : 0;
+      const canAct = (!isDiving && !isLying) ? 1 : 0;
+      return { state, canAct, isAir, isDiving, isLying };
+    };
+    const meS = derive(me);
+    const oppS = derive(opp);
+
     return {
       me: {
         x: me.x, y: me.y,
         yV: me.yVelocity,
-        state: me.state,
+        state: meS.state,
+        canAct: meS.canAct,
+        isAir: meS.isAir,
+        isDiving: meS.isDiving,
+        isLying: meS.isLying,
         divingDir: me.divingDirection,
         lying: me.lyingDownDurationLeft,
         isP2: me.isPlayer2 ? 1 : 0,
@@ -996,7 +1015,11 @@ return true;
       opp: {
         x: opp.x, y: opp.y,
         yV: opp.yVelocity,
-        state: opp.state,
+        state: oppS.state,
+        canAct: oppS.canAct,
+        isAir: oppS.isAir,
+        isDiving: oppS.isDiving,
+        isLying: oppS.isLying,
         divingDir: opp.divingDirection,
         lying: opp.lyingDownDurationLeft,
         isP2: opp.isPlayer2 ? 1 : 0,
