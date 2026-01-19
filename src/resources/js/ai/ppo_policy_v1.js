@@ -1329,29 +1329,41 @@ act(obs, playerIndex, opts = {}) {
 
   /**
    * Compute log-prob and value under current params for a given (obs, action).
-   * @param {any} obs
+   * @param {any|Float32Array} obsOrFeat
    * @param {1|2} playerIndex
    * @param {{xDirection:number,yDirection:number,powerHit:number}|number} action
    */
-logpValue(obs, playerIndex, action) {
-  const me = obs?.me ?? {};
-  const state = Number(me.state ?? 0);
-  const isLying = !!me.isLying || state === 4;
-  const isDiving = !!me.isDiving || state === 3;
-  const isAir = (me.isAir !== undefined) ? !!me.isAir : (state === 1 || state === 2);
+logpValue(obsOrFeat, playerIndex, action) {
+  const isFeat = (obsOrFeat instanceof Float32Array);
+  const obs = isFeat ? null : obsOrFeat;
+  const feat = isFeat ? obsOrFeat : null;
+
+  // State flags (obs or feat)
+  // buildFeatures indices:
+  // 3 me.isAir, 4 me.isDiving, 5 me.isLying, 6 me.canAct
+  let isLying = false;
+  let isDiving = false;
+  let isAir = false;
+  if (isFeat) {
+    isAir = (feat[3] > 0.5);
+    isDiving = (feat[4] > 0.5);
+    isLying = (feat[5] > 0.5);
+  } else {
+    const me = obs?.me ?? {};
+    const state = Number(me.state ?? 0);
+    isLying = !!me.isLying || state === 4;
+    isDiving = !!me.isDiving || state === 3;
+    isAir = (me.isAir !== undefined) ? !!me.isAir : (state === 1 || state === 2);
+  }
 
   // ✅ act()와 동일한 규칙:
   // - powerHit 하드 금지는 오직 lying/diving
-  // - 지상/공중, 근접/TTL 조건으로는 막지 않음
-  const gate = powerHitGate(obs, playerIndex, this.genome?.powerHitGate);
-  const allowPowerHit = gate.allow;
-
-
-  // (dxN/dyN/tLandN는 더 이상 gate에 쓰지 않으므로 삭제해도 됨)
-  // const ballN = obs?.ball ?? {};
-  // const dxN = Math.abs(Number(ballN.x ?? 0) - Number(me.x ?? 0));
-  // const dyN = Math.abs(Number(ballN.y ?? 0) - Number(me.y ?? 0));
-  // const tLandN = Number(ballN.timeToLand ?? 1);
+  // - 나머지 powerHit gate는 (obs가 없으면) 평가에서 재현 불가 → feat-only일 때는 allow=true로 둔다.
+  let allowPowerHit = true;
+  if (!isFeat) {
+    const gate = powerHitGate(obs, playerIndex, this.genome?.powerHitGate);
+    allowPowerHit = !!gate.allow;
+  }
 
   const a = (typeof action === 'number')
     ? { xDirection: 0, yDirection: 0, powerHit: 0 }
@@ -1361,7 +1373,38 @@ logpValue(obs, playerIndex, action) {
   const ay = mapYDirToClass(Number(a.yDirection ?? 0));
   const ap = Number(a.powerHit ?? 0) ? 1 : 0;
 
-  const { px, py, pp, value } = this.evaluate(obs, playerIndex);
+  // Evaluate under current params
+  let px, py, pp, value;
+  if (!isFeat) {
+    ({ px, py, pp, value } = this.evaluate(obs, playerIndex));
+  } else {
+    const fwd = this._forward(feat, this._infer.fwd);
+    value = fwd.v;
+    const probs = this._rawProbs(fwd.lx, fwd.ly, fwd.lp);
+    px = probs.px;
+    py = probs.py;
+    pp = probs.pp;
+
+    // 최소 하드룰(환경 합법성): ground면 DOWN(+1) 금지, lying/diving이면 power=1 금지
+    if (this.hardRulesEnabled) {
+      if (!isAir) {
+        py[2] = 0;
+        const s = py[0] + py[1];
+        if (s > 1e-12) {
+          const inv = 1 / s;
+          py[0] *= inv;
+          py[1] *= inv;
+        } else {
+          py[0] = 0.5;
+          py[1] = 0.5;
+        }
+      }
+      if (isLying || isDiving) {
+        pp[1] = 0;
+        pp[0] = 1;
+      }
+    }
+  }
 
   // alloc-free: reuse scratch buffers (logpValue is called heavily during PPO)
   const ppRaw2 = this._lp.ppRaw;
@@ -1369,6 +1412,7 @@ logpValue(obs, playerIndex, action) {
   const pxEff = this._lp.pxEff;
   const pyEff = this._lp.pyEff;
 
+  // (계측용) 원본 pp 정규화
   if (!allowPowerHit) {
     ppRaw2[0] = 1; ppRaw2[1] = 0;
   } else {
@@ -1377,6 +1421,7 @@ logpValue(obs, playerIndex, action) {
     renorm2Into(ppRaw2, a0, b0);
   }
 
+  // act()와 동일한 POWER_MIX
   const POWER_MIX = 0.15;
   if (!allowPowerHit) {
     ppEff[0] = 1; ppEff[1] = 0;
@@ -1388,17 +1433,16 @@ logpValue(obs, playerIndex, action) {
     renorm2Into(ppEff, q0, q1);
   }
 
-
+  // X: ground & power=1이면 x=0 금지
   {
     const a0 = clamp01(px[0] ?? 0), b0 = clamp01(px[1] ?? 0), c0 = clamp01(px[2] ?? 0);
-    // ✅ 지상 powerHit=1 & x=0 하드 금지(네가 채택한 룰 유지)
     if (!isAir && ap === 1) renorm3Into(pxEff, a0, 0, c0);
     else renorm3Into(pxEff, a0, b0, c0);
   }
 
+  // Y: 공중이면 y=-1 금지
   {
     const a0 = clamp01(py[0] ?? 0), b0 = clamp01(py[1] ?? 0), c0 = clamp01(py[2] ?? 0);
-    // ✅ 기존 정책 유지: 공중에서는 y=-1(클래스0) 금지
     if (isAir) {
       const s = b0 + c0;
       pyEff[0] = 0;
@@ -1514,14 +1558,14 @@ logpValue(obs, playerIndex, action) {
         for (let t = start; t < end; t++) {
           const id = idxs[t];
           const it = batch[id];
-          const obs = it.obs;
+          const obsOrFeat = (it.feat ?? it.obs);
           const action = it.action;
           const oldLogp = Number(it.oldLogp ?? 0);
           const adv = Number(it.adv ?? 0);
           if (adv > 0) this._advPos++; else if (adv < 0) this._advNeg++; else this._advZero++;
           const ret = Number(it.ret ?? 0);
 
-          const evalNow = this.logpValue(obs, it.playerIndex ?? 1, action);
+          const evalNow = this.logpValue(obsOrFeat, it.playerIndex ?? 1, action);
           const logp = evalNow.logp;
           const v = evalNow.value;
           this._vSum += v; this._vSum2 += v * v;
@@ -1591,7 +1635,7 @@ logpValue(obs, playerIndex, action) {
           // ✅ 한 번의 forward/backprop에서 PPO+aux를 같이 누적
           this._accumulateGrads(
             g,
-            obs,
+            obsOrFeat,
             it.playerIndex ?? 1,
             action,
             dL_dlogp,
