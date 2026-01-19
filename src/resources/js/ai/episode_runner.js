@@ -574,12 +574,14 @@ export class OnePointEpisodeRunner {
           // === defensive save shaping (B) ===
           // flip 기준: 내 코트는 항상 왼쪽, landingX < 0 이면 내 코트에 떨어질 예정
           try {
-            const ball = this.game.physics.ball;
-            const lastTouch = ball?.lastTouch | 0;
+            // ✅ lastTouch는 physics.ball이 아니라 touchTracker가 소스
+            const tt = this.game?.touchTracker;
+            const lastTouch = (tt && typeof tt.lastTouch === 'number') ? (tt.lastTouch | 0) : 0;
 
             // 플립 관측값 사용: nextObs.ball.x / nextObs.ball.landingX 는 이미 "내가 왼쪽" 기준
-            const ballX = nextObs?.ball?.x;         // [-1..1]
-            const landingX = nextObs?.ball?.landingX; // [-1..1]
+            const flip = (this.learningPlayer === 1) ? 1 : -1; // P2면 좌우 반전
+            const ballX = (typeof nextObs?.ball?.x === 'number') ? (nextObs.ball.x * flip) : null;
+            const landingX = (typeof nextObs?.ball?.landingX === 'number') ? (nextObs.ball.landingX * flip) : null;
 
             const me = this.learningPlayer;           // 1 or 2
             const opp = (me === 1) ? 2 : 1;
