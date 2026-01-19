@@ -1267,6 +1267,14 @@ export class Trainer {
         this.learnDiag.ep_stepsSkippedForcedIdle += (d.stepsSkippedForcedIdle | 0);
       }
 
+      // ✅ Aux teacher diag (episode_runner에서 epDiag를 episode.diag로 붙였을 때)
+      if (d) {
+        logDebug(
+          `[AUX-DIAG] decision=${d.auxDecisionN|0} danger=${d.auxDangerArmedN|0} ` +
+          `lxNeg=${d.auxLxNegN|0} ttlOk=${d.auxTtlOkN|0} mask=${d.auxMaskN|0}`
+        );
+      }
+
       // Spot-check: transitions length vs episode_runner stepsAdded (helps detect builder issues)
       if (d && typeof d.stepsAdded === 'number') {
         const ta = transitions.length | 0;
@@ -1418,15 +1426,15 @@ export class Trainer {
 
 
         if (stats && typeof stats.policyLoss === 'number') {
-        logDebug(`[PPO-LOSS] policyLoss=${stats.policyLoss.toFixed(6)} valueLoss=${stats.valueLoss.toFixed(6)} clipFrac=${stats.clipFrac.toFixed(4)} gradNorm=${stats.gradNorm.toFixed(6)} wNorm=${stats.wNorm.toFixed(3)}`);
-        if (stats.vrCorr !== undefined) logDebug(`[VALUE-DIAG] corr=${stats.vrCorr.toFixed(4)}`);
-        if (stats.advPos !== undefined) logDebug(`[ADV-SIGN] pos=${stats.advPos} neg=${stats.advNeg} zero=${stats.advZero}`);
-        logDebug(`[PPO-ADV] advMean=${stats.advMean.toFixed(6)} advStd=${stats.advStd.toFixed(6)} retMean=${stats.retMean.toFixed(6)} retStd=${stats.retStd.toFixed(6)} rewMean=${stats.rewMean.toFixed(6)} rewStd=${stats.rewStd.toFixed(6)}`);
-        if ((stats.auxCount ?? 0) > 0) {
-          logDebug(`[AUX] count=${stats.auxCount} loss=${stats.auxLoss.toFixed(6)}`);
-        } else {
-          logDebug(`[AUX] count=0`);
-        }
+          logDebug(`[PPO-LOSS] policyLoss=${stats.policyLoss.toFixed(6)} valueLoss=${stats.valueLoss.toFixed(6)} clipFrac=${stats.clipFrac.toFixed(4)} gradNorm=${stats.gradNorm.toFixed(6)} wNorm=${stats.wNorm.toFixed(3)}`);
+          if (stats.vrCorr !== undefined) logDebug(`[VALUE-DIAG] corr=${stats.vrCorr.toFixed(4)}`);
+          if (stats.advPos !== undefined) logDebug(`[ADV-SIGN] pos=${stats.advPos} neg=${stats.advNeg} zero=${stats.advZero}`);
+          logDebug(`[PPO-ADV] advMean=${stats.advMean.toFixed(6)} advStd=${stats.advStd.toFixed(6)} retMean=${stats.retMean.toFixed(6)} retStd=${stats.retStd.toFixed(6)} rewMean=${stats.rewMean.toFixed(6)} rewStd=${stats.rewStd.toFixed(6)}`);
+          if ((stats.auxCount ?? 0) > 0) {
+            logDebug(`[AUX] count=${stats.auxCount} loss=${stats.auxLoss.toFixed(6)}`);
+          } else {
+            logDebug(`[AUX] count=0`);
+          }
         }
 
         // ---- learnDiag logging + reset (한 번만) ----

@@ -282,6 +282,13 @@ export class OnePointEpisodeRunner {
       stepsSkippedNoDecisionInfo: 0,// canAct=true & hasChooseInput=true but no decisionInfo
       stepsSkippedForcedIdle: 0,    // decisionInfo.forcedIdle => skipped
       auxMoveToLandingX: 0,         // teacher 라벨이 적용된 transition 수
+
+      // aux teacher diagnostics
+      auxDecisionN: 0,        // decisionInfo가 있는 transition 수
+      auxDangerArmedN: 0,     // 그 중 dangerArmed=true
+      auxLxNegN: 0,           // 그 중 landingX<0
+      auxTtlOkN: 0,           // 그 중 ttl 범위 통과
+      auxMaskN: 0,            // 최종 aux.mask=1
     };
 
     try {
@@ -702,7 +709,8 @@ export class OnePointEpisodeRunner {
           // Attach to decisionInfo.aux so it is stored per-transition.
           // ------------------------------------------------------------
           if (sampledDecision && decisionInfo) {
-            // 기본값(teacher 비적용)
+            epDiag.auxDecisionN++;
+
             /** @type {{ moveToLandingX: 0|1|2; mask: 0|1; dx: number; meX: number; landingX: number; ttl: number; }} */
             const aux = {
               moveToLandingX: 1, // 0=left, 1=neutral, 2=right
@@ -713,43 +721,44 @@ export class OnePointEpisodeRunner {
               ttl: 0,
             };
 
-            // dangerArmed는 위에서 이미 계산됨:
-            // - 상대가 마지막 터치
-            // - landingX < 0 (내 코트로 떨어질 예정)
-            if (dangerArmed) {
-              const meX = Number(obs?.me?.x ?? 0);
-              const lx = Number(
-                // nextObs가 있으면 그걸 우선, 없으면 obs
-                nextObs?.ball?.landingX ?? obs?.ball?.landingX ?? 0
-              );
-              const ttl = Number(nextObs?.ball?.timeToLand ?? obs?.ball?.timeToLand ?? 0);
+            // dangerArmed는 “상대가 마지막 터치 + 내 코트로 떨어질 예정” 기반
+            if (dangerArmed) epDiag.auxDangerArmedN++;
 
-              // 방어 라벨을 너무 넓게 걸면 학습이 왜곡되니 “진짜로 급한 구간”만 걸기
-              // - ttl이 너무 크면 아직 예측/이동이 불확실
-              // - lx < 0은 기존 코드의 “내 코트” 판정과 일치
-              if (
-                Number.isFinite(meX) && Number.isFinite(lx) && Number.isFinite(ttl) &&
-                ttl > 0 && ttl <= 0.85 && // 필요시 0.70~0.95 사이에서 조정
-                lx < 0
-              ) {
-                const dx = lx - meX;
+            const meX = Number(obs?.me?.x ?? 0);
+            const lx = Number(nextObs?.ball?.landingX ?? obs?.ball?.landingX ?? 0);
+            const ttl = Number(nextObs?.ball?.timeToLand ?? obs?.ball?.timeToLand ?? 0);
 
-                // deadzone(너무 가까울 땐 중립)
-                const TH = 0.08; // normalized 기준. 필요시 0.06~0.12로 조정
-                /** @type {0|1|2} */
-                let cls = 1;     // neutral
-                if (dx > TH) cls = 2;
-                else if (dx < -TH) cls = 0;
+            const finiteOK =
+              Number.isFinite(meX) && Number.isFinite(lx) && Number.isFinite(ttl);
 
-                aux.moveToLandingX = cls;
-                aux.mask = 1;
-                aux.dx = dx;
-                aux.meX = meX;
-                aux.landingX = lx;
-                aux.ttl = ttl;
+            // ✅ 핵심: dangerArmed가 안 켜지는 경우를 대비해 "내 코트로 떨어질 예정" 자체로도 teacher 허용
+            // (dangerArmed는 lastTouch에 민감해서 0개가 되기 쉬움)
+            const lxNeg = finiteOK && (lx < -0.02);     // -0.02 deadzone (너무 경계 근처는 제외)
+            const ttlOk = finiteOK && (ttl > 0 && ttl <= 0.95); // 0.85 -> 0.95로 완화 (일단 0개 탈출 목적)
 
-                epDiag.auxMoveToLandingX++;
-              }
+            if (lxNeg) epDiag.auxLxNegN++;
+            if (ttlOk) epDiag.auxTtlOkN++;
+
+            // ✅ 최종 조건: dangerArmed OR (lxNeg && ttlOk)
+            if (finiteOK && ttlOk && (dangerArmed || lxNeg)) {
+              const dx = lx - meX;
+
+              // deadzone(너무 가까울 땐 중립)
+              const TH = 0.06; // 0.08 -> 0.06 (조금 더 민감하게)
+              /** @type {0|1|2} */
+              let cls = 1;
+              if (dx > TH) cls = 2;
+              else if (dx < -TH) cls = 0;
+
+              aux.moveToLandingX = cls;
+              aux.mask = 1;
+              aux.dx = dx;
+              aux.meX = meX;
+              aux.landingX = lx;
+              aux.ttl = ttl;
+
+              epDiag.auxMoveToLandingX++;
+              epDiag.auxMaskN++;
             }
 
             decisionInfo.aux = aux;
