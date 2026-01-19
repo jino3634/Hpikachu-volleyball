@@ -1296,8 +1296,14 @@ export class Trainer {
         if (!info) { skippedNoInfo++; continue; }
         if (typeof info.logp !== 'number' || typeof info.value !== 'number') { skippedBadFields++; continue; }
 
-        // We require obs to build features for PPO.
-        if (!tr.obs) { skippedBadFields++; continue; }
+        // ✅ feat-only support:
+        // Transition may omit obs to reduce memory/GC. As long as we have a feature vector,
+        // PPO can train and powerHitGate/masks can be derived from features.
+        const obsAny = tr.obs ?? null;
+        const featAny = tr.feat ?? null;
+        const isFeatField = (featAny instanceof Float32Array) && ((featAny.length | 0) === (this._featLen | 0));
+        const isObsFeat = (obsAny instanceof Float32Array) && ((obsAny.length | 0) === (this._featLen | 0));
+        if (!obsAny && !isFeatField) { skippedBadFields++; continue; }
 
         // Filter out transitions that must not be learned.
         // - forcedIdle: policy explicitly says "this is not a learnable decision"
@@ -1307,26 +1313,33 @@ export class Trainer {
         // Filter out "forcedIdle" transitions (episode_runner should skip them, but enforce here too).
         if (info.forcedIdle) { skippedFilteredState++; continue; }
 
-        const obsAny = tr.obs;
-        const me0 = obsAny?.me ?? {};
-        const st0 = Number(me0.state ?? 0);
-        const isLying0 = !!me0.isLying || st0 === 4;
-        const isDiving0 = !!me0.isDiving || st0 === 3;
-        const canAct0 = (me0.canAct !== undefined) ? !!me0.canAct : (!isLying0 && !isDiving0);
+        // Filter out cannot-act / diving / lying frames.
+        // - If we still have obs: use it.
+        // - If feat-only: use feature flags written by buildFeatures().
+        let canAct0 = true;
+        let isLying0 = false;
+        let isDiving0 = false;
+        if (isObsFeat) {
+          // obs is actually a feature vector
+          canAct0 = (Number(obsAny[6] ?? 0) > 0.5);
+          isDiving0 = (Number(obsAny[4] ?? 0) > 0.5);
+          isLying0 = (Number(obsAny[5] ?? 0) > 0.5);
+        } else if (obsAny) {
+          const me0 = obsAny?.me ?? {};
+          const st0 = Number(me0.state ?? 0);
+          isLying0 = !!me0.isLying || st0 === 4;
+          isDiving0 = !!me0.isDiving || st0 === 3;
+          canAct0 = (me0.canAct !== undefined) ? !!me0.canAct : (!isLying0 && !isDiving0);
+        } else if (isFeatField) {
+          canAct0 = (Number(featAny[6] ?? 0) > 0.5);
+          isDiving0 = (Number(featAny[4] ?? 0) > 0.5);
+          isLying0 = (Number(featAny[5] ?? 0) > 0.5);
+        }
         if (!canAct0 || isLying0 || isDiving0) { skippedFilteredState++; continue; }
 
         okInfoThisPoint++;
-        const featAny = tr.feat;
 
-        // ✅ Memory/GC optimization:
-        // Episode transitions may carry:
-        // - obs: raw obs object (preferred, for masking/gating/diagnostics)
-        // - feat: compact Float32Array features (preferred, for NN forward)
-        // Back-compat: some older episodes may store feat directly in obs.
-        const isFeatField = (featAny instanceof Float32Array) && ((featAny.length | 0) === (this._featLen | 0));
-        const isObsFeat = (obsAny instanceof Float32Array) && ((obsAny.length | 0) === (this._featLen | 0));
-
-        if (!isObsFeat) {
+        if (obsAny && !isObsFeat) {
           // Only update state-learn breakdown when we still have full obs.
           const me = obsAny?.me ?? {};
           const st = Number(me.state ?? 0);
@@ -1367,10 +1380,10 @@ export class Trainer {
           }
         }
 
-        // PPO update requires obs (for masking/gating & aux heads).
-        // - Preferred: raw obs object from transition.obs
-        // - Back-compat: if obs is a feature vector, pass that (policy supports obsOrFeat)
-        const obsForPPO = isObsFeat ? obsAny : obsAny;
+        // PPO update accepts obsOrFeat:
+        // - Prefer raw obs object when present (for debugging/extra fields)
+        // - Otherwise fall back to compact feature vector (feat-only episodes)
+        const obsForPPO = obsAny ? obsAny : feat;
 
         this.rollout.push({
           obs: obsForPPO,

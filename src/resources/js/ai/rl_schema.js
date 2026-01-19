@@ -44,10 +44,12 @@ export const SCHEMA_VERSION = 1;
  * Transition (s, a, r, s', done) 스키마
  * @typedef {Object} Transition
  * @property {number} t                 // global frame counter inside episode
- * @property {Object|null} obs          // s  (player-centric observation; from game.getObservation)
- * @property {number} action            // a  (Action id)
+ * @property {Object|null} obs          // s  (player-centric observation; can be null in feat-only mode)
+ * @property {Float32Array|null} feat   // compact feature vector for s (preferred)
+ * @property {number|{xDirection:number,yDirection:number,powerHit:number}|null} action // a (Action id or input tuple)
  * @property {number} reward            // r  (-1,0,+1)
- * @property {Object|null} nextObs      // s'
+ * @property {Object|null} nextObs      // s' (optional; often null)
+ * @property {Float32Array|null} nextFeat // compact feature vector for s'
  * @property {boolean} done             // terminal?
  * @property {Object|null} info         // debug info (optional)
  */

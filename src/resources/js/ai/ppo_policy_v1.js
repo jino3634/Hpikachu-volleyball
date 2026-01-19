@@ -200,6 +200,15 @@ function makeEmptyPowerGate() {
 function clamp01(x) {
   return (x < 0) ? 0 : (x > 1 ? 1 : x);
 }
+
+// Generic clamp helper (some callsites need [-1,1] etc.)
+function clamp(x, lo, hi) {
+  x = Number(x);
+  if (!Number.isFinite(x)) return lo;
+  if (x < lo) return lo;
+  if (x > hi) return hi;
+  return x;
+}
 function renorm3(a, b, c) {
   const s = a + b + c;
   if (s <= 1e-12) return [1/3, 1/3, 1/3];
@@ -238,7 +247,7 @@ function clip(x, lo, hi) {
   return Math.max(lo, Math.min(hi, x));
 }
 
-function powerHitGate(obs, playerIndex, gateParams) {
+function powerHitGate(obsOrFeat, playerIndex, gateParams) {
   // ✅ 기본값(유전자 없을 때)
   const g = gateParams ?? {
     // P0-2: 충돌 예측 gate 파라미터
@@ -252,36 +261,117 @@ function powerHitGate(obs, playerIndex, gateParams) {
     return Number.isFinite(n) ? n : fb;
   };
 
+  const isFeat = (obsOrFeat instanceof Float32Array);
+  const obs = isFeat ? null : obsOrFeat;
+  const feat = isFeat ? obsOrFeat : null;
+
   const me = obs?.me ?? {};
   const ball = obs?.ball ?? {};
 
-  const state = toFinite(me.state, 0) | 0;
-  const isLying = !!me.isLying || state === 4;
-  const isDiving = !!me.isDiving || state === 3;
+  // ------------------------------------------------------------
+  // Decode state flags (obs OR feat)
+  // ------------------------------------------------------------
+  const state = isFeat
+    ? ((Math.max(0, Math.min(4, Math.round(clamp01(toFinite(feat[7], 0)) * 4)))) | 0)
+    : (toFinite(me.state, 0) | 0);
 
-  const canAct = (me.canAct !== undefined) ? !!me.canAct : (!isLying && !isDiving);
-  const isAir = (me.isAir !== undefined) ? !!me.isAir : (state === 1 || state === 2);
+  const isLying = isFeat
+    ? (toFinite(feat[5], 0) > 0.5)
+    : (!!me.isLying || state === 4);
 
-  // ✅ diagnostics용(정규화 공간): 기존 통계가 NaN 안 나게 유지
-  const mxN = toFinite(me.x, 0);
-  const myN = toFinite(me.y, 0);
-  const bxN = toFinite(ball.x, 0);
-  const byN = toFinite(ball.y, 0);
+  const isDiving = isFeat
+    ? (toFinite(feat[4], 0) > 0.5)
+    : (!!me.isDiving || state === 3);
+
+  const canAct = isFeat
+    ? (toFinite(feat[6], 0) > 0.5)
+    : ((me.canAct !== undefined) ? !!me.canAct : (!isLying && !isDiving));
+
+  const isAir = isFeat
+    ? (toFinite(feat[3], 0) > 0.5)
+    : ((me.isAir !== undefined) ? !!me.isAir : (state === 1 || state === 2));
+
+  // ------------------------------------------------------------
+  // Diagnostics in normalized space
+  // ------------------------------------------------------------
+  const mxN = isFeat ? toFinite(feat[0], 0) : toFinite(me.x, 0);
+  const myN = isFeat ? toFinite(feat[1], 0) : toFinite(me.y, 0);
+  const bxN = isFeat ? toFinite(feat[14], 0) : toFinite(ball.x, 0);
+  const byN = isFeat ? toFinite(feat[15], 0) : toFinite(ball.y, 0);
   const dx = Math.abs(bxN - mxN);
   const dy = Math.abs(byN - myN);
-  const tLand = toFinite(ball.timeToLand, 1);
+  const tLand = isFeat
+    ? Math.max(0, Math.min(1, (toFinite(feat[19], 1) + 1) * 0.5))
+    : toFinite(ball.timeToLand, 1);
 
-  // ✅ raw 픽셀 기반 충돌 예측
-  const raw = obs?.raw ?? null;
-  const mePx = raw?.me ?? null;
-  const bPx = raw?.ball ?? null;
+  // ------------------------------------------------------------
+  // Pixel-space collision prediction inputs
+  // - Preferred: obs.raw (true pixels)
+  // - Fallback: reconstruct from normalized obs/feat
+  // ------------------------------------------------------------
+  const GROUND_W = 432;
+  const GROUND_H = 304;
+  const toPxX = (xN) => ((clamp(Number(xN ?? 0), -1, 1) + 1) * 0.5) * GROUND_W;
+  const toPxY = (yN) => ((clamp(Number(yN ?? 0), -1, 1) + 1) * 0.5) * GROUND_H;
 
-  const meX = toFinite(mePx?.x, 0);
-  const meY = toFinite(mePx?.y, 0);
-  const bX0 = toFinite(bPx?.x, 0);
-  const bY0 = toFinite(bPx?.y, 0);
-  const bVX = toFinite(bPx?.xV, 0);
-  const bVY = toFinite(bPx?.yV, 0);
+  // velocity scales must match buildFeatures(): xV/25, yV/35
+  const VX_SCALE = 25;
+  const VY_SCALE = 35;
+
+  let meX = 0, meY = 0, bX0 = 0, bY0 = 0, bVX = 0, bVY = 0;
+
+  if (!isFeat) {
+    const raw = obs?.raw ?? null;
+    const mePx = raw?.me ?? null;
+    const bPx = raw?.ball ?? null;
+
+    const hasRaw = !!(mePx && bPx && Number.isFinite(Number(mePx.x)) && Number.isFinite(Number(bPx.x)));
+    if (hasRaw) {
+      meX = toFinite(mePx?.x, 0);
+      meY = toFinite(mePx?.y, 0);
+      bX0 = toFinite(bPx?.x, 0);
+      bY0 = toFinite(bPx?.y, 0);
+      bVX = toFinite(bPx?.xV, 0);
+      bVY = toFinite(bPx?.yV, 0);
+    } else {
+      // Determine if obs is normalized (-1..1) or already pixels.
+      const meXo = toFinite(me.x, 0);
+      const meYo = toFinite(me.y, 0);
+      const bXo = toFinite(ball.x, 0);
+      const bYo = toFinite(ball.y, 0);
+
+      const isNorm =
+        Math.abs(meXo) <= 1.5 &&
+        Math.abs(meYo) <= 1.5 &&
+        Math.abs(bXo) <= 1.5 &&
+        Math.abs(bYo) <= 1.5;
+
+      if (isNorm) {
+        meX = toPxX(meXo);
+        meY = toPxY(meYo);
+        bX0 = toPxX(bXo);
+        bY0 = toPxY(bYo);
+        bVX = clamp(toFinite(ball.xV, 0), -1, 1) * VX_SCALE;
+        bVY = clamp(toFinite(ball.yV, 0), -1, 1) * VY_SCALE;
+      } else {
+        // treat as pixels
+        meX = meXo;
+        meY = meYo;
+        bX0 = bXo;
+        bY0 = bYo;
+        bVX = toFinite(ball.xV, 0);
+        bVY = toFinite(ball.yV, 0);
+      }
+    }
+  } else {
+    // feat-only: normalized positions/velocities
+    meX = toPxX(toFinite(feat[0], 0));
+    meY = toPxY(toFinite(feat[1], 0));
+    bX0 = toPxX(toFinite(feat[14], 0));
+    bY0 = toPxY(toFinite(feat[15], 0));
+    bVX = clamp(toFinite(feat[16], 0), -1, 1) * VX_SCALE;
+    bVY = clamp(toFinite(feat[17], 0), -1, 1) * VY_SCALE;
+  }
 
   const k = Math.max(0, Math.min(12, toFinite(g.kFrames, 4) | 0));
   const mx = Math.max(0, Math.min(32, toFinite(g.dxMarginPx, 6)));
@@ -308,7 +398,9 @@ function powerHitGate(obs, playerIndex, gateParams) {
 
   // ✅ 지상 파워는 "서있는 상태(대개 state=0)"에서만 아주 제한적으로 허용
   let groundOK = false;
-  if (!isAir && canAct && !isLying && !isDiving && state === 0) {
+  // NOTE(feat-only): state is an approximation. Keep it strict for obs, and slightly relaxed for feat.
+  const standingOK = isFeat ? (state <= 1) : (state === 0);
+  if (!isAir && canAct && !isLying && !isDiving && standingOK) {
     // 지상에서는 너무 멀리 예측하면 노이즈니까, k를 줄여서(예: 최대 3프레임)만 본다
     const kg = Math.min(3, k);
     for (let i = 0; i <= kg; i++) {
@@ -651,7 +743,7 @@ export class PpoPolicyV1 {
 
   /**
    * Feature builder (compatible with previous TuplePolicyV1 feature schema).
-   * featureLen = 16.
+   * featureLen = 24 (default).
    * @param {any|Float32Array} obs
    * @param {1|2} playerIndex
    * @returns {Float32Array}
@@ -1302,22 +1394,40 @@ act(obs, playerIndex, opts = {}) {
 
 
   /**
-   * Compute log-prob and value under current params for a given (obs, action).
-   * @param {any|Float32Array} obs
+   * Compute log-prob and value under current params for a given (obs/feat, action).
+   * @param {any|Float32Array} obsOrFeat
    * @param {1|2} playerIndex
    * @param {{xDirection:number,yDirection:number,powerHit:number}|number} action
    */
-logpValue(obs, playerIndex, action) {
-  const me = obs?.me ?? {};
-  const state = Number(me.state ?? 0);
-  const isLying = !!me.isLying || state === 4;
-  const isDiving = !!me.isDiving || state === 3;
-  const isAir = (me.isAir !== undefined) ? !!me.isAir : (state === 1 || state === 2);
+logpValue(obsOrFeat, playerIndex, action) {
+  const isFeat = (obsOrFeat instanceof Float32Array);
+  const obs = isFeat ? null : obsOrFeat;
+  const feat = isFeat ? obsOrFeat : null;
+
+  // Decode state flags from obs OR feat.
+  const state = isFeat
+    ? ((Math.max(0, Math.min(4, Math.round(clamp01(Number(feat[7] ?? 0)) * 4)))) | 0)
+    : (Number((obs?.me ?? {}).state ?? 0) | 0);
+
+  const isLying = isFeat
+    ? (Number(feat[5] ?? 0) > 0.5)
+    : (() => { const me = obs?.me ?? {}; return !!me.isLying || state === 4; })();
+
+  const isDiving = isFeat
+    ? (Number(feat[4] ?? 0) > 0.5)
+    : (() => { const me = obs?.me ?? {}; return !!me.isDiving || state === 3; })();
+
+  const isAir = isFeat
+    ? (Number(feat[3] ?? 0) > 0.5)
+    : (() => {
+        const me = obs?.me ?? {};
+        return (me.isAir !== undefined) ? !!me.isAir : (state === 1 || state === 2);
+      })();
 
   // ✅ act()와 동일한 규칙:
   // - powerHit 하드 금지는 오직 lying/diving
   // - 지상/공중, 근접/TTL 조건으로는 막지 않음
-  const gate = powerHitGate(obs, playerIndex, this.genome?.powerHitGate);
+  const gate = powerHitGate(obsOrFeat, playerIndex, this.genome?.powerHitGate);
   const allowPowerHit = gate.allow;
 
 
@@ -1335,7 +1445,7 @@ logpValue(obs, playerIndex, action) {
   const ay = mapYDirToClass(Number(a.yDirection ?? 0));
   const ap = Number(a.powerHit ?? 0) ? 1 : 0;
 
-  const { px, py, pp, value } = this.evaluate(obs, playerIndex);
+  const { px, py, pp, value } = this.evaluate(obsOrFeat, playerIndex);
 
   const ppRaw2 = (!allowPowerHit) ? [1, 0] : (() => {
     const a0 = clamp01(pp[0] ?? 0);

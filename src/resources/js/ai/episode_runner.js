@@ -784,12 +784,12 @@ export class OnePointEpisodeRunner {
 
               builder.addStep({
                 t: frames,
-                // Keep raw obs for PPO (masking/gating/diagnostics) and attach compact features separately.
-                obs: obs ?? null,
+                // ✅ feat-only: keep only compact Float32Array features in the stored episode.
+                // Raw obs trees are huge and cause memory/GC pressure.
+                obs: null,
                 feat: obsFeat,
                 action: inputTuple,
-                // nextObs is currently unused by PPO core, but can be useful for auxiliary/teacher logic.
-                nextObs: nextObs ?? null,
+                nextObs: null,
                 nextFeat,
                 done: false,
                 info: decisionInfo,
