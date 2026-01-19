@@ -175,6 +175,8 @@ export class Trainer {
       consumedSteps: 0,
       skippedNoInfo: 0,
       skippedBadFields: 0,
+      // filtered-out transitions (cannot act / diving / lying / forcedIdle)
+      skippedFilteredState: 0,
 
       // episode_runner diag aggregate
       ep_framesTotal: 0,
@@ -1280,6 +1282,7 @@ export class Trainer {
       this.learnDiag.transitions += transitions.length;
         let skippedNoInfo = 0;
         let skippedBadFields = 0;
+        let skippedFilteredState = 0;
       for (const tr of transitions) {
         const info = tr.info; // keep null/undefined as-is
         if (!info) { skippedNoInfo++; continue; }
@@ -1288,9 +1291,23 @@ export class Trainer {
         // We require obs to build features for PPO.
         if (!tr.obs) { skippedBadFields++; continue; }
 
-        okInfoThisPoint++;
+        // Filter out transitions that must not be learned.
+        // - forcedIdle: policy explicitly says "this is not a learnable decision"
+        // - cannot act / diving / lying: they poison the rollout if included
+        if (info && info.forcedIdle) { skippedFilteredState++; continue; }
+
+        // Filter out "forcedIdle" transitions (episode_runner should skip them, but enforce here too).
+        if (info.forcedIdle) { skippedFilteredState++; continue; }
 
         const obsAny = tr.obs;
+        const me0 = obsAny?.me ?? {};
+        const st0 = Number(me0.state ?? 0);
+        const isLying0 = !!me0.isLying || st0 === 4;
+        const isDiving0 = !!me0.isDiving || st0 === 3;
+        const canAct0 = (me0.canAct !== undefined) ? !!me0.canAct : (!isLying0 && !isDiving0);
+        if (!canAct0 || isLying0 || isDiving0) { skippedFilteredState++; continue; }
+
+        okInfoThisPoint++;
         const featAny = tr.feat;
 
         // ✅ Memory/GC optimization:
@@ -1367,13 +1384,15 @@ export class Trainer {
       // This should only happen if transitions themselves are tiny or filtered upstream.
       if (okInfoThisPoint > 0 && pushedThisPoint <= 5) {
         logDebug(
-          `[POINT-PUSH] ep=${this.totalEpisodes} trans=${transitions.length} okInfo=${okInfoThisPoint} pushed=${pushedThisPoint} skippedNoInfo=${skippedNoInfo} skippedBadFields=${skippedBadFields} rolloutLen=${rolloutLenBeforePoint}->${rolloutLenAfterPoint}`
+          `[POINT-PUSH] ep=${this.totalEpisodes} trans=${transitions.length} okInfo=${okInfoThisPoint} pushed=${pushedThisPoint} skippedNoInfo=${skippedNoInfo} skippedBadFields=${skippedBadFields} skippedFilteredState=${skippedFilteredState} rolloutLen=${rolloutLenBeforePoint}->${rolloutLenAfterPoint}`
         );
       }
 
       // accumulate skip counters
       this.learnDiag.skippedNoInfo += skippedNoInfo;
       this.learnDiag.skippedBadFields += skippedBadFields;
+      this.learnDiag.skippedFilteredState += skippedFilteredState;
+      this.learnDiag.skippedFilteredState += skippedFilteredState;
 
       // update when enough rollout steps are collected
       while (this.rollout.length >= this.rolloutSteps) {

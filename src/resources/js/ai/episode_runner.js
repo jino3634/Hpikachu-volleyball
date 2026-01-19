@@ -349,6 +349,8 @@ export class OnePointEpisodeRunner {
           if (totalSteps >= (this._maxTotalSteps | 0)) {
             // TOTAL_STEPS_SAFETY로 끊길 때도 episode는 최대한 finalize 시도
             try {
+              // Episode boundary: ensure last transition has done=true (reward may be 0 here)
+              if (typeof builder.applyTerminal === 'function') builder.applyTerminal(this.game?._lastRoundEvents ?? null);
               builder.finalize({
                 scoredBy: 0,
                 loser: 0,
@@ -758,27 +760,32 @@ export class OnePointEpisodeRunner {
           }
 
           // PPO requires decisionInfo (logp/value). If missing => skip creating a transition.
+          // Also skip "forcedIdle" transitions (lying/diving/can't-act 등) so they never reach rollout.
           if (sampledDecision && decisionInfo) {
-            // ✅ Memory optimization: store compact features instead of full obs objects.
-            // PPO training does not need the full obs tree; a fixed-length Float32Array is enough.
-            const policy = agent?.policy;
-            const obsFeat = this._buildFeatForObs(policy, obs);
-            const nextFeat = this._buildFeatForObs(policy, nextObs);
+            if (decisionInfo.forcedIdle) {
+              epDiag.stepsSkippedForcedIdle++;
+            } else {
+              // ✅ Memory optimization: store compact features instead of full obs objects.
+              // PPO training does not need the full obs tree; a fixed-length Float32Array is enough.
+              const policy = agent?.policy;
+              const obsFeat = this._buildFeatForObs(policy, obs);
+              const nextFeat = this._buildFeatForObs(policy, nextObs);
 
-            builder.addStep({
-              t: frames,
-              // Keep raw obs for PPO (masking/gating/diagnostics) and attach compact features separately.
-              obs: obs ?? null,
-              feat: obsFeat,
-              action: inputTuple,
-              // nextObs is currently unused by PPO core, but can be useful for auxiliary/teacher logic.
-              nextObs: nextObs ?? null,
-              nextFeat,
-              done: false,
-              info: decisionInfo,
-              roundEvents: ev,
-            });
-            epDiag.stepsAdded++;
+              builder.addStep({
+                t: frames,
+                // Keep raw obs for PPO (masking/gating/diagnostics) and attach compact features separately.
+                obs: obs ?? null,
+                feat: obsFeat,
+                action: inputTuple,
+                // nextObs is currently unused by PPO core, but can be useful for auxiliary/teacher logic.
+                nextObs: nextObs ?? null,
+                nextFeat,
+                done: false,
+                info: decisionInfo,
+                roundEvents: ev,
+              });
+              epDiag.stepsAdded++;
+            }
           }
 
           frames++;
@@ -805,6 +812,11 @@ export class OnePointEpisodeRunner {
                 }
               }
             }
+
+            // Guarantee terminal transition semantics:
+            // - last transition has done=true
+            // - terminal reward is injected even if the score happened on a non-decision frame
+            builder.applyTerminal(ev);
 
             builder.finalize({
               scoredBy,
@@ -843,6 +855,12 @@ export class OnePointEpisodeRunner {
               if (typeof this.game.roundEnded === 'boolean') this.game.roundEnded = false;
               if (typeof this.game.gameEnded === 'boolean') this.game.gameEnded = false;
             } catch (_) {}
+
+            // Episode boundary: ensure last transition has done=true
+            if (typeof builder.applyTerminal === 'function') builder.applyTerminal(this.game?._lastRoundEvents ?? null);
+
+            // Episode boundary: ensure last transition has done=true (reward may be 0 here)
+            if (typeof builder.applyTerminal === 'function') builder.applyTerminal(this.game?._lastRoundEvents ?? null);
 
             builder.finalize({
               scoredBy: 0,

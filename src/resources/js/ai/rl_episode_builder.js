@@ -78,6 +78,12 @@ export class EpisodeBuilder {
 
     const reward = computeSparseReward(roundEvents, this.learningPlayer);
 
+    // Terminal detection (supports both {scoredBy} and {scored}).
+    const scoredByNow = (roundEvents && typeof roundEvents.scoredBy === 'number')
+      ? roundEvents.scoredBy
+      : ((roundEvents && typeof roundEvents.scored === 'number') ? roundEvents.scored : 0);
+    const isTerminalEvent = (scoredByNow === 1 || scoredByNow === 2);
+
     // action can be a number (legacy actionId) or an input tuple object
     const storedAction = (typeof action === 'number') ? (action | 0) : action;
 
@@ -91,9 +97,36 @@ export class EpisodeBuilder {
       nextFeat: nextFeat ?? null,
       done: !!done,
       info: info ?? null,
+      // Internal marker: used to avoid double-counting terminal reward when
+      // the score happens exactly on a decision frame.
+      _terminalEvent: isTerminalEvent,
     });
 
     this.frames = this.transitions.length;
+  }
+
+  /**
+   * Ensure the episode has a proper terminal transition.
+   * - Guarantee the last transition has done=true.
+   * - If the point ended on a non-decision frame, add terminal reward to the last transition.
+   *   (Avoid double-counting when the last transition already saw terminal event.)
+   * @param {any} terminalRoundEvents
+   */
+  applyTerminal(terminalRoundEvents) {
+    if (!this.transitions || this.transitions.length <= 0) return;
+    const last = this.transitions[this.transitions.length - 1];
+    if (!last) return;
+
+    // Always mark done on the last transition.
+    last.done = true;
+
+    // If the last transition did not already observe the terminal event,
+    // inject terminal reward so PPO sees it.
+    if (!last._terminalEvent) {
+      const tr = computeSparseReward(terminalRoundEvents, this.learningPlayer);
+      if (Number.isFinite(tr) && tr !== 0) last.reward = Number(last.reward ?? 0) + tr;
+      last._terminalEvent = true;
+    }
   }
 
   /**
@@ -119,6 +152,14 @@ export class EpisodeBuilder {
     // === reward redistribution over all frames (win/loss credit assignment) ===
     if (this.scoredBy !== null && this.scoredBy !== undefined) {
       // PPO core uses terminal sparse reward; keep per-step rewards as-is (no redistribution)
+    }
+
+    // Strip internal fields that are not part of the public schema.
+    // (Keep in-memory markers during building, but don't persist them.)
+    for (const tr of this.transitions) {
+      if (tr && typeof tr === 'object' && ('_terminalEvent' in tr)) {
+        try { delete tr._terminalEvent; } catch (_) { /* ignore */ }
+      }
     }
 
     return {

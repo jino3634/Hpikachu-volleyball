@@ -16,7 +16,12 @@
 export function computeSparseReward(roundEvents, learningPlayer) {
   if (!roundEvents) return 0;
 
-  const scored = roundEvents.scored; // 0|1|2 in your code
+  // Support both naming conventions:
+  // - scoredBy: 0|1|2
+  // - scored:   0|1|2
+  const scored = (typeof roundEvents.scoredBy === 'number')
+    ? roundEvents.scoredBy
+    : roundEvents.scored; // 0|1|2 in your code
   if (scored !== 1 && scored !== 2) return 0;
 
   // learningPlayer가 득점했으면 +1, 아니면 -1
