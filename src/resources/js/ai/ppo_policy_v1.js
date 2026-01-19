@@ -96,43 +96,6 @@ function renorm3(a, b, c) {
   if (s <= 1e-12) return [1/3, 1/3, 1/3];
   return [a / s, b / s, c / s];
 }
-
-// ------------------------------------------------------------
-// alloc-free renorm helpers (write into reusable buffers)
-// ------------------------------------------------------------
-function renorm2Into(out, a, b) {
-  const s = a + b;
-  if (s <= 1e-12) {
-    out[0] = 0.5; out[1] = 0.5;
-    return out;
-  }
-  const inv = 1 / s;
-  out[0] = a * inv;
-  out[1] = b * inv;
-  return out;
-}
-
-function renorm3Into(out, a, b, c) {
-  const s = a + b + c;
-  if (s <= 1e-12) {
-    out[0] = 1/3; out[1] = 1/3; out[2] = 1/3;
-    return out;
-  }
-  const inv = 1 / s;
-  out[0] = a * inv;
-  out[1] = b * inv;
-  out[2] = c * inv;
-  return out;
-}
-
-// top1-top2 margin without alloc/sort (3-way)
-function top2Margin3(a, b, c) {
-  let m1 = a, m2 = b;
-  if (m2 > m1) { const t = m1; m1 = m2; m2 = t; }
-  if (c > m1) { m2 = m1; m1 = c; }
-  else if (c > m2) { m2 = c; }
-  return m1 - m2;
-}
 function entropyFromProbs(p) {
   let e = 0;
   for (let i = 0; i < p.length; i++) {
@@ -437,24 +400,6 @@ export class PpoPolicyV1 {
       auxDlogitsX: new Float32Array(3),
     };
 
-    // ------------------------------------------------------------
-    // Act/logpValue scratch buffers (avoid per-decision allocations)
-    // NOTE: act() returns immediately, but logpValue() is called inside
-    // PPO loops; keep separate buffers to avoid accidental aliasing.
-    // ------------------------------------------------------------
-    this._act = {
-      ppRaw: new Float32Array(2),
-      ppEff: new Float32Array(2),
-      pxEff: new Float32Array(3),
-      pyEff: new Float32Array(3),
-    };
-    this._lp = {
-      ppRaw: new Float32Array(2),
-      ppEff: new Float32Array(2),
-      pxEff: new Float32Array(3),
-      pyEff: new Float32Array(3),
-    };
-
     this.learningRate = Number(opts.learningRate ?? 3e-4);
     // imitation(BC) 전용 lr. 지정 안 하면 learningRate 사용
      this.imitationLr = Number(opts.imitationLr ?? this.learningRate);
@@ -591,7 +536,7 @@ export class PpoPolicyV1 {
   /**
    * Feature builder (compatible with previous TuplePolicyV1 feature schema).
    * featureLen = 16.
-   * @param {any} obs
+   * @param {any|Float32Array} obsOrFeat
    * @param {1|2} playerIndex
    * @returns {Float32Array}
    */
@@ -809,7 +754,7 @@ export class PpoPolicyV1 {
    * @param {Float32Array} logitsX
    * @param {Float32Array} logitsY
    * @param {Float32Array} logitsP
-   * @param {any} obs
+   * @param {any|Float32Array} obsOrFeat
    * @returns {{px:Float32Array, py:Float32Array, pp:Float32Array}}
    */
 _maskedProbs(logitsX, logitsY, logitsP, obs) {
@@ -880,7 +825,7 @@ _maskedProbs(logitsX, logitsY, logitsP, obs) {
 
   /**
    * Evaluate: compute action distribution + value for obs.
-   * @param {any} obs
+   * @param {any|Float32Array} obsOrFeat
    * @param {1|2} playerIndex
    */
   evaluate(obs, playerIndex) {
@@ -894,27 +839,9 @@ _maskedProbs(logitsX, logitsY, logitsP, obs) {
     return { px: probs.px, py: probs.py, pp: probs.pp, value: fwd.v, feat, fwd };
   }
 
-  // ------------------------------------------------------------
-  // alloc-free stats recording helper (called from act())
-  // ------------------------------------------------------------
-  _recordActionStats(pxEff, pyEff, ppEff, ax, ay, ap) {
-    const as = this.debug.actionStats;
-    as.n++;
-    as.entX += entropyFromProbs(pxEff);
-    as.entY += entropyFromProbs(pyEff);
-    as.entP += entropyFromProbs(ppEff);
-    as.maxX += maxProb(pxEff);
-    as.maxY += maxProb(pyEff);
-    as.maxP += maxProb(ppEff);
-
-    as.axCounts[ax] = (as.axCounts[ax] ?? 0) + 1;
-    as.ayCounts[ay] = (as.ayCounts[ay] ?? 0) + 1;
-    as.apCounts[ap] = (as.apCounts[ap] ?? 0) + 1;
-  }
-
   /**
    * Act and return {action, logp, value}.
-   * @param {any} obs
+	   * @param {any|Float32Array} obsOrFeat
    * @param {1|2} playerIndex
    * @param {{deterministic?:boolean, epsilon?:number}} [opts]
    */
@@ -955,7 +882,21 @@ act(obs, playerIndex, opts = {}) {
 
   const { px, py, pp, value } = this.evaluate(obs, playerIndex);
   if (this.debug.maskStats) this.debug.maskStats.n++;
+  const as = this.debug.actionStats;
+  const recordActionStats = (pxEff, pyEff, ppEff, ax, ay, ap) => {
+    as.n++;
+    as.entX += entropyFromProbs(pxEff);
+    as.entY += entropyFromProbs(pyEff);
+    as.entP += entropyFromProbs(ppEff);
+    as.maxX += maxProb(pxEff);
+    as.maxY += maxProb(pyEff);
+    as.maxP += maxProb(ppEff);
 
+    as.axCounts[ax] = (as.axCounts[ax] ?? 0) + 1;
+    as.ayCounts[ay] = (as.ayCounts[ay] ?? 0) + 1;
+    as.apCounts[ap] = (as.apCounts[ap] ?? 0) + 1;
+
+  };
 
   // ✅ Power-hit gate 제거(소프트 억제/근접/TTL gate 전부 제거)
   // ✅ 하드 금지 조건은 오직 lying/diving
@@ -986,49 +927,34 @@ act(obs, playerIndex, opts = {}) {
 
     const powerHit = ap ? 1 : 0;
 
-    // 1) logp 계산용 eff 분포 구성(메인 경로와 일치) - alloc-free
-    const ppEff = this._act.ppEff;
-    const pxEff = this._act.pxEff;
-    const pyEff = this._act.pyEff;
-
-    // ppEff
-    if (!allowPowerHit) {
-      ppEff[0] = 1; ppEff[1] = 0;
-    } else {
+    // 1) logp 계산용 eff 분포 구성(메인 경로와 일치)
+    const ppEff = (!allowPowerHit) ? [1, 0] : (() => {
       const a0 = clamp01(pp[0] ?? 0);
       const b0 = clamp01(pp[1] ?? 0);
-      renorm2Into(ppEff, a0, b0);
-    }
+      const s0 = a0 + b0;
+      return (s0 > 1e-12) ? [a0 / s0, b0 / s0] : [0.5, 0.5];
+    })();
 
-    // pxEff
-    {
+    const pxEff = (() => {
       const a0 = clamp01(px[0] ?? 0), b0 = clamp01(px[1] ?? 0), c0 = clamp01(px[2] ?? 0);
       // ✅ 지상 powerHit=1 & x=0 하드 금지(이미 너가 채택한 룰)
-      if (!isAir && ap === 1) renorm3Into(pxEff, a0, 0, c0);
-      else renorm3Into(pxEff, a0, b0, c0);
-    }
+      if (!isAir && ap === 1) return renorm3(a0, 0, c0);
+      const s0 = a0 + b0 + c0;
+      return (s0 > 1e-12) ? [a0 / s0, b0 / s0, c0 / s0] : [1/3, 1/3, 1/3];
+    })();
 
-    // pyEff
-    {
+    const pyEff = (() => {
       const a0 = clamp01(py[0] ?? 0), b0 = clamp01(py[1] ?? 0), c0 = clamp01(py[2] ?? 0);
       if (isAir) {
-        const s = b0 + c0;
-        pyEff[0] = 0;
-        if (s > 1e-12) {
-          const inv = 1 / s;
-          pyEff[1] = b0 * inv;
-          pyEff[2] = c0 * inv;
-        } else {
-          pyEff[1] = 0.5;
-          pyEff[2] = 0.5;
-        }
-      } else {
-        renorm3Into(pyEff, a0, b0, c0);
+        const s0 = b0 + c0;
+        return (s0 > 1e-12) ? [0, b0 / s0, c0 / s0] : [0, 0.5, 0.5];
       }
-    }
+      const s0 = a0 + b0 + c0;
+      return (s0 > 1e-12) ? [a0 / s0, b0 / s0, c0 / s0] : [1/3, 1/3, 1/3];
+    })();
 
     // 2) 이제 안전하게 기록/로그확률 계산 가능
-    this._recordActionStats(pxEff, pyEff, ppEff, ax, ay, ap);
+    recordActionStats(pxEff, pyEff, ppEff, ax, ay, ap);
     const logp =
       logProbFromProbs(pxEff, ax) +
       logProbFromProbs(pyEff, ay) +
@@ -1045,29 +971,29 @@ act(obs, playerIndex, opts = {}) {
   // deterministic = argmax, else sample (with conditional masks applied consistently to sampling + logp)
   let ax = 1, ay = 1, ap = 0;
 
-  // 0) 마스킹 전 "원본" pp 정규화 (계측용) - alloc-free
-  const ppRaw = this._act.ppRaw;
-  {
+  // 0) 마스킹 전 "원본" pp 정규화 (계측용)
+  const ppRaw = (() => {
     const a = clamp01(pp[0] ?? 0);
     const b = clamp01(pp[1] ?? 0);
-    renorm2Into(ppRaw, a, b);
-  }
+    const s = a + b;
+    return (s > 1e-12) ? [a / s, b / s] : [0.5, 0.5];
+  })();
 
   // ✅ allowPowerHit일 때도 power=0으로 붕괴하니까, 행동분포를 혼합으로 만든다.
   // mix=0.15면: 85%는 모델, 15%는 50:50 탐색(=power도 가끔 눌러봄)
   const POWER_MIX = 0.15;
 
-  const ppEff = this._act.ppEff;
-  if (!allowPowerHit) {
-    ppEff[0] = 1; ppEff[1] = 0;
-  } else {
-    const p0 = ppRaw[0];
-    const p1 = ppRaw[1];
-    const m = POWER_MIX;
-    const q0 = p0 * (1 - m) + 0.5 * m;
-    const q1 = p1 * (1 - m) + 0.5 * m;
-    renorm2Into(ppEff, q0, q1);
-  }
+  const ppEff = (!allowPowerHit)
+    ? [1, 0]
+    : (() => {
+        const p0 = ppRaw[0];
+        const p1 = ppRaw[1];
+        const m = POWER_MIX;
+        const q0 = p0 * (1 - m) + 0.5 * m;
+        const q1 = p1 * (1 - m) + 0.5 * m;
+        const s = q0 + q1;
+        return (s > 1e-12) ? [q0 / s, q1 / s] : [0.5, 0.5];
+      })();
 
 
   // --- TIE-DIAG (POWER) INSERT HERE ---
@@ -1185,24 +1111,25 @@ act(obs, playerIndex, opts = {}) {
   }
 
 
-  // 2) conditional X distribution: if ground && ap==1 => forbid x=0 (class 1) - alloc-free
-  const pxEff = this._act.pxEff;
-  {
+  // 2) conditional X distribution: if ground && ap==1 => forbid x=0 (class 1)
+  const pxEff = (() => {
     const a = clamp01(px[0] ?? 0);
     const b = clamp01(px[1] ?? 0);
     const c = clamp01(px[2] ?? 0);
     if (!isAir && ap === 1) {
       if (this.debug.maskStats) { this.debug.maskStats.xZeroMaskedCount++; this.debug.maskStats.xZeroMaskedMass += (px[1] ?? 0); }
-      renorm3Into(pxEff, a, 0, c);
-    } else {
-      renorm3Into(pxEff, a, b, c);
+      return renorm3(a, 0, c);
     }
-  }
+    const s = a + b + c;
+    return (s > 1e-12) ? [a / s, b / s, c / s] : [1/3, 1/3, 1/3];
+  })();
 
   // --- TIE-DIAG (X) INSERT HERE ---
   if (as2 && deterministic) {
     // top1-top2 margin
-    const marginX = top2Margin3(pxEff[0], pxEff[1], pxEff[2]);
+    const a = pxEff[0], b = pxEff[1], c = pxEff[2];
+    const s = [a,b,c].slice().sort((x,y)=>y-x);
+    const marginX = s[0] - s[1];
     as2.marginXSum += marginX;
 
     // 완전 동점(거의 안 나옴)
@@ -1221,32 +1148,25 @@ act(obs, playerIndex, opts = {}) {
     if (!isAir && ap === 1 && ax === 1 && this.debug.maskStats) this.debug.maskStats.illegalXSampledPrevented++;
   }
 
-  // 3) Y distribution (keep current behavior: if air forbid y=-1 to avoid double-jump) - alloc-free
-  const pyEff = this._act.pyEff;
-  {
+  // 3) Y distribution (keep current behavior: if air forbid y=-1 to avoid double-jump)
+  const pyEff = (() => {
     const a = clamp01(py[0] ?? 0);
     const b = clamp01(py[1] ?? 0);
     const c = clamp01(py[2] ?? 0);
     if (isAir) {
       if (this.debug.maskStats) { this.debug.maskStats.yNegMaskedCount++; this.debug.maskStats.yNegMaskedMass += (py[0] ?? 0); }
       const s = b + c;
-      pyEff[0] = 0;
-      if (s > 1e-12) {
-        const inv = 1 / s;
-        pyEff[1] = b * inv;
-        pyEff[2] = c * inv;
-      } else {
-        pyEff[1] = 0.5;
-        pyEff[2] = 0.5;
-      }
-    } else {
-      renorm3Into(pyEff, a, b, c);
+      return (s > 1e-12) ? [0, b / s, c / s] : [0, 0.5, 0.5];
     }
-  }
+    const s = a + b + c;
+    return (s > 1e-12) ? [a / s, b / s, c / s] : [1/3, 1/3, 1/3];
+  })();
 
   // --- TIE-DIAG (Y) INSERT HERE ---
   if (as2 && deterministic) {
-    const marginY = top2Margin3(pyEff[0], pyEff[1], pyEff[2]);
+    const a = pyEff[0], b = pyEff[1], c = pyEff[2];
+    const s = [a,b,c].slice().sort((x,y)=>y-x);
+    const marginY = s[0] - s[1];
     as2.marginYSum += marginY;
 
     if (marginY < 1e-6) as2.tieY = (as2.tieY | 0) + 1;
@@ -1322,7 +1242,7 @@ act(obs, playerIndex, opts = {}) {
     as.powerHitGround = (as.powerHitGround ?? 0) + (gate.groundOK ? 1 : 0);
   }
 
-  this._recordActionStats(pxEff, pyEff, ppEff, ax, ay, ap);
+  recordActionStats(pxEff, pyEff, ppEff, ax, ay, ap);
   return { action, logp, value, meta: { ax, ay, ap, forcedIdle: skipLearn, reason: (skipLearn ? (isLying ? 'lying' : 'diving') : null) } };
 }
 
@@ -1365,13 +1285,16 @@ logpValue(obsOrFeat, playerIndex, action) {
     allowPowerHit = !!gate.allow;
   }
 
-  const a = (typeof action === 'number')
-    ? { xDirection: 0, yDirection: 0, powerHit: 0 }
-    : action;
-
-  const ax = mapXDirToClass(Number(a.xDirection ?? 0));
-  const ay = mapYDirToClass(Number(a.yDirection ?? 0));
-  const ap = Number(a.powerHit ?? 0) ? 1 : 0;
+  // alloc-free: avoid creating a default action object
+  let xDir = 0, yDir = 0, pHit = 0;
+  if (typeof action !== 'number') {
+    xDir = Number(action?.xDirection ?? 0);
+    yDir = Number(action?.yDirection ?? 0);
+    pHit = Number(action?.powerHit ?? 0);
+  }
+  const ax = mapXDirToClass(xDir);
+  const ay = mapYDirToClass(yDir);
+  const ap = pHit ? 1 : 0;
 
   // Evaluate under current params
   let px, py, pp, value;
@@ -1558,14 +1481,14 @@ logpValue(obsOrFeat, playerIndex, action) {
         for (let t = start; t < end; t++) {
           const id = idxs[t];
           const it = batch[id];
-          const obsOrFeat = (it.feat ?? it.obs);
+	          const obsOrFeat = (it.feat ?? it.obs);
           const action = it.action;
           const oldLogp = Number(it.oldLogp ?? 0);
           const adv = Number(it.adv ?? 0);
           if (adv > 0) this._advPos++; else if (adv < 0) this._advNeg++; else this._advZero++;
           const ret = Number(it.ret ?? 0);
 
-          const evalNow = this.logpValue(obsOrFeat, it.playerIndex ?? 1, action);
+	          const evalNow = this.logpValue(obsOrFeat, it.playerIndex ?? 1, action);
           const logp = evalNow.logp;
           const v = evalNow.value;
           this._vSum += v; this._vSum2 += v * v;
@@ -1633,9 +1556,9 @@ logpValue(obsOrFeat, playerIndex, action) {
           }
 
           // ✅ 한 번의 forward/backprop에서 PPO+aux를 같이 누적
-          this._accumulateGrads(
-            g,
-            obsOrFeat,
+	          this._accumulateGrads(
+	            g,
+	            obsOrFeat,
             it.playerIndex ?? 1,
             action,
             dL_dlogp,
