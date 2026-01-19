@@ -1,7 +1,7 @@
 // ai/env.js
 'use strict';
 
-import { GROUND_HALF_WIDTH, PikaPhysics } from '../physics.js';
+import { GROUND_HALF_WIDTH, PikaPhysics, predictLandingPointXAndFrames } from '../physics.js';
 import fs from 'node:fs';
 
 /**
@@ -227,6 +227,23 @@ getObs() {
   const vx2 = p2.x - this.prev.p2x;
   const vy2 = p2.y - this.prev.p2y;
 
+  // ------------------------------------------------------------
+  // ✅ landingX + ttl(timeToLand) 단일 진실
+  // - landingX(px) / landingFrames(frames) from physics.js sim
+  // - timeToLand: 0..1 normalized by (2 seconds)
+  // ------------------------------------------------------------
+  const clamp01 = (v) => Math.max(0, Math.min(1, v));
+  const fps = 25; // headless env steps physics once per frame; keep consistent with browser normalFPS
+  let landingFrames = (typeof b?.expectedLandingFrames === 'number') ? Number(b.expectedLandingFrames) : NaN;
+  let landingXpx = (typeof b?.expectedLandingPointX === 'number') ? Number(b.expectedLandingPointX) : NaN;
+  if (!Number.isFinite(landingFrames) || !Number.isFinite(landingXpx)) {
+    const pred = predictLandingPointXAndFrames(b);
+    landingXpx = Number(pred.landingX);
+    landingFrames = Number(pred.landingFrames);
+  }
+  const ttlDen = Math.max(1, fps * 2);
+  const timeToLand = clamp01(landingFrames / ttlDen);
+
   return {
     frame: this.frame,
     ball: {
@@ -235,8 +252,11 @@ getObs() {
       xVelocity: b.xVelocity,
       yVelocity: b.yVelocity,
       isPowerHit: b.isPowerHit ? 1 : 0,
-      timeToLand: (typeof b.expectedLandingFrames === 'number' ? b.expectedLandingFrames : null),
-      expectedLandingX: (typeof b.expectedLandingPointX === 'number' ? b.expectedLandingPointX : null),
+      // ✅ single truth
+      landingX: landingXpx,
+      expectedLandingX: landingXpx, // backward-compat
+      expectedLandingFrames: landingFrames,
+      timeToLand,
 },
     players: [
       {

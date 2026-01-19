@@ -2,7 +2,7 @@
  * The Controller part in MVC pattern
  */
 'use strict';
-import { GROUND_HALF_WIDTH, PikaPhysics } from './physics.js';
+import { GROUND_HALF_WIDTH, PikaPhysics, predictLandingPointXAndFrames } from './physics.js';
 import { MenuView, GameView, FadeInOut, IntroView } from './view.js';
 import { PikaKeyboard } from './keyboard.js';
 import { PikaAudio } from './audio.js';
@@ -999,13 +999,25 @@ return true;
     const oppS = derive(opp);
 
     // ------------------------------------------------------------
-    // ✅ TTL(timeToLand) 의미 정합
-    // - expectedLandingFrames: 프레임 수(정수)
-    // - timeToLand: 0..1 범위의 "시간 비율" (expectedLandingFrames/120)
+    // ✅ landingX + TTL(timeToLand) "단일 진실" 만들기
+    // - landingX(픽셀) / expectedLandingFrames(프레임) 은 physics.js 시뮬 결과로 고정
+    // - timeToLand은 0..1 로 정규화된 비율
+    //   (기준: 2초 = normalFPS*2 프레임)
     // ------------------------------------------------------------
     const clamp01 = (v) => Math.max(0, Math.min(1, v));
-    const expFrames = (typeof b?.expectedLandingFrames === 'number') ? Number(b.expectedLandingFrames) : null;
-    const timeToLand = (expFrames !== null) ? clamp01(expFrames / 120) : null;
+    const fps = (typeof this.normalFPS === 'number' && this.normalFPS > 0) ? this.normalFPS : 25;
+
+    let landingFrames = (typeof b?.expectedLandingFrames === 'number') ? Number(b.expectedLandingFrames) : NaN;
+    let landingX = (typeof b?.expectedLandingPointX === 'number') ? Number(b.expectedLandingPointX) : NaN;
+
+    if (!Number.isFinite(landingFrames) || !Number.isFinite(landingX)) {
+      const pred = predictLandingPointXAndFrames(b);
+      landingX = Number(pred.landingX);
+      landingFrames = Number(pred.landingFrames);
+    }
+
+    const ttlDen = Math.max(1, fps * 2); // 2초 기준
+    const timeToLand = clamp01(landingFrames / ttlDen);
 
     return {
       me: {
@@ -1036,14 +1048,17 @@ return true;
       ball: {
         x: b.x, y: b.y,
         xV: b.xVelocity, yV: b.yVelocity,
-        expectedX: b.expectedLandingPointX,
+        // backward-compat: expectedX는 landingX(픽셀)과 동일하게 유지
+        expectedX: landingX,
         isPowerHit: b.isPowerHit ? 1 : 0,
         // frame count (raw)
-        expectedLandingFrames: expFrames,
+        expectedLandingFrames: landingFrames,
         // 0..1 time ratio
         timeToLand,
         // backward-compat field name
-        expectedLandingX: (typeof b?.expectedLandingPointX === 'number' ? Number(b.expectedLandingPointX) : null),
+        expectedLandingX: landingX,
+        // ✅ 단일 진실 필드
+        landingX,
       },
       scores: [this.scores[0], this.scores[1]],
       isPlayer2Serve: this.isPlayer2Serve ? 1 : 0,
@@ -1056,21 +1071,34 @@ return true;
     // raw(픽셀) 관측
     const raw0 = this.getObservation(playerIndex);
 
-    // physics에서 TTL 계산에 필요한 값 취득
-    const b = this.physics.ball;
-
-    // expectedLandingFrames(프레임)를 0..1로 정규화
-    // 120프레임 ≈ 2초(60fps 기준). 너무 크면 1로 클램프됨.
+    // ------------------------------------------------------------
+    // ✅ landingX + TTL(timeToLand) "단일 진실" (physics.js 동일 시뮬)
+    // ------------------------------------------------------------
     const clamp01 = (v) => Math.max(0, Math.min(1, v));
-    const timeToLand = clamp01(Number(b.expectedLandingFrames ?? 0) / 120);
+    const fps = (typeof this.normalFPS === 'number' && this.normalFPS > 0) ? this.normalFPS : 25;
 
-    // raw에도 TTL/landingX를 넣어 두면 obs.raw 참조하는 코드에서도 편함(픽셀X는 유지)
+    const b = this.physics.ball;
+    let landingFrames = (typeof b?.expectedLandingFrames === 'number') ? Number(b.expectedLandingFrames) : NaN;
+    let landingXpx = (typeof b?.expectedLandingPointX === 'number') ? Number(b.expectedLandingPointX) : NaN;
+    if (!Number.isFinite(landingFrames) || !Number.isFinite(landingXpx)) {
+      const pred = predictLandingPointXAndFrames(b);
+      landingXpx = Number(pred.landingX);
+      landingFrames = Number(pred.landingFrames);
+    }
+    const ttlDen = Math.max(1, fps * 2);
+    const timeToLand = clamp01(landingFrames / ttlDen);
+
+    // raw에도 TTL/landingX/frames를 넣어두면 obs.raw를 참조하는 코드에서도 단일 진실 유지
     const raw = {
       ...raw0,
       ball: {
         ...raw0.ball,
-        landingX: Number(raw0.ball.expectedX ?? 0),
+        expectedLandingFrames: landingFrames,
+        expectedLandingX: landingXpx,
+        landingX: landingXpx,
         timeToLand,
+        // backward-compat: expectedX는 landingX(픽셀)
+        expectedX: landingXpx,
       },
     };
 

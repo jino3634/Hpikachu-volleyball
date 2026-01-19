@@ -147,6 +147,17 @@ export function buildObsNormalized(physics, playerIndex) {
   const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
   const nv = (v, scale) => clamp(v / scale, -1, 1);
 
+  // ------------------------------------------------------------
+  // ✅ landingX + timeToLand 단일 진실(physics.js expected landing sim 결과)
+  // - landingX(px) = ball.expectedLandingPointX
+  // - expectedLandingFrames(frames) = ball.expectedLandingFrames
+  // - timeToLand(0..1) = frames / (2 seconds)
+  // ------------------------------------------------------------
+  const fps = 25;
+  const expFrames = (typeof ball.expectedLandingFrames === 'number') ? Number(ball.expectedLandingFrames) : NaN;
+  const timeToLand = Number.isFinite(expFrames) ? clamp(expFrames / Math.max(1, fps * 2), 0, 1) : 1;
+  const landingXpx = (typeof ball.expectedLandingPointX === 'number') ? Number(ball.expectedLandingPointX) : ball.x;
+
   return {
     me: {
       x: nx(me.x),
@@ -166,7 +177,10 @@ export function buildObsNormalized(physics, playerIndex) {
       y: ny(ball.y),
       xVelocity: nv(ball.xVelocity, 25),
       yVelocity: nv(ball.yVelocity, 35),
-      expectedX: nx(ball.expectedLandingPointX),
+      expectedX: nx(landingXpx),
+      landingX: nx(landingXpx),
+      timeToLand,
+      expectedLandingFrames: expFrames,
       isPowerHit: ball.isPowerHit ? 1 : 0,
     },
   };

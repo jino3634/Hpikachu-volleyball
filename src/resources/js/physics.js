@@ -791,6 +791,80 @@ function calculateExpectedLandingPointXFor(ball) {
   ball.expectedLandingFrames = loopCounter;
 }
 
+/**
+ * Predict expected landing X and number of physics frames until ground touch,
+ * using the **same** simulation logic as calculateExpectedLandingPointXFor().
+ *
+ * This is intended as a "single source of truth" helper for observation/labels.
+ * It does NOT mutate the input.
+ *
+ * @param {{x:number,y:number,xVelocity:number,yVelocity:number}} ballLike
+ * @returns {{ landingX: number, landingFrames: number }}
+ */
+export function predictLandingPointXAndFrames(ballLike) {
+  const toNum = (v, fb = 0) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : fb;
+  };
+
+  const copyBall = {
+    x: toNum(ballLike?.x, 0),
+    y: toNum(ballLike?.y, 0),
+    xVelocity: toNum(ballLike?.xVelocity, 0),
+    yVelocity: toNum(ballLike?.yVelocity, 0),
+  };
+
+  let loopCounter = 0;
+  while (true) {
+    loopCounter++;
+
+    // ------------------------------------------------------------
+    // horizontal wall bounces
+    // ------------------------------------------------------------
+    if (copyBall.xVelocity + copyBall.x < BALL_RADIUS) {
+      copyBall.xVelocity = -copyBall.xVelocity;
+    }
+    if (copyBall.xVelocity + copyBall.x > GROUND_WIDTH - BALL_RADIUS) {
+      copyBall.xVelocity = -copyBall.xVelocity;
+    }
+
+    // ------------------------------------------------------------
+    // ceiling
+    // ------------------------------------------------------------
+    if (copyBall.yVelocity + copyBall.y < 0) {
+      copyBall.yVelocity = 1;
+    }
+
+    // ------------------------------------------------------------
+    // net pillar collision (same condition as engine)
+    // ------------------------------------------------------------
+    if (
+      copyBall.y > NET_PILLAR_TOP_TOP_Y_COORD &&
+      copyBall.x > GROUND_HALF_WIDTH - NET_PILLAR_HALF_WIDTH &&
+      copyBall.x < GROUND_HALF_WIDTH + NET_PILLAR_HALF_WIDTH
+    ) {
+      copyBall.xVelocity = -copyBall.xVelocity;
+    }
+
+    // ------------------------------------------------------------
+    // integrate
+    // ------------------------------------------------------------
+    copyBall.y += copyBall.yVelocity;
+
+    if (copyBall.y > BALL_TOUCHING_GROUND_Y_COORD || loopCounter >= INFINITE_LOOP_LIMIT) {
+      break;
+    }
+
+    copyBall.x += copyBall.xVelocity;
+    copyBall.yVelocity += 1;
+  }
+
+  return {
+    landingX: copyBall.x,
+    landingFrames: loopCounter,
+  };
+}
+
 
 /**
  * FUN_00402360
