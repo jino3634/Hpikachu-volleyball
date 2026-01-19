@@ -536,7 +536,7 @@ export class PpoPolicyV1 {
   /**
    * Feature builder (compatible with previous TuplePolicyV1 feature schema).
    * featureLen = 16.
-   * @param {any|Float32Array} obsOrFeat
+   * @param {any|Float32Array} obs
    * @param {1|2} playerIndex
    * @returns {Float32Array}
    */
@@ -757,27 +757,59 @@ export class PpoPolicyV1 {
    * @param {any|Float32Array} obsOrFeat
    * @returns {{px:Float32Array, py:Float32Array, pp:Float32Array}}
    */
-_maskedProbs(logitsX, logitsY, logitsP, obs) {
-  const me = obs?.me ?? {};
-  const state = Number(me.state ?? 0);
-  const isLying = !!me.isLying || state === 4;
-  const isDiving = !!me.isDiving || state === 3;
-  const canAct = (me.canAct !== undefined) ? !!me.canAct : (!isLying && !isDiving);
-  const isAir = (me.isAir !== undefined) ? !!me.isAir : (state === 1 || state === 2);
+_maskedProbs(logitsX, logitsY, logitsP, obsOrFeat) {
+  const isFeat = (obsOrFeat instanceof Float32Array);
+  const obs = isFeat ? null : obsOrFeat;
+  const feat = isFeat ? obsOrFeat : null;
 
-  const ball = obs?.ball ? obs.ball : {};
-  const meX = Number(me.x ?? 0);
-  const meY = Number(me.y ?? 0);
-  const ballX = Number(ball.x ?? 0);
-  const ballY = Number(ball.y ?? 0);
-  const dx = Math.abs(ballX - meX);
-  const dy = Math.abs(ballY - meY);
+  // state flags
+  const isAir = isFeat ? (feat[3] > 0.5) : (() => {
+    const me = obs?.me ?? {};
+    const state = Number(me.state ?? 0);
+    return (me.isAir !== undefined) ? !!me.isAir : (state === 1 || state === 2);
+  })();
+  const isDiving = isFeat ? (feat[4] > 0.5) : (() => {
+    const me = obs?.me ?? {};
+    const state = Number(me.state ?? 0);
+    return !!me.isDiving || state === 3;
+  })();
+  const isLying = isFeat ? (feat[5] > 0.5) : (() => {
+    const me = obs?.me ?? {};
+    const state = Number(me.state ?? 0);
+    return !!me.isLying || state === 4;
+  })();
+  const canAct = isFeat ? (feat[6] > 0.5) : (() => {
+    const me = obs?.me ?? {};
+    const state = Number(me.state ?? 0);
+    const lying = !!me.isLying || state === 4;
+    const diving = !!me.isDiving || state === 3;
+    return (me.canAct !== undefined) ? !!me.canAct : (!lying && !diving);
+  })();
 
-  // NOTE: 너 코드에서는 ball.timeToLand를 쓰고 있는데,
-  // 이 함수에서는 더 이상 timeToLand / dxOk / dyOk gate를 쓰지 않으니 제거해도 됨.
-  // const timeToLand = Number(ball.timeToLand ?? 1);
-  // timeToLand는 ball에 들어온다(정규화 관측에서 채워줌)
-  const timeToLand = Number(ball.timeToLand ?? 1);
+  // values for obs sanity stats (use normalized features when feat-only)
+  let meX = 0, meY = 0, ballX = 0, ballY = 0, dx = 0, dy = 0, timeToLand = 1;
+  if (isFeat) {
+    // feature schema from buildFeatures() comment:
+    // 0: me.x, 1: me.y, 14: ball.x, 15: ball.y, 19: ball.timeToLand (normalized to [-1,1])
+    meX = Number(feat[0] ?? 0);
+    meY = Number(feat[1] ?? 0);
+    ballX = Number(feat[14] ?? 0);
+    ballY = Number(feat[15] ?? 0);
+    dx = Math.abs(ballX - meX);
+    dy = Math.abs(ballY - meY);
+    const ttlN = Number(feat[19] ?? 1); // [-1,1]
+    timeToLand = Math.max(0, Math.min(1, (ttlN + 1) * 0.5));
+  } else {
+    const me = obs?.me ?? {};
+    const ball = obs?.ball ? obs.ball : {};
+    meX = Number(me.x ?? 0);
+    meY = Number(me.y ?? 0);
+    ballX = Number(ball.x ?? 0);
+    ballY = Number(ball.y ?? 0);
+    dx = Math.abs(ballX - meX);
+    dy = Math.abs(ballY - meY);
+    timeToLand = Number(ball.timeToLand ?? 1);
+  }
 
   // --- Obs sanity accumulation (detect constant/zeroed observations) ---
   {
@@ -828,12 +860,12 @@ _maskedProbs(logitsX, logitsY, logitsP, obs) {
    * @param {any|Float32Array} obsOrFeat
    * @param {1|2} playerIndex
    */
-  evaluate(obs, playerIndex) {
-    const feat = this.buildFeatures(obs, playerIndex, this._infer.feat);
+  evaluate(obsOrFeat, playerIndex) {
+    const feat = (obsOrFeat instanceof Float32Array) ? obsOrFeat : this.buildFeatures(obsOrFeat, playerIndex, this._infer.feat);
     const fwd = this._forward(feat, this._infer.fwd);
 
     const probs = this.hardRulesEnabled
-      ? this._maskedProbs(fwd.lx, fwd.ly, fwd.lp, obs)
+      ? this._maskedProbs(fwd.lx, fwd.ly, fwd.lp, obsOrFeat)
       : this._rawProbs(fwd.lx, fwd.ly, fwd.lp);
 
     return { px: probs.px, py: probs.py, pp: probs.pp, value: fwd.v, feat, fwd };
@@ -841,7 +873,7 @@ _maskedProbs(logitsX, logitsY, logitsP, obs) {
 
   /**
    * Act and return {action, logp, value}.
-	   * @param {any|Float32Array} obsOrFeat
+   * @param {any|Float32Array} obs
    * @param {1|2} playerIndex
    * @param {{deterministic?:boolean, epsilon?:number}} [opts]
    */
@@ -1249,138 +1281,79 @@ act(obs, playerIndex, opts = {}) {
 
   /**
    * Compute log-prob and value under current params for a given (obs, action).
-   * @param {any|Float32Array} obsOrFeat
+   * @param {any|Float32Array} obs
    * @param {1|2} playerIndex
    * @param {{xDirection:number,yDirection:number,powerHit:number}|number} action
    */
-logpValue(obsOrFeat, playerIndex, action) {
-  const isFeat = (obsOrFeat instanceof Float32Array);
-  const obs = isFeat ? null : obsOrFeat;
-  const feat = isFeat ? obsOrFeat : null;
-
-  // State flags (obs or feat)
-  // buildFeatures indices:
-  // 3 me.isAir, 4 me.isDiving, 5 me.isLying, 6 me.canAct
-  let isLying = false;
-  let isDiving = false;
-  let isAir = false;
-  if (isFeat) {
-    isAir = (feat[3] > 0.5);
-    isDiving = (feat[4] > 0.5);
-    isLying = (feat[5] > 0.5);
-  } else {
-    const me = obs?.me ?? {};
-    const state = Number(me.state ?? 0);
-    isLying = !!me.isLying || state === 4;
-    isDiving = !!me.isDiving || state === 3;
-    isAir = (me.isAir !== undefined) ? !!me.isAir : (state === 1 || state === 2);
-  }
+logpValue(obs, playerIndex, action) {
+  const me = obs?.me ?? {};
+  const state = Number(me.state ?? 0);
+  const isLying = !!me.isLying || state === 4;
+  const isDiving = !!me.isDiving || state === 3;
+  const isAir = (me.isAir !== undefined) ? !!me.isAir : (state === 1 || state === 2);
 
   // ✅ act()와 동일한 규칙:
   // - powerHit 하드 금지는 오직 lying/diving
-  // - 나머지 powerHit gate는 (obs가 없으면) 평가에서 재현 불가 → feat-only일 때는 allow=true로 둔다.
-  let allowPowerHit = true;
-  if (!isFeat) {
-    const gate = powerHitGate(obs, playerIndex, this.genome?.powerHitGate);
-    allowPowerHit = !!gate.allow;
-  }
+  // - 지상/공중, 근접/TTL 조건으로는 막지 않음
+  const gate = powerHitGate(obs, playerIndex, this.genome?.powerHitGate);
+  const allowPowerHit = gate.allow;
 
-  // alloc-free: avoid creating a default action object
-  let xDir = 0, yDir = 0, pHit = 0;
-  if (typeof action !== 'number') {
-    xDir = Number(action?.xDirection ?? 0);
-    yDir = Number(action?.yDirection ?? 0);
-    pHit = Number(action?.powerHit ?? 0);
-  }
-  const ax = mapXDirToClass(xDir);
-  const ay = mapYDirToClass(yDir);
-  const ap = pHit ? 1 : 0;
 
-  // Evaluate under current params
-  let px, py, pp, value;
-  if (!isFeat) {
-    ({ px, py, pp, value } = this.evaluate(obs, playerIndex));
-  } else {
-    const fwd = this._forward(feat, this._infer.fwd);
-    value = fwd.v;
-    const probs = this._rawProbs(fwd.lx, fwd.ly, fwd.lp);
-    px = probs.px;
-    py = probs.py;
-    pp = probs.pp;
+  // (dxN/dyN/tLandN는 더 이상 gate에 쓰지 않으므로 삭제해도 됨)
+  // const ballN = obs?.ball ?? {};
+  // const dxN = Math.abs(Number(ballN.x ?? 0) - Number(me.x ?? 0));
+  // const dyN = Math.abs(Number(ballN.y ?? 0) - Number(me.y ?? 0));
+  // const tLandN = Number(ballN.timeToLand ?? 1);
 
-    // 최소 하드룰(환경 합법성): ground면 DOWN(+1) 금지, lying/diving이면 power=1 금지
-    if (this.hardRulesEnabled) {
-      if (!isAir) {
-        py[2] = 0;
-        const s = py[0] + py[1];
-        if (s > 1e-12) {
-          const inv = 1 / s;
-          py[0] *= inv;
-          py[1] *= inv;
-        } else {
-          py[0] = 0.5;
-          py[1] = 0.5;
-        }
-      }
-      if (isLying || isDiving) {
-        pp[1] = 0;
-        pp[0] = 1;
-      }
-    }
-  }
+  const a = (typeof action === 'number')
+    ? { xDirection: 0, yDirection: 0, powerHit: 0 }
+    : action;
 
-  // alloc-free: reuse scratch buffers (logpValue is called heavily during PPO)
-  const ppRaw2 = this._lp.ppRaw;
-  const ppEff = this._lp.ppEff;
-  const pxEff = this._lp.pxEff;
-  const pyEff = this._lp.pyEff;
+  const ax = mapXDirToClass(Number(a.xDirection ?? 0));
+  const ay = mapYDirToClass(Number(a.yDirection ?? 0));
+  const ap = Number(a.powerHit ?? 0) ? 1 : 0;
 
-  // (계측용) 원본 pp 정규화
-  if (!allowPowerHit) {
-    ppRaw2[0] = 1; ppRaw2[1] = 0;
-  } else {
+  const { px, py, pp, value } = this.evaluate(obs, playerIndex);
+
+  const ppRaw2 = (!allowPowerHit) ? [1, 0] : (() => {
     const a0 = clamp01(pp[0] ?? 0);
     const b0 = clamp01(pp[1] ?? 0);
-    renorm2Into(ppRaw2, a0, b0);
-  }
+    const s0 = a0 + b0;
+    return (s0 > 1e-12) ? [a0 / s0, b0 / s0] : [0.5, 0.5];
+  })();
 
-  // act()와 동일한 POWER_MIX
   const POWER_MIX = 0.15;
-  if (!allowPowerHit) {
-    ppEff[0] = 1; ppEff[1] = 0;
-  } else {
-    const p0 = ppRaw2[0], p1 = ppRaw2[1];
-    const m = POWER_MIX;
-    const q0 = p0 * (1 - m) + 0.5 * m;
-    const q1 = p1 * (1 - m) + 0.5 * m;
-    renorm2Into(ppEff, q0, q1);
-  }
 
-  // X: ground & power=1이면 x=0 금지
-  {
+  const ppEff = (!allowPowerHit)
+    ? [1, 0]
+    : (() => {
+        const p0 = ppRaw2[0], p1 = ppRaw2[1];
+        const m = POWER_MIX;
+        const q0 = p0 * (1 - m) + 0.5 * m;
+        const q1 = p1 * (1 - m) + 0.5 * m;
+        const s = q0 + q1;
+        return (s > 1e-12) ? [q0 / s, q1 / s] : [0.5, 0.5];
+      })();
+
+
+  const pxEff = (() => {
     const a0 = clamp01(px[0] ?? 0), b0 = clamp01(px[1] ?? 0), c0 = clamp01(px[2] ?? 0);
-    if (!isAir && ap === 1) renorm3Into(pxEff, a0, 0, c0);
-    else renorm3Into(pxEff, a0, b0, c0);
-  }
+    // ✅ 지상 powerHit=1 & x=0 하드 금지(네가 채택한 룰 유지)
+    if (!isAir && ap === 1) return renorm3(a0, 0, c0);
+    const s0 = a0 + b0 + c0;
+    return (s0 > 1e-12) ? [a0 / s0, b0 / s0, c0 / s0] : [1/3, 1/3, 1/3];
+  })();
 
-  // Y: 공중이면 y=-1 금지
-  {
+  const pyEff = (() => {
     const a0 = clamp01(py[0] ?? 0), b0 = clamp01(py[1] ?? 0), c0 = clamp01(py[2] ?? 0);
+    // ✅ 기존 정책 유지: 공중에서는 y=-1(클래스0) 금지
     if (isAir) {
-      const s = b0 + c0;
-      pyEff[0] = 0;
-      if (s > 1e-12) {
-        const inv = 1 / s;
-        pyEff[1] = b0 * inv;
-        pyEff[2] = c0 * inv;
-      } else {
-        pyEff[1] = 0.5;
-        pyEff[2] = 0.5;
-      }
-    } else {
-      renorm3Into(pyEff, a0, b0, c0);
+      const s0 = b0 + c0;
+      return (s0 > 1e-12) ? [0, b0 / s0, c0 / s0] : [0, 0.5, 0.5];
     }
-  }
+    const s0 = a0 + b0 + c0;
+    return (s0 > 1e-12) ? [a0 / s0, b0 / s0, c0 / s0] : [1/3, 1/3, 1/3];
+  })();
 
   const logp =
     logProbFromProbs(pxEff, ax) +
@@ -1481,14 +1454,14 @@ logpValue(obsOrFeat, playerIndex, action) {
         for (let t = start; t < end; t++) {
           const id = idxs[t];
           const it = batch[id];
-	          const obsOrFeat = (it.feat ?? it.obs);
+          const obs = it.obs;
           const action = it.action;
           const oldLogp = Number(it.oldLogp ?? 0);
           const adv = Number(it.adv ?? 0);
           if (adv > 0) this._advPos++; else if (adv < 0) this._advNeg++; else this._advZero++;
           const ret = Number(it.ret ?? 0);
 
-	          const evalNow = this.logpValue(obsOrFeat, it.playerIndex ?? 1, action);
+          const evalNow = this.logpValue(obs, it.playerIndex ?? 1, action);
           const logp = evalNow.logp;
           const v = evalNow.value;
           this._vSum += v; this._vSum2 += v * v;
@@ -1556,9 +1529,9 @@ logpValue(obsOrFeat, playerIndex, action) {
           }
 
           // ✅ 한 번의 forward/backprop에서 PPO+aux를 같이 누적
-	          this._accumulateGrads(
-	            g,
-	            obsOrFeat,
+          this._accumulateGrads(
+            g,
+            obs,
             it.playerIndex ?? 1,
             action,
             dL_dlogp,
@@ -1710,17 +1683,29 @@ logpValue(obsOrFeat, playerIndex, action) {
     return g;
   }
 
-  _accumulateGrads(g, obs, playerIndex, action, dL_dlogp, dL_dv, auxTeacherCls, auxW) {
-    // forward with caches
-    const feat = this.buildFeatures(obs, playerIndex);
-    const fwd = this._forward(feat);
-    const { px, py, pp } = this._maskedProbs(fwd.lx, fwd.ly, fwd.lp, obs);
+  _accumulateGrads(g, obsOrFeat, playerIndex, action, dL_dlogp, dL_dv, auxTeacherCls, auxW) {
+  // forward with caches (feat-only friendly, alloc-free)
+    const isFeat = (obsOrFeat instanceof Float32Array);
+    const feat = isFeat ? obsOrFeat : this.buildFeatures(obsOrFeat, playerIndex, this._infer.feat);
+    const fwd = this._forward(feat, this._infer.fwd);
+
+    const probs = this.hardRulesEnabled
+      ? this._maskedProbs(fwd.lx, fwd.ly, fwd.lp, obsOrFeat)
+      : this._rawProbs(fwd.lx, fwd.ly, fwd.lp);
+    const px = probs.px, py = probs.py, pp = probs.pp;
+
+
 
     // action classes
-    const a = (typeof action === 'number') ? { xDirection: 0, yDirection: 0, powerHit: 0 } : action;
-    const ax = mapXDirToClass(Number(a.xDirection ?? 0));
-    const ay = mapYDirToClass(Number(a.yDirection ?? 0));
-    const ap = Number(a.powerHit ?? 0) ? 1 : 0;
+    let ax = 1, ay = 1, ap = 0;
+    if (typeof action === 'number') {
+      // legacy numeric action: treat as idle
+      ax = 1; ay = 1; ap = 0;
+    } else {
+      ax = mapXDirToClass(Number(action.xDirection ?? 0));
+      ay = mapYDirToClass(Number(action.yDirection ?? 0));
+      ap = Number(action.powerHit ?? 0) ? 1 : 0;
+    }
 
     // dL/dlogits for each head from dL/dlogp:
     // d logp / d logits = onehot - probs
@@ -1834,16 +1819,22 @@ logpValue(obsOrFeat, playerIndex, action) {
   // [STEP4] Auxiliary supervised loss on X head only (CE)
   // dL/dlogits = (probs - onehot)
   // ------------------------------------------------------------
-  _accumulateAuxX(g, obs, playerIndex, teacherCls, weight) {
+  _accumulateAuxX(g, obsOrFeat, playerIndex, teacherCls, weight) {
     const w = Number(weight ?? 0);
     if (!isFinite(w) || w === 0) return;
 
-    // forward with caches
-    const feat = this.buildFeatures(obs, playerIndex);
-    const fwd = this._forward(feat);
+    // forward with caches (feat-only friendly, alloc-free)
+    const isFeat = (obsOrFeat instanceof Float32Array);
+    const feat = isFeat ? obsOrFeat : this.buildFeatures(obsOrFeat, playerIndex, this._infer.feat);
+    const fwd = this._forward(feat, this._infer.fwd);
 
-    // use the SAME masking rule as PPO (hardRulesEnabled path uses masked probs in _accumulateGrads)
-    const { px } = this._maskedProbs(fwd.lx, fwd.ly, fwd.lp, obs);
+    // use the SAME masking rule as PPO
+    const probs = this.hardRulesEnabled
+      ? this._maskedProbs(fwd.lx, fwd.ly, fwd.lp, obsOrFeat)
+      : this._rawProbs(fwd.lx, fwd.ly, fwd.lp);
+    const px = probs.px;
+
+
 
     // dL/dlogitsX = w * (px - onehot(teacher))
     const tmp = this._train;
