@@ -235,7 +235,9 @@ getObs() {
       xVelocity: b.xVelocity,
       yVelocity: b.yVelocity,
       isPowerHit: b.isPowerHit ? 1 : 0,
-    },
+      timeToLand: (typeof b.expectedLandingFrames === 'number' ? b.expectedLandingFrames : null),
+      expectedLandingX: (typeof b.expectedLandingPointX === 'number' ? b.expectedLandingPointX : null),
+},
     players: [
       {
         x: p1.x,
