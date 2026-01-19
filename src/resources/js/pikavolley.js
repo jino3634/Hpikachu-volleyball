@@ -998,6 +998,15 @@ return true;
     const meS = derive(me);
     const oppS = derive(opp);
 
+    // ------------------------------------------------------------
+    // ✅ TTL(timeToLand) 의미 정합
+    // - expectedLandingFrames: 프레임 수(정수)
+    // - timeToLand: 0..1 범위의 "시간 비율" (expectedLandingFrames/120)
+    // ------------------------------------------------------------
+    const clamp01 = (v) => Math.max(0, Math.min(1, v));
+    const expFrames = (typeof b?.expectedLandingFrames === 'number') ? Number(b.expectedLandingFrames) : null;
+    const timeToLand = (expFrames !== null) ? clamp01(expFrames / 120) : null;
+
     return {
       me: {
         x: me.x, y: me.y,
@@ -1029,9 +1038,13 @@ return true;
         xV: b.xVelocity, yV: b.yVelocity,
         expectedX: b.expectedLandingPointX,
         isPowerHit: b.isPowerHit ? 1 : 0,
-      timeToLand: (typeof this.physics?.ball?.expectedLandingFrames === 'number' ? this.physics.ball.expectedLandingFrames : null),
-      expectedLandingX: (typeof this.physics?.ball?.expectedLandingPointX === 'number' ? this.physics.ball.expectedLandingPointX : null),
-},
+        // frame count (raw)
+        expectedLandingFrames: expFrames,
+        // 0..1 time ratio
+        timeToLand,
+        // backward-compat field name
+        expectedLandingX: (typeof b?.expectedLandingPointX === 'number' ? Number(b.expectedLandingPointX) : null),
+      },
       scores: [this.scores[0], this.scores[1]],
       isPlayer2Serve: this.isPlayer2Serve ? 1 : 0,
       roundEnded: this.roundEnded ? 1 : 0,
