@@ -1291,9 +1291,14 @@ export class Trainer {
         okInfoThisPoint++;
 
         const obsAny = tr.obs;
+        const featAny = tr.feat;
 
         // ✅ Memory/GC optimization:
-        // Episode transitions may already store compact features (Float32Array) instead of full obs.
+        // Episode transitions may carry:
+        // - obs: raw obs object (preferred, for masking/gating/diagnostics)
+        // - feat: compact Float32Array features (preferred, for NN forward)
+        // Back-compat: some older episodes may store feat directly in obs.
+        const isFeatField = (featAny instanceof Float32Array) && ((featAny.length | 0) === (this._featLen | 0));
         const isObsFeat = (obsAny instanceof Float32Array) && ((obsAny.length | 0) === (this._featLen | 0));
 
         if (!isObsFeat) {
@@ -1311,11 +1316,14 @@ export class Trainer {
           if (isLying) this.learnDiag.stateLearn.lying++;
         }
 
-        // Build features into a reusable buffer (rollout stores feat only)
-        // - If obs is already a feature vector, take ownership and skip buildFeatures.
-        // - Otherwise, build into a pooled buffer.
-        const feat = isObsFeat ? obsAny : this._allocFeat();
-        if (!isObsFeat) {
+        // Build features into a reusable buffer.
+        // Priority order:
+        // 1) transition.feat (already built by runner)
+        // 2) legacy: transition.obs is a feature vector
+        // 3) build from raw obs into a pooled buffer
+        const feat = isFeatField ? featAny : (isObsFeat ? obsAny : this._allocFeat());
+        const needBuild = (!isFeatField && !isObsFeat);
+        if (needBuild) {
           try {
             // Prefer out-parameter if available to avoid allocations.
             if (this.policy && typeof this.policy.buildFeatures === 'function') {
@@ -1334,16 +1342,22 @@ export class Trainer {
           }
         }
 
-          this.rollout.push({
-            feat,
-            action: tr.action ?? null,
-            reward: Number(tr.reward ?? 0),
-            done: !!tr.done,
-            oldLogp: Number(info.logp ?? 0),
-            value: Number(info.value ?? 0),
-            playerIndex: this.learningPlayer,
-            aux: info.aux ?? null, // ✅ STEP4: teacher label payload
-          });
+        // PPO update requires obs (for masking/gating & aux heads).
+        // - Preferred: raw obs object from transition.obs
+        // - Back-compat: if obs is a feature vector, pass that (policy supports obsOrFeat)
+        const obsForPPO = isObsFeat ? obsAny : obsAny;
+
+        this.rollout.push({
+          obs: obsForPPO,
+          feat,
+          action: tr.action ?? null,
+          reward: Number(tr.reward ?? 0),
+          done: !!tr.done,
+          oldLogp: Number(info.logp ?? 0),
+          value: Number(info.value ?? 0),
+          playerIndex: this.learningPlayer,
+          aux: info.aux ?? null, // ✅ STEP4: teacher label payload
+        });
         pushedThisPoint++;
         this.learnDiag.pushedSteps++;
       }

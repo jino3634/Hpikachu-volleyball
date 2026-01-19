@@ -49,8 +49,10 @@ export class EpisodeBuilder {
    * @param {{
    *   t: number,
    *   obs: any,
-  *   action: any,
-   *   nextObs: any,
+ *   feat?: Float32Array|null,
+ *   action: any,
+ *   nextObs: any,
+ *   nextFeat?: Float32Array|null,
    *   done: boolean,
    *   info?: any,
    *   roundEvents?: any
@@ -65,8 +67,10 @@ export class EpisodeBuilder {
     const {
       t = 0,
       obs = null,
+      feat = null,
       action = 0,
       nextObs = null,
+      nextFeat = null,
       done = false,
       info = null,
       roundEvents = null,
@@ -80,9 +84,11 @@ export class EpisodeBuilder {
     this.transitions.push({
       t,
       obs: obs ?? null,
+      feat: feat ?? null,
       action: storedAction,
       reward,
       nextObs: nextObs ?? null,
+      nextFeat: nextFeat ?? null,
       done: !!done,
       info: info ?? null,
     });

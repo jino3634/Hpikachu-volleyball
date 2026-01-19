@@ -767,11 +767,13 @@ export class OnePointEpisodeRunner {
 
             builder.addStep({
               t: frames,
-              // Prefer features; fall back to obs if feature extraction fails.
-              obs: obsFeat ?? obs,
+              // Keep raw obs for PPO (masking/gating/diagnostics) and attach compact features separately.
+              obs: obs ?? null,
+              feat: obsFeat,
               action: inputTuple,
-              // nextObs is unused by PPO core currently; keep only compact features.
-              nextObs: nextFeat,
+              // nextObs is currently unused by PPO core, but can be useful for auxiliary/teacher logic.
+              nextObs: nextObs ?? null,
+              nextFeat,
               done: false,
               info: decisionInfo,
               roundEvents: ev,
