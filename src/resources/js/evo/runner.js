@@ -3,6 +3,7 @@
 import { EVO_DEFAULTS } from './config.js';
 import { defaultGenome } from './policy_weighted.js';
 import { evolveOneGeneration, initPopulation } from './evolver_ga.js';
+import { evaluateGenome } from './evolver_ga.js';
 import { loadBest, saveBest } from './storage.js';
 
 /**
@@ -13,6 +14,7 @@ const state = {
   generation: 0,
   bestGenome: null,
   bestWinRate: 0,
+  bestEvalWinRate: 0,
   bestFitness: 0,
   lastSavedAt: 0,
   population: null,
@@ -42,12 +44,14 @@ export async function startEvolution(opts = {}, onUpdate = null) {
   if (saved?.genome) {
     state.bestGenome = saved.genome;
     state.bestWinRate = Number(saved.bestWinRate ?? 0);
+    state.bestEvalWinRate = Number(saved.bestEvalWinRate ?? saved.bestWinRate ?? 0);
     state.bestFitness = Number(saved.bestFitness ?? 0);
     state.generation = Math.max(0, (saved.generation ?? 0) | 0);
     state.lastSavedAt = Number(saved.savedAt ?? 0);
   } else {
     state.bestGenome = defaultGenome();
     state.bestWinRate = 0;
+    state.bestEvalWinRate = 0;
     state.bestFitness = 0;
     state.generation = 0;
     state.lastSavedAt = 0;
@@ -71,7 +75,7 @@ export async function startEvolution(opts = {}, onUpdate = null) {
       const t0 = Date.now();
 
       const res = evolveOneGeneration(state.population, {
-        seeds: cfg.seeds,
+        seeds: cfg.trainSeeds,
         opponentGenome: baselineOpp,
         eliteFraction: cfg.eliteFraction,
         mutationRate: cfg.mutationRate,
@@ -79,6 +83,7 @@ export async function startEvolution(opts = {}, onUpdate = null) {
         winningScore: cfg.winningScore,
         maxFrames: cfg.maxFrames,
         decisionInterval: cfg.decisionInterval,
+        initialServeMode: cfg.initialServeMode,
       });
 
       state.population = res.nextPop;
@@ -88,15 +93,34 @@ export async function startEvolution(opts = {}, onUpdate = null) {
       const bestWin = Number(bestEval.winRate ?? 0);
       const bestFit = Number(bestEval.fitness ?? 0);
 
+      // Optionally evaluate the best on a separate eval seed set for reporting/saving.
+      let bestEvalWinRate = state.bestEvalWinRate;
+      if (cfg.evalSeeds && cfg.evalSeeds.length && ((state.generation % Math.max(1, (cfg.evalEveryGenerations ?? 1) | 0)) === 0)) {
+        const evalRes = evaluateGenome(res.best.genome, {
+          seeds: cfg.evalSeeds,
+          opponentGenome: baselineOpp,
+          winningScore: cfg.winningScore,
+          maxFrames: cfg.maxFrames,
+          decisionInterval: cfg.decisionInterval,
+          initialServeMode: cfg.initialServeMode,
+        });
+        bestEvalWinRate = Number(evalRes.winRate ?? 0);
+      }
+
       let savedNow = false;
-      if (bestWin > (state.bestWinRate + 1e-9)) {
+      // Save based on eval-winrate (preferred) when available; fall back to train-winrate.
+      const saveScore = (Number.isFinite(bestEvalWinRate) ? bestEvalWinRate : bestWin);
+      const prevSaveScore = (Number.isFinite(state.bestEvalWinRate) ? state.bestEvalWinRate : state.bestWinRate);
+      if (saveScore > (prevSaveScore + 1e-9)) {
         state.bestGenome = res.best.genome;
         state.bestWinRate = bestWin;
+        state.bestEvalWinRate = bestEvalWinRate;
         state.bestFitness = bestFit;
         state.lastSavedAt = Date.now();
         saveBest({
           genome: state.bestGenome,
           bestWinRate: state.bestWinRate,
+          bestEvalWinRate: state.bestEvalWinRate,
           bestFitness: state.bestFitness,
           generation: state.generation,
           savedAt: state.lastSavedAt,
@@ -109,6 +133,7 @@ export async function startEvolution(opts = {}, onUpdate = null) {
         ...state,
         event: 'generation',
         generationBestWinRate: bestWin,
+        generationBestEvalWinRate: bestEvalWinRate,
         generationBestFitness: bestFit,
         avgWinRate: res.avgWinRate,
         avgFitness: res.avgFitness,

@@ -220,15 +220,18 @@ function setUpEvoStatusOnLoad() {
   const s = getEvolutionState();
   if (!document.getElementById('evo-gen')) return; // UI not present
   setText('evo-gen', s.generation ?? 0);
-  setText('evo-best', fmtPct(s.bestWinRate ?? 0));
-  setText('evo-avg', fmtPct(0));
+  // Prefer eval winrate for display when available
+  setText('evo-best-eval', fmtPct(s.bestEvalWinRate ?? s.bestWinRate ?? 0));
+  setText('evo-best-train', fmtPct(s.bestWinRate ?? 0));
+  setText('evo-avg-train', fmtPct(0));
   setText('evo-last', (s.lastSavedAt ? new Date(s.lastSavedAt).toLocaleString() : '-'));
 }
 
 function updateEvoStatus(payload) {
   setText('evo-gen', payload.generation ?? 0);
-  setText('evo-best', fmtPct(payload.bestWinRate ?? 0));
-  setText('evo-avg', fmtPct(payload.avgWinRate ?? 0));
+  setText('evo-best-eval', fmtPct(payload.bestEvalWinRate ?? payload.bestWinRate ?? 0));
+  setText('evo-best-train', fmtPct(payload.bestWinRate ?? 0));
+  setText('evo-avg-train', fmtPct(payload.avgWinRate ?? 0));
   setText('evo-last', (payload.lastSavedAt ? new Date(payload.lastSavedAt).toLocaleString() : '-'));
 }
 

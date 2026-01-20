@@ -20,6 +20,7 @@ import { chooseAction } from './policy_weighted.js';
  *  maxFrames?:number,
  *  decisionInterval?:number,
  *  servePlayer2First?:boolean,
+ *  initialServeMode?:('alternate'|'p1'|'p2'),
  *  deterministic?:boolean
  * }} opts
  */
@@ -28,7 +29,10 @@ export function runMatch(opts) {
   const winningScore = Math.max(1, (opts?.winningScore ?? 11) | 0);
   const maxFrames = Math.max(1, (opts?.maxFrames ?? (60 * 30)) | 0);
   const decisionInterval = Math.max(1, (opts?.decisionInterval ?? 3) | 0);
-  const servePlayer2First = !!opts?.servePlayer2First;
+  const initialServeMode = /** @type {'alternate'|'p1'|'p2'} */ (opts?.initialServeMode || 'alternate');
+  const servePlayer2First = (typeof opts?.servePlayer2First === 'boolean')
+    ? !!opts.servePlayer2First
+    : (initialServeMode === 'p2');
 
   // Deterministic RNG for this match
   setCustomRng(makeXorShift32(seed));
@@ -112,7 +116,11 @@ export function runBatch(opts) {
   const seeds = Array.isArray(opts?.seeds) ? opts.seeds : [];
   const agg = { wins: 0, losses: 0, draws: 0, scoreDiff: 0, matches: 0 };
   const di = opts?.decisionInterval;
+  const initialServeMode = /** @type {'alternate'|'p1'|'p2'} */ (opts?.initialServeMode || 'alternate');
   for (let i = 0; i < seeds.length; i++) {
+    const serveP2 = (typeof opts?.servePlayer2First === 'boolean')
+      ? !!opts.servePlayer2First
+      : (initialServeMode === 'alternate' ? ((i & 1) === 1) : (initialServeMode === 'p2'));
     const r = runMatch({
       seed: seeds[i],
       genomeP1: opts.genomeP1,
@@ -120,7 +128,8 @@ export function runBatch(opts) {
       winningScore: opts.winningScore,
       maxFrames: opts.maxFrames,
       decisionInterval: di,
-      servePlayer2First: (i & 1) === 1,
+      servePlayer2First: serveP2,
+      initialServeMode,
     });
     agg.matches++;
     agg.scoreDiff += (r.scoreP1 - r.scoreP2);

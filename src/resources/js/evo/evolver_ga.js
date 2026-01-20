@@ -1,7 +1,7 @@
 'use strict';
 
 import { runMatch } from './evaluator_headless.js';
-import { DEFAULT_SEEDS } from './scenarios.js';
+import { TRAIN_SEEDS } from './scenarios.js';
 import { computeFitness } from './fitness.js';
 import { defaultGenome } from './policy_weighted.js';
 
@@ -15,11 +15,12 @@ import { defaultGenome } from './policy_weighted.js';
  * @param {{seeds?:number[], opponentGenome?:any}} [opts]
  */
 export function evaluateGenome(genome, opts = {}) {
-  const seeds = opts.seeds || DEFAULT_SEEDS;
+  const seeds = opts.seeds || TRAIN_SEEDS;
   const opp = opts.opponentGenome || genome;
   const winningScore = Math.max(1, (opts.winningScore ?? 11) | 0);
   const maxFrames = Math.max(60, (opts.maxFrames ?? (60 * 30)) | 0);
   const decisionInterval = Math.max(1, (opts.decisionInterval ?? 3) | 0);
+  const initialServeMode = /** @type {'alternate'|'p1'|'p2'} */ (opts.initialServeMode || 'alternate');
   const agg = { wins: 0, losses: 0, draws: 0, scoreDiff: 0 };
 
   for (const seed of seeds) {
@@ -30,6 +31,7 @@ export function evaluateGenome(genome, opts = {}) {
       winningScore,
       maxFrames,
       decisionInterval,
+      initialServeMode,
     });
     const diff = (r.scoreP1 - r.scoreP2) | 0;
     agg.scoreDiff += diff;
@@ -73,11 +75,13 @@ export function initPopulation(size, opts = {}) {
  * @param {{seeds?:number[], opponentGenome?:any, eliteFraction?:number, mutationRate?:number, mutationSigma?:number, winningScore?:number, maxFrames?:number, decisionInterval?:number}} opts
  */
 export function evolveOneGeneration(population, opts = {}) {
-  const seeds = opts.seeds || DEFAULT_SEEDS;
+  const seeds = opts.seeds || TRAIN_SEEDS;
   const opponentGenome = opts.opponentGenome;
   const eliteFraction = clamp01(Number(opts.eliteFraction ?? 0.15));
   const mutationRate = clamp01(Number(opts.mutationRate ?? 0.9));
   const mutationSigma = Math.max(0, Number(opts.mutationSigma ?? 0.18));
+
+  const initialServeMode = /** @type {'alternate'|'p1'|'p2'} */ (opts.initialServeMode || 'alternate');
 
   // 1) evaluate
   for (const ind of population) {
@@ -87,6 +91,7 @@ export function evolveOneGeneration(population, opts = {}) {
       winningScore: opts.winningScore,
       maxFrames: opts.maxFrames,
       decisionInterval: opts.decisionInterval,
+      initialServeMode,
     });
   }
 

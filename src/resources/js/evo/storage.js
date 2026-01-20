@@ -28,14 +28,21 @@ export function loadJson(key, fallback = null) {
 const BEST_KEY = 'best';
 
 /**
- * @param {{genome:any, bestWinRate:number, bestFitness:number, generation:number, savedAt:number}} payload
+ * @param {{
+ *  genome:any,
+ *  bestWinRate:number,
+ *  bestEvalWinRate?:number,
+ *  bestFitness:number,
+ *  generation:number,
+ *  savedAt:number
+ * }} payload
  */
 export function saveBest(payload) {
   return saveJson(BEST_KEY, payload);
 }
 
 /**
- * @returns {{genome:any, bestWinRate:number, bestFitness:number, generation:number, savedAt:number} | null}
+ * @returns {{genome:any, bestWinRate:number, bestEvalWinRate?:number, bestFitness:number, generation:number, savedAt:number} | null}
  */
 export function loadBest() {
   return loadJson(BEST_KEY, null);
