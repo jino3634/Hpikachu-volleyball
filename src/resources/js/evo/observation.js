@@ -12,6 +12,10 @@ import { expectedLandingPointXWhenPowerHit } from '../physics.js';
 export function makeObservation(physics, playerIndex) {
   const me = (playerIndex === 1) ? physics.player1 : physics.player2;
   const opp = (playerIndex === 1) ? physics.player2 : physics.player1;
+  // Note: Player class in this codebase does not officially expose xVelocity.
+  // Some forks add it. For type-safety under TS/JSDoc checking, read via any.
+  const meAny = /** @type {any} */ (me);
+  const oppAny = /** @type {any} */ (opp);
   const b = physics.ball;
 
   // Heuristic: only compute power landing candidates when ball is close enough.
@@ -45,7 +49,7 @@ export function makeObservation(physics, playerIndex) {
     me: {
       x: me.x,
       y: me.y,
-      xVelocity: me.xVelocity ?? 0,
+      xVelocity: (meAny.xVelocity ?? 0),
       yVelocity: me.yVelocity ?? 0,
       state: me.state ?? 0,
       isPlayer2: !!me.isPlayer2,
@@ -53,7 +57,7 @@ export function makeObservation(physics, playerIndex) {
     opp: {
       x: opp.x,
       y: opp.y,
-      xVelocity: opp.xVelocity ?? 0,
+      xVelocity: (oppAny.xVelocity ?? 0),
       yVelocity: opp.yVelocity ?? 0,
       state: opp.state ?? 0,
     },

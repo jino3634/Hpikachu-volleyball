@@ -112,7 +112,16 @@ export function runMatch(opts) {
  * Run a batch of matches over a fixed seed list.
  * Returns aggregated stats for fitness.
  *
- * @param {{seeds:number[], genomeP1:any, genomeP2:any, winningScore?:number, maxFrames?:number, decisionInterval?:number}} opts
+ * @param {{
+ *   seeds:(number[]|readonly number[]),
+ *   genomeP1:any,
+ *   genomeP2:any,
+ *   winningScore?:number,
+ *   maxFrames?:number,
+ *   decisionInterval?:number,
+ *   servePlayer2First?:boolean,
+ *   initialServeMode?:('alternate'|'p1'|'p2')
+ * }} opts
  */
 export function runBatch(opts) {
   const seeds = Array.isArray(opts?.seeds) ? opts.seeds : [];

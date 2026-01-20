@@ -12,7 +12,14 @@ import { defaultGenome } from './policy_weighted.js';
 /**
  * Evaluate a genome over a fixed seed set.
  * @param {any} genome
- * @param {{seeds?:number[], opponentGenome?:any}} [opts]
+ * @param {{
+ *   seeds?:(number[]|readonly number[]),
+ *   opponentGenome?:any,
+ *   winningScore?:number,
+ *   maxFrames?:number,
+ *   decisionInterval?:number,
+ *   initialServeMode?:('alternate'|'p1'|'p2')
+ * }} [opts]
  */
 export function evaluateGenome(genome, opts = {}) {
   const seeds = opts.seeds || TRAIN_SEEDS;
@@ -72,7 +79,17 @@ export function initPopulation(size, opts = {}) {
 /**
  * Evolve one generation using elitism + mutation.
  * @param {Individual[]} population
- * @param {{seeds?:number[], opponentGenome?:any, eliteFraction?:number, mutationRate?:number, mutationSigma?:number, winningScore?:number, maxFrames?:number, decisionInterval?:number}} opts
+ * @param {{
+ *   seeds?:(number[]|readonly number[]),
+ *   opponentGenome?:any,
+ *   eliteFraction?:number,
+ *   mutationRate?:number,
+ *   mutationSigma?:number,
+ *   winningScore?:number,
+ *   maxFrames?:number,
+ *   decisionInterval?:number,
+ *   initialServeMode?:('alternate'|'p1'|'p2')
+ * }} opts
  */
 export function evolveOneGeneration(population, opts = {}) {
   const seeds = opts.seeds || TRAIN_SEEDS;

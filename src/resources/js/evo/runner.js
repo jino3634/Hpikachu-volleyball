@@ -83,7 +83,8 @@ export async function startEvolution(opts = {}, onUpdate = null) {
         winningScore: cfg.winningScore,
         maxFrames: cfg.maxFrames,
         decisionInterval: cfg.decisionInterval,
-        initialServeMode: cfg.initialServeMode,
+        // JSDoc inference may widen config.initialServeMode to string; cast to the intended union.
+        initialServeMode: /** @type {'alternate'|'p1'|'p2'} */ (cfg.initialServeMode || 'alternate'),
       });
 
       state.population = res.nextPop;
@@ -102,7 +103,8 @@ export async function startEvolution(opts = {}, onUpdate = null) {
           winningScore: cfg.winningScore,
           maxFrames: cfg.maxFrames,
           decisionInterval: cfg.decisionInterval,
-          initialServeMode: cfg.initialServeMode,
+          // Cast for the same reason as above.
+          initialServeMode: /** @type {'alternate'|'p1'|'p2'} */ (cfg.initialServeMode || 'alternate'),
         });
         bestEvalWinRate = Number(evalRes.winRate ?? 0);
       }
