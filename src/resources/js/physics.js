@@ -77,7 +77,14 @@ export class PikaPhysics {
     this.player1 = new Player(false, isPlayer1Computer);
     this.player2 = new Player(true, isPlayer2Computer);
     this.ball = new Ball(false);
-  }
+  
+    /** @type {null|function(number, any, any, any, any, any):void} */
+    this.aiController = null;
+    /** @type {number} decision interval in frames (>=1). external AI is called only on decision frames. */
+    this.decisionInterval = 3;
+    /** @type {number} internal frame counter */
+    this._frameCount = 0;
+}
 
   /**
    * run {@link physicsEngine} function with this physics object and user input
@@ -86,13 +93,44 @@ export class PikaPhysics {
    * @return {boolean} Is ball touching ground?
    */
   runEngineForNextFrame(userInputArray) {
+    const ctx = { aiController: this.aiController, decisionInterval: this.decisionInterval, frame: (this._frameCount | 0) };
+    this._frameCount = (this._frameCount + 1) | 0;
     const isBallTouchingGround = physicsEngine(
       this.player1,
       this.player2,
       this.ball,
-      userInputArray
+      userInputArray,
+      ctx
     );
     return isBallTouchingGround;
+  }
+
+
+  /**
+   * Set external AI controller. If set, computer players will call this controller on decision frames
+   * instead of using the built-in computer AI.
+   *
+   * Signature: (playerIndex, player, ball, otherPlayer, heldInput, frameCtx) => void
+   * - playerIndex: 1 for left, 2 for right
+   * - heldInput: mutable object {xDirection, yDirection, powerHit} that persists across frames
+   */
+  setAIController(fn) {
+    this.aiController = fn;
+  }
+
+  /** Set decision interval (>=1). */
+  setDecisionInterval(n) {
+    const v = (n | 0);
+    this.decisionInterval = Math.max(1, v);
+  }
+
+  /** Reset per-player held inputs and internal frame counter (useful for headless evaluation). */
+  resetAIState() {
+    // @ts-ignore
+    delete this.player1.__aiHeld;
+    // @ts-ignore
+    delete this.player2.__aiHeld;
+    this._frameCount = 0;
   }
 }
 
@@ -300,7 +338,7 @@ class Ball {
  * @param {PikaUserInput[]} userInputArray userInputArray[0]: user input for player 1, userInputArray[1]: user input for player 2
  * @return {boolean} Is ball touching ground?
  */
-function physicsEngine(player1, player2, ball, userInputArray) {
+function physicsEngine(player1, player2, ball, userInputArray, ctx = null) {
   const isBallTouchingGround =
     processCollisionBetweenBallAndWorldAndSetBallPosition(ball);
 
@@ -326,7 +364,9 @@ function physicsEngine(player1, player2, ball, userInputArray) {
       player,
       userInputArray[i],
       theOtherPlayer,
-      ball
+      ball,
+      ctx,
+      i === 0 ? 1 : 2
     );
 
     // FUN_00402830 omitted
@@ -497,10 +537,49 @@ function processPlayerMovementAndSetPlayerPosition(
   player,
   userInput,
   theOtherPlayer,
-  ball
+  ball,
+  ctx = null,
+  playerIndex = 0
 ) {
   if (player.isComputer === true) {
-    letComputerDecideUserInput(player, ball, theOtherPlayer, userInput);
+    // External AI hook (for evolution / RL). If not set, fall back to built-in computer AI.
+    if (ctx && typeof ctx.aiController === 'function') {
+      // @ts-ignore
+      const held = (player.__aiHeld = player.__aiHeld || { xDirection: 0, yDirection: 0, powerHit: 0 });
+      const di = Math.max(1, (ctx.decisionInterval | 0) || 1);
+      const isDecisionFrame = (((ctx.frame | 0) % di) === 0);
+
+      if (isDecisionFrame) {
+        try {
+          ctx.aiController(
+            playerIndex,
+            player,
+            ball,
+            theOtherPlayer,
+            held,
+            { frame: (ctx.frame | 0), decisionInterval: di, decisionFrame: true }
+          );
+        } catch (e) {
+          // Fail-safe: if external controller crashes, do not crash the game loop.
+          // eslint-disable-next-line no-console
+          console.error('aiController error:', e);
+        }
+      }
+
+      // Clamp & apply held inputs to actual userInput (hold between decision frames).
+      const x = held.xDirection | 0;
+      const y = held.yDirection | 0;
+      userInput.xDirection = x < 0 ? -1 : x > 0 ? 1 : 0;
+      userInput.yDirection = y < 0 ? -1 : y > 0 ? 1 : 0;
+      userInput.powerHit = (held.powerHit | 0) ? 1 : 0;
+
+      // powerHit is an edge trigger (one-shot). Avoid holding it across frames.
+      if (userInput.powerHit === 1) {
+        held.powerHit = 0;
+      }
+    } else {
+      letComputerDecideUserInput(player, ball, theOtherPlayer, userInput);
+    }
   }
 
   // if player is lying down.. don't move
