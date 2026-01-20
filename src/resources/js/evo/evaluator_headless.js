@@ -1,68 +1,87 @@
-/**
- * Headless evaluator (no rendering).
- *
- * Notes:
- * - This is meant for fast evolution runs.
- * - Scoring rule used here: if ball touches ground on left side => right scores, and vice versa.
- */
 'use strict';
 
 import { PikaPhysics, PikaUserInput, GROUND_HALF_WIDTH } from '../physics.js';
 import { setCustomRng } from '../rand.js';
-import { createXorshift32 } from './prng.js';
+import { makeXorShift32 } from './prng.js';
 import { makeObservation } from './observation.js';
 import { chooseAction } from './policy_weighted.js';
 
 /**
- * Run a headless match.
- * @param {{seed:number, genomeP1:any, genomeP2:any, winningScore?:number, maxFrames?:number, decisionInterval?:number}} opts
- * @returns {{p1:number, p2:number, frames:number, seed:number}}
+ * Run a headless match (no rendering) and return diagnostics.
+ *
+ * IMPORTANT: scoring logic mirrors pikavolley.js round() as closely as possible:
+ * when ball touches ground, point is awarded based on ball.punchEffectX.
+ *
+ * @param {{
+ *  seed:number,
+ *  genomeP1:any,
+ *  genomeP2:any,
+ *  winningScore?:number,
+ *  maxFrames?:number,
+ *  decisionInterval?:number,
+ *  servePlayer2First?:boolean,
+ *  deterministic?:boolean
+ * }} opts
  */
 export function runMatch(opts) {
   const seed = (opts?.seed | 0) || 1;
-  const winningScore = Math.max(1, (opts?.winningScore ?? 15) | 0);
-  const maxFrames = Math.max(60, (opts?.maxFrames ?? (60 * 60)) | 0);
+  const winningScore = Math.max(1, (opts?.winningScore ?? 11) | 0);
+  const maxFrames = Math.max(1, (opts?.maxFrames ?? (60 * 30)) | 0);
   const decisionInterval = Math.max(1, (opts?.decisionInterval ?? 3) | 0);
+  const servePlayer2First = !!opts?.servePlayer2First;
 
-  const rng = createXorshift32(seed);
-  setCustomRng(rng);
+  // Deterministic RNG for this match
+  setCustomRng(makeXorShift32(seed));
 
   const physics = new PikaPhysics(true, true);
   physics.setDecisionInterval(decisionInterval);
 
-  // Controller uses held input, updated only on decision frames by physics.js
-  physics.setAIController((playerIndex, _player, _ball, _other, held) => {
-    const obs = makeObservation(physics, /** @type {1|2} */ (playerIndex));
+  // External AI controller (per-player genome)
+  physics.setAIController((playerIndex, player, ball, otherPlayer, userInput, frameCtx) => {
+    const obs = makeObservation(physics, playerIndex);
     const genome = (playerIndex === 1) ? opts.genomeP1 : opts.genomeP2;
     const act = chooseAction(obs, genome);
-    held.xDirection = act.xDir;
-    held.yDirection = act.yDir;
-    held.powerHit = act.powerHit;
+    userInput.xDirection = act.xDirection | 0;
+    userInput.yDirection = act.yDirection | 0;
+    userInput.powerHit = act.powerHit ? 1 : 0;
   });
 
   const inputs = [new PikaUserInput(), new PikaUserInput()];
 
-  let p1 = 0;
-  let p2 = 0;
-  let frames = 0;
-
-  // Start with P1 serve
+  // initialize round like pikavolley.js startOfNewGame
+  let isPlayer2Serve = servePlayer2First;
   physics.player1.initializeForNewRound();
   physics.player2.initializeForNewRound();
-  physics.ball.initializeForNewRound(false);
+  physics.ball.initializeForNewRound(isPlayer2Serve);
   physics.resetAIState();
 
-  while (frames < maxFrames && p1 < winningScore && p2 < winningScore) {
-    const touched = physics.runEngineForNextFrame(inputs);
-    frames++;
+  const score = [0, 0];
+  let rounds = 0;
+  let frames = 0;
+  let reason = 'maxFrames';
 
-    if (touched) {
-      // If ball lands on left side, right scores.
-      const rightScores = (physics.ball.x < GROUND_HALF_WIDTH);
-      if (rightScores) p2++;
-      else p1++;
+  // main loop
+  for (frames = 0; frames < maxFrames; frames++) {
+    const touchingGround = physics.runEngineForNextFrame(inputs);
 
-      const isPlayer2Serve = rightScores;
+    if (touchingGround) {
+      rounds++;
+      // scoring rule mirrors pikavolley.js:
+      if (physics.ball.punchEffectX < GROUND_HALF_WIDTH) {
+        // left side touched => player2 gets point
+        isPlayer2Serve = true;
+        score[1]++;
+      } else {
+        isPlayer2Serve = false;
+        score[0]++;
+      }
+
+      if (score[0] >= winningScore || score[1] >= winningScore) {
+        reason = 'winningScore';
+        break;
+      }
+
+      // next round init mirrors beforeStartOfNextRound -> startOfNewRound path
       physics.player1.initializeForNewRound();
       physics.player2.initializeForNewRound();
       physics.ball.initializeForNewRound(isPlayer2Serve);
@@ -70,8 +89,44 @@ export function runMatch(opts) {
     }
   }
 
-  // Restore default rng
-  setCustomRng(null);
+  const winner = (score[0] === score[1]) ? 0 : (score[0] > score[1] ? 1 : 2);
+  const result = {
+    seed,
+    winner,
+    scoreP1: score[0],
+    scoreP2: score[1],
+    rounds,
+    frames: (frames | 0),
+    reason,
+  };
+  return result;
+}
 
-  return { p1, p2, frames, seed };
+/**
+ * Run a batch of matches over a fixed seed list.
+ * Returns aggregated stats for fitness.
+ *
+ * @param {{seeds:number[], genomeP1:any, genomeP2:any, winningScore?:number, maxFrames?:number, decisionInterval?:number}} opts
+ */
+export function runBatch(opts) {
+  const seeds = Array.isArray(opts?.seeds) ? opts.seeds : [];
+  const agg = { wins: 0, losses: 0, draws: 0, scoreDiff: 0, matches: 0 };
+  const di = opts?.decisionInterval;
+  for (let i = 0; i < seeds.length; i++) {
+    const r = runMatch({
+      seed: seeds[i],
+      genomeP1: opts.genomeP1,
+      genomeP2: opts.genomeP2,
+      winningScore: opts.winningScore,
+      maxFrames: opts.maxFrames,
+      decisionInterval: di,
+      servePlayer2First: (i & 1) === 1,
+    });
+    agg.matches++;
+    agg.scoreDiff += (r.scoreP1 - r.scoreP2);
+    if (r.winner === 1) agg.wins++;
+    else if (r.winner === 2) agg.losses++;
+    else agg.draws++;
+  }
+  return agg;
 }

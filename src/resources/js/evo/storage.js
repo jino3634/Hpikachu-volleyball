@@ -1,26 +1,22 @@
-/**
- * Local storage helpers for evolution.
- */
 'use strict';
 
-const KEY_BEST = 'evo_best_genome_v1';
-const KEY_GEN = 'evo_generation_v1';
+const KEY_PREFIX = 'evo_';
 
-export function saveBestGenome(genome, gen, score) {
+export function saveJson(key, value) {
   try {
-    localStorage.setItem(KEY_BEST, JSON.stringify({ genome, gen: gen|0, score: Number(score ?? 0) }));
-    localStorage.setItem(KEY_GEN, String(gen|0));
-  } catch (_) {
-    // ignore
+    localStorage.setItem(KEY_PREFIX + key, JSON.stringify(value));
+    return true;
+  } catch {
+    return false;
   }
 }
 
-export function loadBestGenome() {
+export function loadJson(key, fallback = null) {
   try {
-    const s = localStorage.getItem(KEY_BEST);
-    if (!s) return null;
-    return JSON.parse(s);
-  } catch (_) {
-    return null;
+    const v = localStorage.getItem(KEY_PREFIX + key);
+    if (v == null) return fallback;
+    return JSON.parse(v);
+  } catch {
+    return fallback;
   }
 }

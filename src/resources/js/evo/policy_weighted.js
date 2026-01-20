@@ -1,85 +1,64 @@
-/**
- * Weighted heuristic policy (genome = weights + thresholds).
- *
- * This is a strong starting point for evolution because it's:
- * - fast
- * - explainable
- * - easy to mutate
- */
 'use strict';
 
 /**
- * @returns {any} default genome
+ * Simple weighted-rule policy for evolution.
+ * Genome is a bag of weights/thresholds.
  */
+
 export function defaultGenome() {
   return {
-    // movement
+    // defense
     wMoveToLanding: 1.0,
-    moveDeadband: 10,
-
-    // jump / dive tendencies
-    jumpBallY: 140,
-    jumpBallDX: 60,
-
-    // power hit tendencies
-    powerBallY: 200,
-    powerBallDX: 40,
-
-    // tiny randomness (mutation can change this)
-    epsilon: 0.0,
+    wStayCenter: 0.15,
+    // attack / power usage
+    wPower: 0.35,
+    // penalties
+    wAvoidNet: 1.0,
+    // thresholds
+    jumpMinBallY: 110,
+    powerMinBallY: 90,
+    powerMaxDX: 90,
   };
 }
 
 /**
- * Choose action from observation.
  * @param {any} obs
- * @param {any} genome
- * @returns {{xDir:-1|0|1, yDir:-1|0|1, powerHit:0|1}}
+ * @param {Record<string, number>} genome
+ * @returns {{xDirection:-1|0|1, yDirection:-1|0|1, powerHit:0|1}}
  */
 export function chooseAction(obs, genome) {
   const g = genome || defaultGenome();
+  const me = obs.me;
+  const opp = obs.opp;
+  const ball = obs.ball;
 
-  const meX = Number(obs?.me?.x ?? 0);
-  const meY = Number(obs?.me?.y ?? 0);
-  const meState = Number(obs?.me?.state ?? 0);
+  // --- target positions ---
+  const landingX = Number(ball.expectedLandingX ?? ball.expectedLandingPointX ?? ball.expectedLandingPoint ?? me.x);
+  const centerX = (me.isPlayer2 ? obs.constants.groundHalfWidth + (obs.constants.groundHalfWidth / 2) : (obs.constants.groundHalfWidth / 2));
 
-  const bX = Number(obs?.ball?.x ?? 0);
-  const bY = Number(obs?.ball?.y ?? 0);
+  // basic defense desire: move toward landingX when ball is coming to my side
+  const mySide = me.isPlayer2 ? 2 : 1;
+  const ballSide = (ball.x < obs.constants.groundHalfWidth) ? 1 : 2;
+  const danger = (ballSide === mySide);
 
-  const landingX = Number(obs?.ball?.expectedLandingX ?? bX);
+  const targetX = danger ? landingX : centerX;
+  const dx = targetX - me.x;
 
   let xDir = 0;
-  const dx = landingX - meX;
-  const db = Math.max(0, Number(g.moveDeadband ?? 10));
-  if (dx > db) xDir = 1;
-  else if (dx < -db) xDir = -1;
+  if (dx > 8) xDir = 1;
+  else if (dx < -8) xDir = -1;
 
-  // jump if ball is above and near (simple defense/offense starter)
+  // jump/power heuristic
+  const nearBall = (Math.abs(ball.x - me.x) <= 72);
+  const ballAbove = (ball.y <= (g.jumpMinBallY || 110));
+  const canJump = (me.state === 0) && (me.y >= obs.constants.playerGroundY);
+
   let yDir = 0;
-  const jumpBallY = Number(g.jumpBallY ?? 140);
-  const jumpBallDX = Number(g.jumpBallDX ?? 60);
-  const nearBall = Math.abs(bX - meX) <= jumpBallDX;
-  const onGround = (meY >= 244);
+  if (canJump && nearBall && ballAbove) yDir = -1;
 
-  if (onGround && bY < jumpBallY && nearBall) {
-    yDir = -1;
-  }
+  // powerHit: only if jumping (state 2 is power state in original); we approximate: request power when ball is near and above threshold
+  const wantPower = (nearBall && (ball.y <= (g.powerMinBallY || 90)) && (Math.abs(ball.x - me.x) <= (g.powerMaxDX || 90)));
+  const powerHit = wantPower ? 1 : 0;
 
-  // power hit one-shot
-  let powerHit = 0;
-  const powerBallY = Number(g.powerBallY ?? 200);
-  const powerBallDX = Number(g.powerBallDX ?? 40);
-
-  const canPower = (meState === 1 || meState === 2) && Math.abs(bX - meX) <= powerBallDX && bY <= powerBallY;
-  if (canPower) powerHit = 1;
-
-  // optional epsilon randomness for exploration
-  const eps = Math.max(0, Math.min(0.5, Number(g.epsilon ?? 0)));
-  if (eps > 0 && Math.random() < eps) {
-    // random small perturbation
-    const r = (Math.random() * 3) | 0;
-    xDir = (r === 0) ? -1 : (r === 1) ? 0 : 1;
-  }
-
-  return { xDir: /** @type {-1|0|1} */ (xDir), yDir: /** @type {-1|0|1} */ (yDir), powerHit: /** @type {0|1} */ (powerHit) };
+  return { xDirection: /** @type {-1|0|1} */ (xDir), yDirection: /** @type {-1|0|1} */ (yDir), powerHit: /** @type {0|1} */ (powerHit) };
 }

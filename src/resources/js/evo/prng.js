@@ -1,27 +1,22 @@
-/**
- * Deterministic PRNG helpers for headless evaluation.
- *
- * This is intentionally simple (fast + reproducible).
- */
 'use strict';
 
 /**
- * Create a xorshift32 PRNG.
+ * Deterministic PRNG for fair evaluation.
+ * Returns a function that yields floats in [0,1).
  * @param {number} seed
- * @returns {() => number} rng that returns float in [0,1)
+ * @returns {() => number}
  */
-export function createXorshift32(seed) {
-  let x = (seed | 0) || 123456789;
-  // Avoid zero state
-  if (x === 0) x = 123456789;
-
+export function makeXorShift32(seed) {
+  let x = (seed | 0) || 1;
   return function rng() {
     // xorshift32
     x ^= (x << 13);
+    x |= 0;
     x ^= (x >>> 17);
+    x |= 0;
     x ^= (x << 5);
-    // Convert to [0,1)
-    // >>> 0 makes it uint32
+    x |= 0;
+    // to [0,1)
     return ((x >>> 0) / 4294967296);
   };
 }
