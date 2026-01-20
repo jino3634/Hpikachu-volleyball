@@ -200,6 +200,25 @@
           </div>
         </div>
         <div class="btn-container right">
+          <div class="relative-container">
+            <button type="button" id="evo-dropdown-btn" class="btn dropdown-btn">
+              Evo
+            </button>
+            <div id="evo-dropdown" class="dropdown">
+              <button type="button" id="evo-start-btn" class="btn">
+                Start evolution
+              </button>
+              <button type="button" id="evo-stop-btn" class="btn">
+                Stop
+              </button>
+              <div class="evo-status">
+                <div>gen: <span id="evo-gen">0</span></div>
+                <div>best: <span id="evo-best">0.0%</span></div>
+                <div>avg: <span id="evo-avg">0.0%</span></div>
+                <div>saved: <span id="evo-last">-</span></div>
+              </div>
+            </div>
+          </div>
           <button type="button" id="about-btn" class="btn glow">
             <span class="text-about hidden">About</span
             ><span class="text-play">Play</span>

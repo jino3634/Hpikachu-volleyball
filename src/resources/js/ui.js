@@ -4,6 +4,12 @@
 'use strict';
 
 import { localStorageWrapper } from './utils/local_storage_wrapper.js';
+import {
+  startEvolution,
+  stopEvolution,
+  getEvolutionState,
+  isEvolutionRunning,
+} from './evo/runner.js';
 
 /** @typedef {import('./pikavolley.js').PikachuVolleyball} PikachuVolleyball */
 /** @typedef {import('@pixi/ticker').Ticker} Ticker */
@@ -171,6 +177,7 @@ export function setUpUI(pikaVolley, ticker) {
 
   setUpBtns(pikaVolley, applyAndSaveOptions);
   setUpToShowDropdownsAndSubmenus(pikaVolley);
+  setUpEvoStatusOnLoad();
 
   // hide or show menubar if the user presses the "esc" key
   window.addEventListener('keydown', (event) => {
@@ -197,6 +204,32 @@ export function setUpUI(pikaVolley, ticker) {
       pikaVolley.audio.muteAll();
     }
   });
+}
+
+function setText(id, text) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.textContent = String(text);
+}
+
+function fmtPct(x) {
+  return (Number(x || 0) * 100).toFixed(1) + '%';
+}
+
+function setUpEvoStatusOnLoad() {
+  const s = getEvolutionState();
+  if (!document.getElementById('evo-gen')) return; // UI not present
+  setText('evo-gen', s.generation ?? 0);
+  setText('evo-best', fmtPct(s.bestWinRate ?? 0));
+  setText('evo-avg', fmtPct(0));
+  setText('evo-last', (s.lastSavedAt ? new Date(s.lastSavedAt).toLocaleString() : '-'));
+}
+
+function updateEvoStatus(payload) {
+  setText('evo-gen', payload.generation ?? 0);
+  setText('evo-best', fmtPct(payload.bestWinRate ?? 0));
+  setText('evo-avg', fmtPct(payload.avgWinRate ?? 0));
+  setText('evo-last', (payload.lastSavedAt ? new Date(payload.lastSavedAt).toLocaleString() : '-'));
 }
 
 /**
@@ -477,6 +510,43 @@ function setUpBtns(pikaVolley, applyAndSaveOptions) {
     };
     applyAndSaveOptions(defaultOptions);
   });
+
+  // --------------------
+  // Evolution controls
+  // --------------------
+  const evoStartBtn = document.getElementById('evo-start-btn');
+  const evoStopBtn = document.getElementById('evo-stop-btn');
+  if (evoStartBtn && evoStopBtn) {
+    // init button state
+    // @ts-ignore
+    evoStopBtn.disabled = !isEvolutionRunning();
+
+    evoStartBtn.addEventListener('click', async () => {
+      // @ts-ignore
+      evoStartBtn.disabled = true;
+      // @ts-ignore
+      evoStopBtn.disabled = false;
+
+      // Evolution is headless; keep the game paused to avoid confusion.
+      const pauseBtn = document.getElementById('pause-btn');
+      if (pauseBtn && !pauseBtn.classList.contains('selected')) {
+        pauseBtn.classList.add('selected');
+        pauseResumeManager.pause(pikaVolley, PauseResumePrecedence.pauseBtn);
+      }
+
+      await startEvolution({}, (s) => {
+        updateEvoStatus(s);
+      });
+    });
+
+    evoStopBtn.addEventListener('click', () => {
+      stopEvolution();
+      // @ts-ignore
+      evoStartBtn.disabled = false;
+      // @ts-ignore
+      evoStopBtn.disabled = true;
+    });
+  }
 }
 
 /**
@@ -604,6 +674,13 @@ function setUpToShowDropdownsAndSubmenus(pikaVolley) {
     .addEventListener('click', () => {
       toggleDropdown('options-dropdown', pikaVolley);
     });
+
+  const evoDropdownBtn = document.getElementById('evo-dropdown-btn');
+  if (evoDropdownBtn) {
+    evoDropdownBtn.addEventListener('click', () => {
+      toggleDropdown('evo-dropdown', pikaVolley);
+    });
+  }
 
   // set up to show submenus on mouseover event
   document

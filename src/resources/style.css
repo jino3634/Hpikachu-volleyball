@@ -211,6 +211,19 @@ a:active {
 .submenu-btn.open {
   background-color: var(--btn-in-dropdown-hover-background-color);
 }
+
+.evo-status {
+  padding: 6px 10px;
+  margin: 0;
+  font-size: calc(0.82 * var(--font-size));
+  line-height: 1.2;
+  color: var(--btn-text-color);
+  background-color: var(--btn-in-dropdown-background-color);
+  user-select: text;
+}
+.evo-status > div {
+  white-space: nowrap;
+}
 span.check {
   display: none;
 }
