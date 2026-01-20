@@ -1,6 +1,9 @@
 // agents.js
 'use strict';
 
+// ✅ Physics-based powerHit candidate evaluation
+import { predictLandingAfterPowerHit } from '../physics.js';
+
 const GROUND_WIDTH = 432;
 const GROUND_HALF_WIDTH = 216;
 
@@ -183,6 +186,75 @@ export function buildObsNormalized(physics, playerIndex) {
       expectedLandingFrames: expFrames,
       isPowerHit: ball.isPowerHit ? 1 : 0,
     },
+  };
+}
+
+// ------------------------------------------------------------
+// ✅ Attack helper: evaluate powerHit candidates using physics.js rule
+// - Returns a recommended tuple (xDirection, yDirection, powerHit=1)
+// - Uses pixels (obs.raw) if present; falls back to normalized fields.
+// ------------------------------------------------------------
+export function pickBestPowerHitTuple(obs, playerIndex = 1) {
+  const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
+  const toFinite = (v, fb = 0) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : fb;
+  };
+
+  const me = obs?.me ?? {};
+  const opp = obs?.opp ?? {};
+  const ball = obs?.ball ?? {};
+  const raw = obs?.raw ?? null;
+
+  const isP2 = !!(me.isPlayer2 || (raw?.me?.isPlayer2));
+
+  // world-space pixels
+  const GROUND_W = 432;
+  const GROUND_H = 304;
+  const toPxX = (xN) => ((clamp(toFinite(xN, 0), -1, 1) + 1) * 0.5) * GROUND_W;
+  const toPxY = (yN) => ((clamp(toFinite(yN, 0), -1, 1) + 1) * 0.5) * GROUND_H;
+
+  const bx = (raw?.ball && Number.isFinite(Number(raw.ball.x))) ? toFinite(raw.ball.x, 0) : toPxX(ball.x);
+  const by = (raw?.ball && Number.isFinite(Number(raw.ball.y))) ? toFinite(raw.ball.y, 0) : toPxY(ball.y);
+  const bVX = (raw?.ball && Number.isFinite(Number(raw.ball.xV))) ? toFinite(raw.ball.xV, 0) : 0;
+  const bVY = (raw?.ball && Number.isFinite(Number(raw.ball.yV))) ? toFinite(raw.ball.yV, 0) : 0;
+
+  const mx = (raw?.me && Number.isFinite(Number(raw.me.x))) ? toFinite(raw.me.x, 0) : toPxX(me.x);
+  const my = (raw?.me && Number.isFinite(Number(raw.me.y))) ? toFinite(raw.me.y, 0) : toPxY(me.y);
+  const ox = (raw?.opp && Number.isFinite(Number(raw.opp.x))) ? toFinite(raw.opp.x, 0) : toPxX(opp.x);
+
+  // Candidate space (matches physics predictor): xMag in {0,1}, yDir in {-1,0,1}
+  const candidates = [];
+  for (let xMag = 0; xMag <= 1; xMag++) {
+    for (let yDir = -1; yDir <= 1; yDir++) {
+      const r = predictLandingAfterPowerHit(xMag, yDir, { x: bx, y: by, xVelocity: bVX, yVelocity: bVY });
+      const lx = toFinite(r?.landingX, bx);
+
+      // Score: prefer landing on opponent side + far from opponent
+      // Opponent side in world: if I'm P1(left), opponent side is x>216; if I'm P2(right), opponent side is x<216.
+      const onOppSide = isP2 ? (lx < 216) : (lx > 216);
+      const sideBonus = onOppSide ? 1.0 : -1.0;
+      const distOpp = Math.abs(lx - ox) / 216;
+      const depth = isP2 ? ((216 - lx) / 216) : ((lx - 216) / 216);
+      const score = sideBonus + 0.35 * distOpp + 0.15 * depth;
+
+      candidates.push({ xMag, yDir, landingX: lx, score });
+    }
+  }
+  candidates.sort((a, b) => b.score - a.score);
+  const best = candidates[0] ?? { xMag: 0, yDir: 0 };
+
+  // Map (xMag,yDir) -> tuple action space (xDir,yDir,powerHit)
+  // xMag=0 => POWER_NEUTRAL (x=0)
+  // xMag=1 => aim toward opponent: P1 => +1, P2 => -1
+  const xDir = (best.xMag === 0) ? 0 : (isP2 ? -1 : 1);
+  const yD = best.yDir;
+
+  return {
+    xDirection: xDir,
+    yDirection: yD,
+    powerHit: 1,
+    _diag: { best, candidates: candidates.slice(0, 6) },
   };
 }
 

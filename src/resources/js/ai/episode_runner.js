@@ -8,6 +8,7 @@
 
 import { EpisodeBuilder } from './rl_episode_builder.js';
 import { SHAPING } from './rl_shaping_config.js';
+import { pickBestPowerHitTuple } from './agents.js';
 
 // 프로젝트에 따라 존재할 수 있어: 없으면 이 파일 내 trace 배열로만 유지
 // import { TraceBuffer } from '../replay/TraceBuffer.js';
@@ -713,7 +714,15 @@ export class OnePointEpisodeRunner {
           if (sampledDecision && decisionInfo) {
             epDiag.auxDecisionN++;
 
-            /** @type {{ moveToLandingX: 0|1|2; mask: 0|1; dx: number; meX: number; landingX: number; ttl: number; }} */
+            /** @type {{
+             *   moveToLandingX: 0|1|2;
+             *   mask: 0|1;
+             *   dx: number;
+             *   meX: number;
+             *   landingX: number;
+             *   ttl: number;
+             *   attack?: { mask:0|1; xDirection:-1|0|1; yDirection:-1|0|1; score:number; landingX:number; };
+             * }} */
             const aux = {
               moveToLandingX: 1, // 0=left, 1=neutral, 2=right
               mask: 0,
@@ -769,6 +778,45 @@ export class OnePointEpisodeRunner {
 
               epDiag.auxMoveToLandingX++;
               epDiag.auxMaskN++;
+            }
+
+            // ------------------------------------------------------------
+            // [STEP3-B] Teacher label: physics-based powerHit attack
+            // - Only when I'm in-air & canAct & ball is in contact window
+            // - Teacher is computed from physics.js simulation candidates
+            // ------------------------------------------------------------
+            try {
+              const me = obs?.me ?? {};
+              const canAct = (me.canAct !== undefined) ? !!me.canAct : true;
+              const state = Number(me.state ?? 0) | 0;
+              const isAir = (me.isAir !== undefined) ? !!me.isAir : (state === 1 || state === 2);
+
+              const raw = obs?.raw ?? null;
+              const mePx = raw?.me ?? null;
+              const bPx = raw?.ball ?? null;
+              const hasRaw = !!(mePx && bPx && Number.isFinite(Number(mePx.x)) && Number.isFinite(Number(bPx.x)));
+
+              // contact window (physics space): within ~1 pikachu radius around hitbox
+              const nearBall = hasRaw && (Math.abs(Number(bPx.x) - Number(mePx.x)) <= 44) && (Math.abs(Number(bPx.y) - Number(mePx.y)) <= 44);
+
+              if (canAct && isAir && nearBall) {
+                const rec = pickBestPowerHitTuple(obs, this.learningPlayer);
+                if (rec && Number(rec.powerHit) === 1) {
+                  const best = rec._diag?.best;
+                  const landingX = Number(best?.landingX ?? NaN);
+                  const score = Number(best?.score ?? 0);
+                  aux.attack = {
+                    mask: 1,
+                    xDirection: /** @type {-1|0|1} */ (Number(rec.xDirection) < 0 ? -1 : (Number(rec.xDirection) > 0 ? 1 : 0)),
+                    yDirection: /** @type {-1|0|1} */ (Number(rec.yDirection) < 0 ? -1 : (Number(rec.yDirection) > 0 ? 1 : 0)),
+                    score,
+                    landingX: Number.isFinite(landingX) ? landingX : 0,
+                  };
+                  epDiag.auxAttackTeacherN = (epDiag.auxAttackTeacherN ?? 0) + 1;
+                }
+              }
+            } catch (_) {
+              // keep training robust; teacher is optional
             }
 
             decisionInfo.aux = aux;

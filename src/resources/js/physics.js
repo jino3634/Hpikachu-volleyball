@@ -865,6 +865,108 @@ export function predictLandingPointXAndFrames(ballLike) {
   };
 }
 
+// ------------------------------------------------------------
+// ✅ Physics-based powerHit landing predictor (single source of truth)
+// ------------------------------------------------------------
+// Notes:
+// - This matches the original reverse-engineered logic used by
+//   calculateExpectedLandingPointXwithpredict():
+//     * yVelocity is flipped upward (negative abs), min magnitude 15
+//     * xVelocity magnitude depends on xMag (0 or 1): (xMag+1)*10
+//     * xVelocity direction is toward opponent side based on ball.x
+//     * yVelocity is scaled by (yDir * 2)
+// - Then we run the same wall/net/ceiling rules as calculateExpectedLandingPointXFor().
+// - Pure function: does not mutate the input.
+//
+// Inputs:
+//   xMag: 0|1   (matches original expected-landing predictor; NOT left/right)
+//   yDir: -1|0|1
+// Returns:
+//   { landingX: number(px), landingFrames: number(frames) }
+export function predictLandingAfterPowerHit(xMag, yDir, ballLike) {
+  const toFinite = (v, fb = 0) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : fb;
+  };
+  const clampInt = (v, lo, hi) => {
+    v = (Number(v) | 0);
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
+  };
+
+  const xm = clampInt(xMag, 0, 1);
+  const yd = clampInt(yDir, -1, 1);
+
+  // Copy input ball state (pixels)
+  const b = {
+    x: toFinite(ballLike?.x, 0),
+    y: toFinite(ballLike?.y, 0),
+    xVelocity: toFinite(ballLike?.xVelocity ?? ballLike?.xV, 0),
+    yVelocity: toFinite(ballLike?.yVelocity ?? ballLike?.yV, 0),
+  };
+
+  // ------------------------------------------------------------
+  // Velocity shaping: same as calculateExpectedLandingPointXwithpredict()
+  // ------------------------------------------------------------
+  const absY = Math.abs(b.yVelocity);
+  let vy = -absY;
+  if (absY < 15) vy = -15;
+
+  // Toward opponent: depends on which side the ball is currently on
+  // (original logic uses ball.x < halfWidth)
+  const speed = (Math.abs(xm) + 1) * 10;
+  const vx = (b.x < GROUND_HALF_WIDTH) ? speed : -speed;
+
+  // yDir: -1(up), 0(flat), 1(down) in our action space
+  b.xVelocity = vx;
+  b.yVelocity = Math.abs(vy) * yd * 2;
+
+  // ------------------------------------------------------------
+  // Simulate until ground touch (copy of calculateExpectedLandingPointXFor)
+  // ------------------------------------------------------------
+  let frames = 0;
+  let loopCounter = 0;
+
+  while (true) {
+    loopCounter++;
+    frames++;
+
+    const futureX = b.xVelocity + b.x;
+    if (futureX < BALL_RADIUS || futureX > GROUND_WIDTH) {
+      b.xVelocity = -b.xVelocity;
+    }
+    if (b.y + b.yVelocity < 0) {
+      b.yVelocity = 1;
+    }
+
+    // net pillar collision
+    if (
+      Math.abs(b.x - GROUND_HALF_WIDTH) < NET_PILLAR_HALF_WIDTH &&
+      b.y > NET_PILLAR_TOP_TOP_Y_COORD
+    ) {
+      if (b.y <= NET_PILLAR_TOP_BOTTOM_Y_COORD) {
+        if (b.yVelocity > 0) b.yVelocity = -b.yVelocity;
+      } else {
+        if (b.x < GROUND_HALF_WIDTH) b.xVelocity = -Math.abs(b.xVelocity);
+        else b.xVelocity = Math.abs(b.xVelocity);
+      }
+    }
+
+    b.y = b.y + b.yVelocity;
+    if (b.y > BALL_TOUCHING_GROUND_Y_COORD || loopCounter >= INFINITE_LOOP_LIMIT) {
+      break;
+    }
+    b.x = b.x + b.xVelocity;
+    b.yVelocity += 1;
+  }
+
+  return {
+    landingX: b.x,
+    landingFrames: frames,
+  };
+}
+
 
 /**
  * FUN_00402360

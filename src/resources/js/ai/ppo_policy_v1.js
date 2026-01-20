@@ -1584,6 +1584,8 @@ logpValue(obsOrFeat, playerIndex, action) {
         let rewSum = 0, rewSum2 = 0;
         let auxLoss = 0;
         let auxCount = 0;
+        let atkAuxLoss = 0;
+        let atkAuxCount = 0;
 
         for (let t = start; t < end; t++) {
           const id = idxs[t];
@@ -1654,6 +1656,9 @@ logpValue(obsOrFeat, playerIndex, action) {
           let auxTeacherCls = -1;
           let auxW = 0;
 
+          // physics-based attack teacher (powerHit) aux
+          let auxAtk = null;
+
           if (AUX_COEF > 0 && aux && aux.mask === 1) {
             const tt = aux.moveToLandingX;
             auxTeacherCls = (tt === 0 || tt === 1 || tt === 2) ? tt : 1;
@@ -1669,6 +1674,29 @@ logpValue(obsOrFeat, playerIndex, action) {
             auxCount++;
           }
 
+          // ------------------------------------------------------------
+          // [STEP4-B] Aux teacher loss (powerHit attack: X+Y+P)
+          // ------------------------------------------------------------
+          // Uses the same single-source-of-truth teacher created in episode_runner.js (aux.attack)
+          // Weighting: very small, and ttl-based decay (near-term only).
+          if (AUX_COEF > 0 && aux && aux.attack && aux.attack.mask === 1) {
+            const ttl01 = clamp01(Number(aux.ttl ?? 0));
+            const ttlScale = Math.max(0, 1 - ttl01);
+            const wAtk = (AUX_COEF * 0.5) * ttlScale; // attack is harder; keep even smaller
+            if (wAtk > 0) {
+              const tx = mapXDirToClass(Number(aux.attack.xDirection ?? 0));
+              const ty = mapYDirToClass(Number(aux.attack.yDirection ?? 0));
+              const tp = 1; // teacher always presses powerHit (edge-trigger)
+              auxAtk = { w: wAtk, tx, ty, tp };
+
+              // log-only
+              atkAuxLoss += -logProbFromProbs(evalNow.px, tx);
+              atkAuxLoss += -logProbFromProbs(evalNow.py, ty);
+              atkAuxLoss += -logProbFromProbs(evalNow.pp, tp);
+              atkAuxCount++;
+            }
+          }
+
           // ✅ 한 번의 forward/backprop에서 PPO+aux를 같이 누적
           this._accumulateGrads(
             g,
@@ -1678,7 +1706,8 @@ logpValue(obsOrFeat, playerIndex, action) {
             dL_dlogp,
             dL_dv,
             auxTeacherCls,
-            auxW
+            auxW,
+            auxAtk
           );
         }
 
@@ -1716,6 +1745,10 @@ logpValue(obsOrFeat, playerIndex, action) {
         stats.auxLoss += (auxCount > 0) ? (auxLoss / auxCount) : 0;
         stats.auxCount += auxCount;
 
+        // optional: attack aux metrics
+        stats.attackAuxLoss = (stats.attackAuxLoss ?? 0) + ((atkAuxCount > 0) ? (atkAuxLoss / atkAuxCount) : 0);
+        stats.attackAuxCount = (stats.attackAuxCount ?? 0) + atkAuxCount;
+
         stats.updates++;
         stats.approxKl += klSum / Math.max(1, nMb);
       }
@@ -1736,6 +1769,7 @@ logpValue(obsOrFeat, playerIndex, action) {
     stats.rewMean /= u;
     stats.rewStd /= u;
     stats.auxLoss /= u;
+    if (stats.attackAuxLoss !== undefined) stats.attackAuxLoss /= u;
 
     this.debug.lastUpdate = {
       policyLoss: stats.policyLoss,
@@ -1824,7 +1858,7 @@ logpValue(obsOrFeat, playerIndex, action) {
     return g;
   }
 
-  _accumulateGrads(g, obsOrFeat, playerIndex, action, dL_dlogp, dL_dv, auxTeacherCls, auxW) {
+  _accumulateGrads(g, obsOrFeat, playerIndex, action, dL_dlogp, dL_dv, auxTeacherCls, auxW, auxAtk = null) {
   // forward with caches (feat-only friendly, alloc-free)
     const isFeat = (obsOrFeat instanceof Float32Array);
     const feat = isFeat ? obsOrFeat : this.buildFeatures(obsOrFeat, playerIndex, this._infer.feat);
@@ -1872,6 +1906,28 @@ logpValue(obsOrFeat, playerIndex, action) {
     if (wAux !== 0 && (tAux === 0 || tAux === 1 || tAux === 2)) {
       for (let i = 0; i < 3; i++) {
         dlogitsX[i] += wAux * (px[i] - (i === tAux ? 1 : 0));
+      }
+    }
+
+    // ------------------------------------------------------------
+    // ✅ Aux CE for attack (powerHit): X+Y+P heads
+    // dL/dlogits += w * (probs - onehot(teacher))
+    // ------------------------------------------------------------
+    if (auxAtk && typeof auxAtk === 'object') {
+      const wA = Number(auxAtk.w ?? 0);
+      const tx = auxAtk.tx | 0;
+      const ty = auxAtk.ty | 0;
+      const tp = auxAtk.tp | 0;
+      if (wA !== 0) {
+        if (tx === 0 || tx === 1 || tx === 2) {
+          for (let i = 0; i < 3; i++) dlogitsX[i] += wA * (px[i] - (i === tx ? 1 : 0));
+        }
+        if (ty === 0 || ty === 1 || ty === 2) {
+          for (let i = 0; i < 3; i++) dlogitsY[i] += wA * (py[i] - (i === ty ? 1 : 0));
+        }
+        if (tp === 0 || tp === 1) {
+          for (let i = 0; i < 2; i++) dlogitsP[i] += wA * (pp[i] - (i === tp ? 1 : 0));
+        }
       }
     }
 
@@ -2122,7 +2178,7 @@ logpValue(obsOrFeat, playerIndex, action) {
     //   dL/dlogits = -1 * (onehot - probs) = (probs - onehot)
     // Therefore we pass -w so SGD increases probability of the demonstrated action.
     const g = this._zeroGrads();
-    this._accumulateGrads(g, obs, playerIndex, label, -w, 0);
+    this._accumulateGrads(g, obs, playerIndex, label, -w, 0, -1, 0, null);
 
     // Apply grads using an imitation learning-rate.
     // _applyGrads expects a *scale* relative to this.learningRate.
