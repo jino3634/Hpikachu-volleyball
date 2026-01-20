@@ -24,7 +24,15 @@ export function makeObservation(physics, playerIndex) {
   let powerLandingX = null;
   if (canPower) {
     // index = (xDir+1)*3 + (yDir+1), xDir,yDir in {-1,0,1}
-    powerLandingX = new Float32Array(9);
+    // Perf: reuse a fixed buffer per-physics/player to avoid GC churn during evolution.
+    const physAny = /** @type {any} */ (physics);
+    const kName = (playerIndex === 1) ? '__evoPowerBufP1' : '__evoPowerBufP2';
+    let buf = physAny[kName];
+    if (!(buf instanceof Float32Array) || buf.length !== 9) {
+      buf = new Float32Array(9);
+      physAny[kName] = buf;
+    }
+    powerLandingX = buf;
     let k = 0;
     for (let xDir = -1; xDir <= 1; xDir++) {
       for (let yDir = -1; yDir <= 1; yDir++) {

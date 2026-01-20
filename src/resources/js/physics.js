@@ -146,9 +146,27 @@ export class PikaPhysics {
       this._aiFrameCounter = (this._aiFrameCounter + 1) | 0;
       const doDecide = ((this._aiFrameCounter % this.decisionInterval) === 0);
 
-      // Hint for physics engine: skip expectedLandingPointX recomputation on non-decision frames in fastEvalMode.
-      // (Expected landing is only needed by policies on decision frames.)
-      this.ball.__skipExpectedLanding = (this.fastEvalMode && !doDecide);
+      // ------------------------------------------------------------------
+      // Perf + correctness for evolution/headless eval
+      //
+      // - Policies read ball.expectedLandingPointX in the AI callback.
+      // - physicsEngine updates expectedLandingPointX *after* the AI callback.
+      //
+      // In fastEvalMode, we compute expected landing ONCE on decision frames
+      // BEFORE calling the policy, then tell the physicsEngine to skip it for
+      // this frame. On non-decision frames we skip it entirely.
+      // ------------------------------------------------------------------
+      if (this.fastEvalMode) {
+        if (doDecide) {
+          // compute now for policy (ball state BEFORE this frame's physics step)
+          calculateExpectedLandingPointXFor(this.ball);
+        }
+        // always skip inside physicsEngine (we already computed or we don't need it)
+        this.ball.__skipExpectedLanding = true;
+      } else {
+        // normal mode: physicsEngine computes after inputs
+        this.ball.__skipExpectedLanding = false;
+      }
       // Mark players so built-in AI won't overwrite our inputs.
       this.player1.__externalControl = this.player1.isComputer === true;
       this.player2.__externalControl = this.player2.isComputer === true;
@@ -243,9 +261,6 @@ class Player {
     /** @type {boolean} If true, built-in AI won't overwrite inputs (external AI controls this player). */
     this.__externalControl = false;
 
-    /** @type {boolean} If true, built-in AI won't overwrite inputs (external AI controls this player). */
-    this.__externalControl = false;
-    
     this.initializeForNewRound();
 
     /** @type {number} -1: left, 0: no diving, 1: right */
@@ -402,6 +417,14 @@ class Ball {
     this.punchEffectRadius = 0; // 0x4c // initialized to 0
     /** @type {boolean} is power hit */
     this.isPowerHit = false; // 0x68  // initialized to 0 i.e. false
+
+    // ---- Evo/headless stability ----
+    // expectedLandingPointX is referenced by evolved policies on the *first* decision frame.
+    // If it stays at 0 here, observations can be polluted for a few frames until the first
+    // prediction update happens. Initialize it to current ball.x to keep it sane.
+    this.expectedLandingPointX = this.x;
+    // Reset perf flag (caller may set it again per-frame).
+    this.__skipExpectedLanding = false;
   }
 }
 
