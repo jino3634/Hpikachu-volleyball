@@ -85,11 +85,22 @@ export class PikaPhysics {
     this.decisionInterval = 1;
     /** @type {number} internal frame counter for AI scheduling */
     this._aiFrameCounter = 0;
+    /** @type {boolean} If true, skip expensive computations on non-decision frames (for headless eval speed). */
+    this.fastEvalMode = false;
     /** @type {{xDirection:number,yDirection:number,powerHit:number}[]} held inputs for non-decision frames */
     this._heldInputs = [
       { xDirection: 0, yDirection: 0, powerHit: 0 },
       { xDirection: 0, yDirection: 0, powerHit: 0 },
     ];
+  }
+
+  /**
+   * Enable/disable fast evaluation mode.
+   * In fast eval mode, some expensive per-frame diagnostics are skipped on non-decision frames.
+   * @param {boolean} on
+   */
+  setFastEvalMode(on) {
+    this.fastEvalMode = !!on;
   }
 
   /**
@@ -131,6 +142,10 @@ export class PikaPhysics {
     if (this.aiController) {
       this._aiFrameCounter = (this._aiFrameCounter + 1) | 0;
       const doDecide = ((this._aiFrameCounter % this.decisionInterval) === 0);
+
+      // Hint for physics engine: skip expectedLandingPointX recomputation on non-decision frames in fastEvalMode.
+      // (Expected landing is only needed by policies on decision frames.)
+      this.ball.__skipExpectedLanding = (this.fastEvalMode && !doDecide);
       // Mark players so built-in AI won't overwrite our inputs.
       this.player1.__externalControl = this.player1.isComputer === true;
       this.player2.__externalControl = this.player2.isComputer === true;
@@ -170,6 +185,9 @@ export class PikaPhysics {
       // Ensure built-in AI remains active when no external controller is set.
       this.player1.__externalControl = false;
       this.player2.__externalControl = false;
+
+      // No external controller: keep default behavior.
+      this.ball.__skipExpectedLanding = false;
     }
 
     const isBallTouchingGround = physicsEngine(
@@ -218,6 +236,9 @@ class Player {
     this.isPlayer2 = isPlayer2; // 0xA0
     /** @type {boolean} Is controlled by computer? */
     this.isComputer = isComputer; // 0xA4
+
+    /** @type {boolean} If true, built-in AI won't overwrite inputs (external AI controls this player). */
+    this.__externalControl = false;
 
     /** @type {boolean} If true, built-in AI won't overwrite inputs (external AI controls this player). */
     this.__externalControl = false;
@@ -322,6 +343,8 @@ class Ball {
     this.initializeForNewRound(isPlayer2Serve);
     /** @type {number} x coord of expected landing point */
     this.expectedLandingPointX = 0; // 0x40
+    /** @type {boolean} Internal perf flag: when true, skip expectedLandingPointX recomputation this frame. */
+    this.__skipExpectedLanding = false;
     /**
      * ball rotation frame number selector
      * During the period where it continues to be 5, hyper ball glitch occur.
@@ -394,6 +417,13 @@ function physicsEngine(player1, player2, ball, userInputArray) {
   const isBallTouchingGround =
     processCollisionBetweenBallAndWorldAndSetBallPosition(ball);
 
+  // Perf: expected landing point is expensive (simulates until landing).
+  // - Compute only once per frame (not once per player)
+  // - In fastEvalMode, caller may set ball.__skipExpectedLanding=true on non-decision frames.
+  if (!ball.__skipExpectedLanding) {
+    calculateExpectedLandingPointXFor(ball);
+  }
+
   let player;
   let theOtherPlayer;
   for (let i = 0; i < 2; i++) {
@@ -404,13 +434,6 @@ function physicsEngine(player1, player2, ball, userInputArray) {
       player = player2;
       theOtherPlayer = player1;
     }
-
-    // FUN_00402d90 omitted
-    // FUN_00402810 omitted
-    // this javascript code is refactored not to need above two function except for
-    // a part of FUN_00402d90:
-    // FUN_00402d90 include FUN_004031b0(calculateExpectedLandingPointXFor)
-    calculateExpectedLandingPointXFor(ball); // calculate expected_X;
 
     processPlayerMovementAndSetPlayerPosition(
       player,
@@ -817,7 +840,10 @@ function processCollisionBetweenBallAndPlayer(
     ball.isPowerHit = false;
   }
 
-  calculateExpectedLandingPointXFor(ball);
+  // Perf: in fastEvalMode, expected landing will be recomputed on decision frames.
+  if (!ball.__skipExpectedLanding) {
+    calculateExpectedLandingPointXFor(ball);
+  }
 }
 
 /**

@@ -39,6 +39,8 @@ export function runMatch(opts) {
 
   const physics = new PikaPhysics(true, true);
   physics.setDecisionInterval(decisionInterval);
+  // Speed: skip expensive ball prediction on non-decision frames.
+  physics.setFastEvalMode(true);
 
   // External AI controller (per-player genome)
   physics.setAIController((playerIndex, player, ball, otherPlayer, userInput, frameCtx) => {
