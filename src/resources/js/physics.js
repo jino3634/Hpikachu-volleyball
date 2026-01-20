@@ -1149,3 +1149,6 @@ function expectedLandingPointXWhenPowerHit(
     copyBall.yVelocity += 1;
   }
 }
+
+// --- EVO exports ---
+export { expectedLandingPointXWhenPowerHit };

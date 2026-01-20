@@ -4,6 +4,8 @@ import { GROUND_HALF_WIDTH, PLAYER_GROUND_Y } from '../physics.js';
 /**
  * Simple weighted-rule policy for evolution.
  * Genome is a bag of weights/thresholds.
+ *
+ * 4C upgrade: score power candidates using predicted landing X for each (xDir,yDir).
  */
 
 export function defaultGenome() {
@@ -11,22 +13,28 @@ export function defaultGenome() {
     // defense
     wMoveToLanding: 1.0,
     wStayCenter: 0.15,
-    // attack / power usage
-    wPower: 0.35,
+
+    // power / attack
+    wPower: 0.25,          // base tendency to try power when possible
+    wAttackFar: 0.90,      // prefer landing far from opponent
+    wAttackCorner: 0.25,   // prefer landing near corners
+    wPowerOnOppSide: 1.20, // penalize power that lands on my side
+
     // penalties
     wAvoidNet: 1.0,
+
     // thresholds
     jumpMinBallY: 110,
-    powerMinBallY: 90,
+    powerMinBallY: 95,
     powerMaxDX: 90,
   };
 }
 
-/**
- * @param {any} obs
- * @param {Record<string, number>} genome
- * @returns {{xDirection:-1|0|1, yDirection:-1|0|1, powerHit:0|1}}
- */
+function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+/** @param {number} x */
+function norm01(x) { return clamp(x, 0, 1); }
+
 export function chooseAction(obs, genome) {
   const g = genome || defaultGenome();
   const me = obs.me;
@@ -34,24 +42,25 @@ export function chooseAction(obs, genome) {
   const ball = obs.ball;
 
   // --- target positions ---
-  const landingX = Number(ball.expectedLandingX ?? ball.expectedLandingPointX ?? ball.expectedLandingPoint ?? me.x);
+  const landingX = Number(ball.expectedLandingX ?? me.x);
   const centerX = me.isPlayer2
-  ? (GROUND_HALF_WIDTH + (GROUND_HALF_WIDTH / 2))
-  : (GROUND_HALF_WIDTH / 2);
+    ? (GROUND_HALF_WIDTH + (GROUND_HALF_WIDTH / 2))
+    : (GROUND_HALF_WIDTH / 2);
 
-  // basic defense desire: move toward landingX when ball is coming to my side
+  // ball side (left=1, right=2)
   const mySide = me.isPlayer2 ? 2 : 1;
   const ballSide = (ball.x < GROUND_HALF_WIDTH) ? 1 : 2;
   const danger = (ballSide === mySide);
 
-  const targetX = danger ? landingX : centerX;
-  const dx = targetX - me.x;
+  // desired X: landingX when danger, otherwise drift to center
+  const desiredX = danger ? landingX : centerX;
 
+  // move decision
+  const dxToDesired = desiredX - me.x;
   let xDir = 0;
-  if (dx > 8) xDir = 1;
-  else if (dx < -8) xDir = -1;
+  if (Math.abs(dxToDesired) > 8) xDir = (dxToDesired > 0) ? 1 : -1;
 
-  // jump/power heuristic
+  // jump heuristic
   const nearBall = (Math.abs(ball.x - me.x) <= 72);
   const ballAbove = (ball.y <= (g.jumpMinBallY || 110));
   const canJump = (me.state === 0) && (me.y >= PLAYER_GROUND_Y);
@@ -59,9 +68,75 @@ export function chooseAction(obs, genome) {
   let yDir = 0;
   if (canJump && nearBall && ballAbove) yDir = -1;
 
-  // powerHit: only if jumping (state 2 is power state in original); we approximate: request power when ball is near and above threshold
-  const wantPower = (nearBall && (ball.y <= (g.powerMinBallY || 90)) && (Math.abs(ball.x - me.x) <= (g.powerMaxDX || 90)));
-  const powerHit = wantPower ? 1 : 0;
+  // --- power candidate scoring (4C) ---
+  // Only consider power when ball is near and above threshold.
+  const wantPowerBase =
+    nearBall &&
+    (ball.y <= (g.powerMinBallY || 95)) &&
+    (Math.abs(ball.x - me.x) <= (g.powerMaxDX || 90));
 
-  return { xDirection: /** @type {-1|0|1} */ (xDir), yDirection: /** @type {-1|0|1} */ (yDir), powerHit: /** @type {0|1} */ (powerHit) };
+  if (wantPowerBase && ball && ball.canPower && ball.powerLandingX && ball.powerLandingX.length === 9) {
+    const pLX = ball.powerLandingX;
+
+    // Opponent side definition:
+    // - P1(left) wants landingX > half
+    // - P2(right) wants landingX < half
+    const oppSideSign = me.isPlayer2 ? -1 : 1; // +1 means want larger-than-half, -1 means want smaller-than-half
+
+    let bestScore = -1e9;
+    let bestX = 0;
+    let bestY = 0;
+
+    for (let xi = 0; xi < 3; xi++) {
+      for (let yi = 0; yi < 3; yi++) {
+        const idx = xi * 3 + yi;
+        const lx = Number(pLX[idx]);
+        if (!Number.isFinite(lx)) continue;
+
+        // score components
+        const distToOpp = Math.abs(lx - opp.x) / GROUND_HALF_WIDTH; // ~0..2
+        const farScore = distToOpp;
+
+        // corner preference: nearer to left/right wall is better
+        const distToLeft = lx / (GROUND_HALF_WIDTH * 2);
+        const distToRight = 1 - distToLeft;
+        const cornerScore = 1 - Math.min(distToLeft, distToRight) * 2; // 0 center -> 1 corner
+
+        // must land on opponent side; otherwise penalize hard
+        const isOnOppSide = (oppSideSign > 0) ? (lx > GROUND_HALF_WIDTH) : (lx < GROUND_HALF_WIDTH);
+        const sidePenalty = isOnOppSide ? 0 : 1;
+
+        // combine
+        let s = 0;
+        s += (g.wAttackFar || 0) * farScore;
+        s += (g.wAttackCorner || 0) * cornerScore;
+        s -= (g.wPowerOnOppSide || 0) * sidePenalty;
+
+        // mild bias towards "trying power" if it isn't catastrophic
+        s += (g.wPower || 0);
+
+        if (s > bestScore) {
+          bestScore = s;
+          bestX = xi - 1; // -1,0,1
+          bestY = yi - 1; // -1,0,1
+        }
+      }
+    }
+
+    // If best is not terrible, choose it.
+    if (bestScore > -0.25) {
+      return {
+        xDirection: /** @type {-1|0|1} */ (bestX),
+        yDirection: /** @type {-1|0|1} */ (bestY),
+        powerHit: /** @type {0|1} */ (1),
+      };
+    }
+  }
+
+  // fallback: no power, standard movement/jump only
+  return {
+    xDirection: /** @type {-1|0|1} */ (xDir),
+    yDirection: /** @type {-1|0|1} */ (yDir),
+    powerHit: /** @type {0|1} */ (0),
+  };
 }
