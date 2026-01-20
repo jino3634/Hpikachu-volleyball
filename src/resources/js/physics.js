@@ -218,6 +218,10 @@ class Player {
     this.isPlayer2 = isPlayer2; // 0xA0
     /** @type {boolean} Is controlled by computer? */
     this.isComputer = isComputer; // 0xA4
+
+    /** @type {boolean} If true, built-in AI won't overwrite inputs (external AI controls this player). */
+    this.__externalControl = false;
+    
     this.initializeForNewRound();
 
     /** @type {number} -1: left, 0: no diving, 1: right */
