@@ -1,4 +1,5 @@
 'use strict';
+import { GROUND_HALF_WIDTH, PLAYER_GROUND_Y } from '../physics.js';
 
 /**
  * Simple weighted-rule policy for evolution.
@@ -34,11 +35,13 @@ export function chooseAction(obs, genome) {
 
   // --- target positions ---
   const landingX = Number(ball.expectedLandingX ?? ball.expectedLandingPointX ?? ball.expectedLandingPoint ?? me.x);
-  const centerX = (me.isPlayer2 ? obs.constants.groundHalfWidth + (obs.constants.groundHalfWidth / 2) : (obs.constants.groundHalfWidth / 2));
+  const centerX = me.isPlayer2
+  ? (GROUND_HALF_WIDTH + (GROUND_HALF_WIDTH / 2))
+  : (GROUND_HALF_WIDTH / 2);
 
   // basic defense desire: move toward landingX when ball is coming to my side
   const mySide = me.isPlayer2 ? 2 : 1;
-  const ballSide = (ball.x < obs.constants.groundHalfWidth) ? 1 : 2;
+  const ballSide = (ball.x < GROUND_HALF_WIDTH) ? 1 : 2;
   const danger = (ballSide === mySide);
 
   const targetX = danger ? landingX : centerX;
@@ -51,7 +54,7 @@ export function chooseAction(obs, genome) {
   // jump/power heuristic
   const nearBall = (Math.abs(ball.x - me.x) <= 72);
   const ballAbove = (ball.y <= (g.jumpMinBallY || 110));
-  const canJump = (me.state === 0) && (me.y >= obs.constants.playerGroundY);
+  const canJump = (me.state === 0) && (me.y >= PLAYER_GROUND_Y);
 
   let yDir = 0;
   if (canJump && nearBall && ballAbove) yDir = -1;

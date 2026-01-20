@@ -39,6 +39,9 @@ const PLAYER_LENGTH = 64;
 const PLAYER_HALF_LENGTH = (PLAYER_LENGTH / 2) | 0; // integer division
 /** @constant @type {number} player's y coordinate when they are touching ground */
 const PLAYER_TOUCHING_GROUND_Y_COORD = 244;
+
+export const PLAYER_GROUND_Y = PLAYER_TOUCHING_GROUND_Y_COORD;
+
 /** @constant @type {number} ball's radius */
 const BALL_RADIUS = 20;
 /** @constant @type {number} ball's y coordinate when it is touching ground */
