@@ -233,6 +233,9 @@ function sanitizeParam(key, val) {
   if (key === 'jumpMinBallY') return clamp(val, 20, 200);
   if (key === 'powerMinBallY') return clamp(val, 20, 220);
   if (key === 'powerMaxDX') return clamp(val, 20, 200);
+  if (key === 'deadZoneX') return clamp(val, 0, 60);
+  if (key === 'netAvoidBand') return clamp(val, 8, 180);
+  if (key === 'minPowerScore') return clamp(val, -2, 2);
   // weights
   return clamp(val, -5, 5);
 }

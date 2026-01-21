@@ -23,6 +23,11 @@ export function defaultGenome() {
     // penalties
     wAvoidNet: 1.0,
 
+    // additional control
+    deadZoneX: 10,          // px: stop moving when within this distance
+    netAvoidBand: 48,       // px: avoid landing near the net line when power-hitting
+    minPowerScore: -0.10,   // require at least this score to actually power
+
     // thresholds
     jumpMinBallY: 110,
     powerMinBallY: 95,
@@ -58,7 +63,8 @@ export function chooseAction(obs, genome) {
   // move decision
   const dxToDesired = desiredX - me.x;
   let xDir = 0;
-  if (Math.abs(dxToDesired) > 8) xDir = (dxToDesired > 0) ? 1 : -1;
+  const deadZoneX = Math.max(0, Number(g.deadZoneX ?? 8));
+  if (Math.abs(dxToDesired) > deadZoneX) xDir = (dxToDesired > 0) ? 1 : -1;
 
   // jump heuristic
   const nearBall = (Math.abs(ball.x - me.x) <= 72);
@@ -106,11 +112,17 @@ export function chooseAction(obs, genome) {
         const isOnOppSide = (oppSideSign > 0) ? (lx > GROUND_HALF_WIDTH) : (lx < GROUND_HALF_WIDTH);
         const sidePenalty = isOnOppSide ? 0 : 1;
 
+        // net risk: landing too close to the net is often a free ball / self-risk
+        const netBand = Math.max(8, Number(g.netAvoidBand ?? 48));
+        const netDist = Math.abs(lx - GROUND_HALF_WIDTH);
+        const netPenalty = (netDist >= netBand) ? 0 : (1 - (netDist / netBand));
+
         // combine
         let s = 0;
         s += (g.wAttackFar || 0) * farScore;
         s += (g.wAttackCorner || 0) * cornerScore;
         s -= (g.wPowerOnOppSide || 0) * sidePenalty;
+        s -= (g.wAvoidNet || 0) * netPenalty;
 
         // mild bias towards "trying power" if it isn't catastrophic
         s += (g.wPower || 0);
@@ -124,7 +136,8 @@ export function chooseAction(obs, genome) {
     }
 
     // If best is not terrible, choose it.
-    if (bestScore > -0.25) {
+    const minPowerScore = Number(g.minPowerScore ?? -0.25);
+    if (bestScore > minPowerScore) {
       return {
         xDirection: /** @type {-1|0|1} */ (bestX),
         yDirection: /** @type {-1|0|1} */ (bestY),
