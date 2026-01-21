@@ -10,6 +10,10 @@ import {
   getEvolutionState,
   isEvolutionRunning,
 } from './evo/runner.js';
+import { loadBest, saveBest } from './evo/storage.js';
+import { chooseAction, defaultGenome } from './evo/policy_weighted.js';
+import { makeObservation } from './evo/observation.js';
+
 
 /** @typedef {import('./pikavolley.js').PikachuVolleyball} PikachuVolleyball */
 /** @typedef {import('@pixi/ticker').Ticker} Ticker */
@@ -216,6 +220,68 @@ function fmtPct(x) {
   return (Number(x || 0) * 100).toFixed(1) + '%';
 }
 
+
+function fmtNum(x, digits = 3) {
+  const n = Number(x);
+  if (!Number.isFinite(n)) return '0';
+  return n.toFixed(digits);
+}
+
+/**
+ * Apply an external AI controller to the live game.
+ * This will control BOTH players as computer players:
+ *   - P1 uses best genome
+ *   - P2 uses baseline genome (or provided genomeP2)
+ *
+ * @param {import('./pikavolley.js').PikachuVolleyball} pikaVolley
+ * @param {any} genomeP1
+ * @param {any} genomeP2
+ * @param {number} decisionInterval
+ */
+function applyExternalBestVsBaseline(pikaVolley, genomeP1, genomeP2, decisionInterval = 3) {
+  const physics = pikaVolley && pikaVolley.physics;
+  if (!physics) return false;
+
+  const g1 = genomeP1 || defaultGenome();
+  const g2 = genomeP2 || defaultGenome();
+
+  // Hold last decision so inputs persist on non-decision frames.
+  let heldP1 = { xDirection: 0, yDirection: 0, powerHit: 0 };
+  let heldP2 = { xDirection: 0, yDirection: 0, powerHit: 0 };
+
+  // Ensure both are computer players so physics will accept external control.
+  physics.player1.isComputer = true;
+  physics.player2.isComputer = true;
+
+  // External controller hook: called before physicsEngine() each frame.
+  physics.aiController = (frameCounter, p1, p2, ball, userInputArray) => {
+    const frame = (frameCounter | 0);
+    const isDecision = (decisionInterval <= 1) ? true : ((frame % decisionInterval) === 0);
+
+    if (isDecision) {
+      const obs1 = makeObservation(physics, 1);
+      const obs2 = makeObservation(physics, 2);
+      if (obs1) heldP1 = chooseAction(obs1, g1);
+      if (obs2) heldP2 = chooseAction(obs2, g2);
+    }
+
+    const u1 = userInputArray && userInputArray[0];
+    const u2 = userInputArray && userInputArray[1];
+    if (u1) {
+      u1.xDirection = heldP1.xDirection | 0;
+      u1.yDirection = heldP1.yDirection | 0;
+      u1.powerHit = heldP1.powerHit ? 1 : 0;
+    }
+    if (u2) {
+      u2.xDirection = heldP2.xDirection | 0;
+      u2.yDirection = heldP2.yDirection | 0;
+      u2.powerHit = heldP2.powerHit ? 1 : 0;
+    }
+  };
+
+  return true;
+}
+
 function setUpEvoStatusOnLoad() {
   const s = getEvolutionState();
   if (!document.getElementById('evo-gen')) return; // UI not present
@@ -223,6 +289,9 @@ function setUpEvoStatusOnLoad() {
   // Prefer eval winrate for display when available
   setText('evo-best-eval', fmtPct(s.bestEvalWinRate ?? s.bestWinRate ?? 0));
   setText('evo-best-train', fmtPct(s.bestWinRate ?? 0));
+  setText('evo-best-fit', fmtNum(s.bestFitness ?? 0));
+  setText('evo-hof', (s.hof && s.hof.length) ? s.hof.length : 0);
+  setText('evo-running', s.running ? 'on' : 'off');
   setText('evo-avg-train', fmtPct(0));
   setText('evo-last', (s.lastSavedAt ? new Date(s.lastSavedAt).toLocaleString() : '-'));
 }
@@ -231,6 +300,9 @@ function updateEvoStatus(payload) {
   setText('evo-gen', payload.generation ?? 0);
   setText('evo-best-eval', fmtPct(payload.bestEvalWinRate ?? payload.bestWinRate ?? 0));
   setText('evo-best-train', fmtPct(payload.bestWinRate ?? 0));
+  setText('evo-best-fit', fmtNum(payload.bestFitness ?? 0));
+  setText('evo-hof', (payload.hof && payload.hof.length) ? payload.hof.length : 0);
+  setText('evo-running', payload.running ? 'on' : 'off');
   setText('evo-avg-train', fmtPct(payload.avgWinRate ?? 0));
   setText('evo-last', (payload.lastSavedAt ? new Date(payload.lastSavedAt).toLocaleString() : '-'));
 }
@@ -549,6 +621,77 @@ function setUpBtns(pikaVolley, applyAndSaveOptions) {
       // @ts-ignore
       evoStopBtn.disabled = true;
     });
+
+    // Extra evo buttons (apply/save/load)
+    const evoApplyBtn = document.getElementById('evo-apply-btn');
+    const evoSaveBtn = document.getElementById('evo-save-btn');
+    const evoLoadBtn = document.getElementById('evo-load-btn');
+
+    if (evoApplyBtn) {
+      evoApplyBtn.addEventListener('click', () => {
+        const s = getEvolutionState();
+        const loaded = loadBest();
+        const gBest = (s && s.bestGenome) ? s.bestGenome : (loaded ? loaded.genome : null);
+        if (!gBest) {
+          alert('No best genome yet. Run evolution or load a saved best first.');
+          return;
+        }
+        const di = Number((s && s.config && s.config.decisionInterval) ? s.config.decisionInterval : 3);
+        const ok = applyExternalBestVsBaseline(pikaVolley, gBest, defaultGenome(), Math.max(1, di | 0));
+        if (!ok) {
+          alert('Apply failed (physics not ready).');
+          return;
+        }
+        // Restart to apply cleanly.
+        try { pikaVolley.restart(); } catch {}
+      });
+    }
+
+    if (evoSaveBtn) {
+      evoSaveBtn.addEventListener('click', () => {
+        const s = getEvolutionState();
+        if (!s || !s.bestGenome) {
+          alert('No best genome to save yet.');
+          return;
+        }
+        const savedAt = Date.now();
+        const ok = saveBest({
+          genome: s.bestGenome,
+          bestWinRate: Number(s.bestWinRate ?? 0),
+          bestEvalWinRate: Number(s.bestEvalWinRate ?? 0),
+          bestFitness: Number(s.bestFitness ?? 0),
+          generation: Number(s.generation ?? 0),
+          savedAt,
+        });
+        if (!ok) alert('Save failed.');
+        setText('evo-last', new Date(savedAt).toLocaleString());
+      });
+    }
+
+    if (evoLoadBtn) {
+      evoLoadBtn.addEventListener('click', () => {
+        const b = loadBest();
+        if (!b || !b.genome) {
+          alert('No saved best found.');
+          return;
+        }
+        const s = getEvolutionState();
+        const di = Number((s && s.config && s.config.decisionInterval) ? s.config.decisionInterval : 3);
+        const ok = applyExternalBestVsBaseline(pikaVolley, b.genome, defaultGenome(), Math.max(1, di | 0));
+        if (!ok) {
+          alert('Load/apply failed (physics not ready).');
+          return;
+        }
+        // Reflect loaded stats in UI for convenience.
+        setText('evo-best-eval', fmtPct(b.bestEvalWinRate ?? b.bestWinRate ?? 0));
+        setText('evo-best-train', fmtPct(b.bestWinRate ?? 0));
+        setText('evo-best-fit', fmtNum(b.bestFitness ?? 0));
+        setText('evo-gen', b.generation ?? 0);
+        setText('evo-last', (b.savedAt ? new Date(b.savedAt).toLocaleString() : '-'));
+        try { pikaVolley.restart(); } catch {}
+      });
+    }
+
   }
 }
 

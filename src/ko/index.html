@@ -211,11 +211,23 @@
               <button type="button" id="evo-stop-btn" class="btn">
                 Stop
               </button>
-              <div class="evo-status">
+                            <button type="button" id="evo-apply-btn" class="btn">
+                Apply best (vs baseline)
+              </button>
+              <button type="button" id="evo-save-btn" class="btn">
+                Save best
+              </button>
+              <button type="button" id="evo-load-btn" class="btn">
+                Load best
+              </button>
+<div class="evo-status">
                 <div>gen: <span id="evo-gen">0</span></div>
                 <div>best(eval): <span id="evo-best-eval">0.0%</span></div>
                 <div>best(train): <span id="evo-best-train">0.0%</span></div>
-                <div>avg(train): <span id="evo-avg-train">0.0%</span></div>
+                                <div>best(fit): <span id="evo-best-fit">0.000</span></div>
+                <div>hof: <span id="evo-hof">0</span></div>
+                <div>running: <span id="evo-running">off</span></div>
+<div>avg(train): <span id="evo-avg-train">0.0%</span></div>
                 <div>saved: <span id="evo-last">-</span></div>
               </div>
             </div>
