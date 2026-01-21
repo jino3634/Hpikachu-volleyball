@@ -13,6 +13,7 @@ import {
 import { loadBest, saveBest } from './evo/storage.js';
 import { chooseAction, defaultGenome } from './evo/policy_weighted.js';
 import { makeObservation } from './evo/observation.js';
+import { decidePhysicsAI } from './physics_ai.js';
 
 
 /** @typedef {import('./pikavolley.js').PikachuVolleyball} PikachuVolleyball */
@@ -243,11 +244,16 @@ function applyExternalBestVsBaseline(pikaVolley, genomeP1, genomeP2, decisionInt
   if (!physics) return false;
 
   const g1 = genomeP1 || defaultGenome();
-  const g2 = genomeP2 || defaultGenome();
+  // Default baseline: self-play (P2 = P1) when genomeP2 is not provided.
+  const g2 = (genomeP2 !== undefined && genomeP2 !== null) ? genomeP2 : g1;
 
   // Ensure both are computer players so physics will accept external control.
   physics.player1.isComputer = true;
   physics.player2.isComputer = true;
+
+  // Ensure external control is enabled for both players.
+  physics.player1.__useExternalAI = true;
+  physics.player2.__useExternalAI = true;
 
   // Let physics schedule decision frames and hold inputs on non-decision frames.
   physics.decisionInterval = Math.max(1, (decisionInterval | 0));
@@ -283,6 +289,100 @@ function applyExternalBestVsBaseline(pikaVolley, genomeP1, genomeP2, decisionInt
 
   return true;
 }
+
+function applyExternalBestVsBuiltin(pikaVolley, genomeP1, decisionInterval = 3) {
+  const physics = pikaVolley && pikaVolley.physics;
+  if (!physics) return false;
+
+  const g1 = genomeP1 || defaultGenome();
+
+  // P1 is controlled by the external best genome.
+  // P2 is controlled by the built-in game AI.
+  physics.player1.isComputer = true;
+  physics.player2.isComputer = true;
+
+  // Tell Physics to use external control only for P1.
+  physics.player1.__useExternalAI = true;
+  physics.player2.__useExternalAI = false;
+
+  // Let physics schedule decision frames and hold inputs on non-decision frames.
+  physics.decisionInterval = Math.max(1, (decisionInterval | 0));
+  physics._aiFrameCounter = 0;
+
+  // External AI hook: only fill inputs for P1. P2 stays on built-in AI path.
+  physics.aiController = (playerIndex, me, ball, other, userInput, meta) => {
+    if (playerIndex !== 1) return;
+    const ui = userInput;
+    if (!ui) return;
+    if (meta && meta.decisionFrame === false) return;
+
+    const obs = makeObservation((meta && meta.physics) ? meta.physics : physics, 1);
+    if (!obs) {
+      ui.xDirection = 0;
+      ui.yDirection = 0;
+      ui.powerHit = 0;
+      return;
+    }
+
+    const act = chooseAction(obs, g1);
+    ui.xDirection = act.xDirection | 0;
+    ui.yDirection = act.yDirection | 0;
+    ui.powerHit = act.powerHit ? 1 : 0;
+  };
+
+  return true;
+}
+
+
+function applyExternalBestVsPhysicsAI(pikaVolley, genomeP1, decisionInterval = 3) {
+  const physics = pikaVolley && pikaVolley.physics;
+  if (!physics) return false;
+
+  const g1 = genomeP1 || defaultGenome();
+
+  // P1: external best genome
+  // P2: physics-based scripted AI (decidePhysicsAI)
+  physics.player1.isComputer = true;
+  physics.player2.isComputer = true;
+
+  // Both use external controller (P2 uses scripted).
+  physics.player1.__useExternalAI = true;
+  physics.player2.__useExternalAI = true;
+
+  // Ensure expectedLandingPointX is computed BEFORE callback on decision frames
+  // (needed by physics-based AI). This is safe for normal gameplay too.
+  physics.fastEvalMode = true;
+
+  physics.decisionInterval = Math.max(1, (decisionInterval | 0));
+  physics._aiFrameCounter = 0;
+
+  physics.aiController = (playerIndex, me, ball, other, userInput, meta) => {
+    if (!userInput) return;
+    if (meta && meta.decisionFrame === false) return;
+
+    if (playerIndex === 1) {
+      const obs = makeObservation((meta && meta.physics) ? meta.physics : physics, 1);
+      if (!obs) {
+        userInput.xDirection = 0;
+        userInput.yDirection = 0;
+        userInput.powerHit = 0;
+        return;
+      }
+      const act = chooseAction(obs, g1);
+      userInput.xDirection = act.xDirection | 0;
+      userInput.yDirection = act.yDirection | 0;
+      userInput.powerHit = act.powerHit ? 1 : 0;
+      return;
+    }
+
+    // Player 2 = physics scripted AI
+    decidePhysicsAI(2, me, ball, other, userInput, meta);
+  };
+
+  return true;
+}
+
+
 
 
 function setUpEvoStatusOnLoad() {
@@ -625,6 +725,19 @@ function setUpBtns(pikaVolley, applyAndSaveOptions) {
       evoStopBtn.disabled = true;
     });
 
+
+    // Opponent mode for "Apply best"
+    // - self: best vs best (P2 = P1)
+    // - baseline: best vs default baseline genome (P2 = defaultGenome())
+    function getEvoOpponentMode() {
+      const el = document.querySelector('input[name="evo-opp-mode"]:checked');
+      const v = el ? String(el.value || '') : '';
+      if (v === 'baseline') return 'baseline';
+      if (v === 'builtin') return 'builtin';
+      if (v === 'physics') return 'physics';
+      return 'self';
+    }
+
     // Extra evo buttons (apply/save/load)
     const evoApplyBtn = document.getElementById('evo-apply-btn');
     const evoSaveBtn = document.getElementById('evo-save-btn');
@@ -640,7 +753,17 @@ function setUpBtns(pikaVolley, applyAndSaveOptions) {
           return;
         }
         const di = Number((s && s.config && s.config.decisionInterval) ? s.config.decisionInterval : 3);
-        const ok = applyExternalBestVsBaseline(pikaVolley, gBest, defaultGenome(), Math.max(1, di | 0));
+        const oppMode = getEvoOpponentMode();
+        const di2 = Math.max(1, di | 0);
+        let ok = false;
+        if (oppMode === 'builtin') {
+          ok = applyExternalBestVsBuiltin(pikaVolley, gBest, di2);
+        } else if (oppMode === 'physics') {
+          ok = applyExternalBestVsPhysicsAI(pikaVolley, gBest, di2);
+        } else {
+          const g2 = (oppMode === 'baseline') ? defaultGenome() : null;
+          ok = applyExternalBestVsBaseline(pikaVolley, gBest, g2, di2);
+        }
         if (!ok) {
           alert('Apply failed (physics not ready).');
           return;
@@ -680,7 +803,15 @@ function setUpBtns(pikaVolley, applyAndSaveOptions) {
         }
         const s = getEvolutionState();
         const di = Number((s && s.config && s.config.decisionInterval) ? s.config.decisionInterval : 3);
-        const ok = applyExternalBestVsBaseline(pikaVolley, b.genome, defaultGenome(), Math.max(1, di | 0));
+        const oppMode = getEvoOpponentMode();
+        const di2 = Math.max(1, di | 0);
+        let ok = false;
+        if (oppMode === 'builtin') {
+          ok = applyExternalBestVsBuiltin(pikaVolley, b.genome, di2);
+        } else {
+          const g2 = (oppMode === 'baseline') ? defaultGenome() : null;
+          ok = applyExternalBestVsBaseline(pikaVolley, b.genome, g2, di2);
+        }
         if (!ok) {
           alert('Load/apply failed (physics not ready).');
           return;

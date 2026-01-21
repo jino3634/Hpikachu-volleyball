@@ -168,11 +168,11 @@ export class PikaPhysics {
         this.ball.__skipExpectedLanding = false;
       }
       // Mark players so built-in AI won't overwrite our inputs.
-      this.player1.__externalControl = this.player1.isComputer === true;
-      this.player2.__externalControl = this.player2.isComputer === true;
+      this.player1.__externalControl = (this.player1.isComputer === true) && (this.player1.__useExternalAI !== false);
+      this.player2.__externalControl = (this.player2.isComputer === true) && (this.player2.__useExternalAI !== false);
 
       // Player 1
-      if (this.player1.isComputer === true) {
+      if (this.player1.isComputer === true && this.player1.__externalControl === true) {
         const ui = userInputArray[0];
         const held = this._heldInputs[0];
         if (doDecide) {
@@ -188,7 +188,7 @@ export class PikaPhysics {
       }
 
       // Player 2
-      if (this.player2.isComputer === true) {
+      if (this.player2.isComputer === true && this.player2.__externalControl === true) {
         const ui = userInputArray[1];
         const held = this._heldInputs[1];
         if (doDecide) {
@@ -260,6 +260,7 @@ class Player {
 
     /** @type {boolean} If true, built-in AI won't overwrite inputs (external AI controls this player). */
     this.__externalControl = false;
+    this.__useExternalAI = true; // allow external controller by default
 
     this.initializeForNewRound();
 
@@ -361,6 +362,10 @@ class Ball {
     this.initializeForNewRound(isPlayer2Serve);
     /** @type {number} x coord of expected landing point */
     this.expectedLandingPointX = 0; // 0x40
+    /** @type {number} expected landing frames (rough time-to-land in frames) */
+    this.expectedLandingFrames = 0;
+    /** @type {Array<{x:number,y:number}>} Optional debug path points for predicted trajectory */
+    this.path = [];
     /** @type {boolean} Internal perf flag: when true, skip expectedLandingPointX recomputation this frame. */
     this.__skipExpectedLanding = false;
     /**
@@ -878,12 +883,20 @@ function processCollisionBetweenBallAndPlayer(
  * @param {Ball} ball
  */
 function calculateExpectedLandingPointXFor(ball) {
+  // Predict landing X (and rough time-to-land) by forward simulating the ball.
+  // This is intentionally lightweight (used per frame / per decision frame).
   const copyBall = {
     x: ball.x,
     y: ball.y,
     xVelocity: ball.xVelocity,
     yVelocity: ball.yVelocity,
   };
+
+  // Optional debug trajectory sampling (kept small to avoid GC pressure).
+  // We reuse the same array if possible.
+  const path = (ball.path && Array.isArray(ball.path)) ? ball.path : [];
+  path.length = 0;
+
   let loopCounter = 0;
   while (true) {
     loopCounter++;
@@ -893,14 +906,14 @@ function calculateExpectedLandingPointXFor(ball) {
       copyBall.xVelocity = -copyBall.xVelocity;
     }
     if (copyBall.y + copyBall.yVelocity < 0) {
-      copyBall.yVelocity = 1;
+      copyBall.yVelocity = -copyBall.yVelocity;
     }
 
-    // If copy ball touches net
-    if (
-      Math.abs(copyBall.x - GROUND_HALF_WIDTH) < NET_PILLAR_HALF_WIDTH &&
-      copyBall.y > NET_PILLAR_TOP_TOP_Y_COORD
-    ) {
+    // bounce on net pillar
+    if (copyBall.x > NET_PILLAR_HALF_WIDTH + GROUND_HALF_WIDTH - BALL_RADIUS &&
+        copyBall.x < NET_PILLAR_HALF_WIDTH + GROUND_HALF_WIDTH + BALL_RADIUS &&
+        copyBall.y > NET_PILLAR_TOP_TOP_Y_COORD &&
+        copyBall.y < NET_PILLAR_TOP_BOTTOM_Y_COORD) {
       // It maybe should be <= NET_PILLAR_TOP_BOTTOM_Y_COORD as in FUN_00402dc0, is it the original game author's mistake?
       if (copyBall.y < NET_PILLAR_TOP_BOTTOM_Y_COORD) {
         if (copyBall.yVelocity > 0) {
@@ -915,18 +928,29 @@ function calculateExpectedLandingPointXFor(ball) {
       }
     }
 
-    copyBall.y = copyBall.y + copyBall.yVelocity;
-    // if copyBall would touch ground
-    if (
-      copyBall.y > BALL_TOUCHING_GROUND_Y_COORD ||
-      loopCounter >= INFINITE_LOOP_LIMIT
-    ) {
+    copyBall.y = copyBall.yVelocity + copyBall.y;
+    copyBall.x = copyBall.xVelocity + copyBall.x;
+    // gravity
+    if (copyBall.yVelocity < 15) {
+      copyBall.yVelocity++;
+    }
+
+    // sample a few points for optional AI/debug (every 3 frames, max 60 points)
+    if ((loopCounter % 3) === 0) {
+      if (path.length < 60) path.push({ x: copyBall.x, y: copyBall.y });
+    }
+
+    if (copyBall.y > BALL_TOUCHING_GROUND_Y_COORD) {
       break;
     }
-    copyBall.x = copyBall.x + copyBall.xVelocity;
-    copyBall.yVelocity += 1;
+    if (loopCounter > 900) { // safety
+      break;
+    }
   }
+
   ball.expectedLandingPointX = copyBall.x;
+  ball.expectedLandingFrames = loopCounter | 0;
+  ball.path = path;
 }
 
 /**

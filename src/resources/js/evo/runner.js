@@ -74,8 +74,8 @@ export async function startEvolution(opts = {}, onUpdate = null) {
   state.running = true;
   emit(onUpdate, { ...state, event: 'started' });
 
-  // Fixed opponent for absolute progress: baseline genome.
-  const baselineOpp = defaultGenome();
+  // Baseline opponent for evaluation/training. Default: self-play vs previous best snapshot.
+  let baselineOpp = cloneGenome(state.bestGenome || defaultGenome());
 
   try {
     while (state.running) {
@@ -83,7 +83,7 @@ export async function startEvolution(opts = {}, onUpdate = null) {
 
       const res = evolveOneGeneration(state.population, {
         seeds: cfg.trainSeeds,
-        opponentGenomes: buildOpponentPool(baselineOpp, state.bestGenome, state.hof, cfg.hofSize),
+        opponentGenomes: buildOpponentPool(baselineOpp, null, state.hof, cfg.hofSize),
         rng: state.rng,
         eliteFraction: cfg.eliteFraction,
         mutationRate: cfg.mutationRate,
@@ -109,7 +109,7 @@ export async function startEvolution(opts = {}, onUpdate = null) {
       if (cfg.evalSeeds && cfg.evalSeeds.length && ((state.generation % Math.max(1, (cfg.evalEveryGenerations ?? 1) | 0)) === 0)) {
         const evalRes = evaluateGenome(res.best.genome, {
           seeds: cfg.evalSeeds,
-          opponentGenomes: buildOpponentPool(baselineOpp, state.bestGenome, state.hof, cfg.hofSize),
+          opponentGenomes: buildOpponentPool(baselineOpp, null, state.hof, cfg.hofSize),
           winningScore: cfg.winningScore,
           maxFrames: cfg.maxFrames,
           decisionInterval: cfg.decisionInterval,
@@ -151,6 +151,9 @@ export async function startEvolution(opts = {}, onUpdate = null) {
         saveHof(state.hof);
         savedNow = true;
       }
+
+      // ✅ Self-play: for next generation, use the latest best as the fixed opponent snapshot.
+      baselineOpp = cloneGenome(state.bestGenome);
 
       const elapsedMs = Date.now() - t0;
       emit(onUpdate, {
@@ -273,3 +276,9 @@ function emit(cb, payload) {
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
+// Self-play baseline opponent: deep-clone to avoid mutation side-effects.
+function cloneGenome(g) {
+  return g ? JSON.parse(JSON.stringify(g)) : g;
+}
+
+
