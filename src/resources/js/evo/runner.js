@@ -4,7 +4,8 @@ import { EVO_DEFAULTS } from './config.js';
 import { defaultGenome } from './policy_weighted.js';
 import { evolveOneGeneration, initPopulation } from './evolver_ga.js';
 import { evaluateGenome } from './evolver_ga.js';
-import { loadBest, saveBest } from './storage.js';
+import { loadBest, saveBest, loadHof, saveHof } from './storage.js';
+import { makeXorShift32 } from './prng.js';
 
 /**
  * Evolution runner state (single instance).
@@ -19,6 +20,8 @@ const state = {
   lastSavedAt: 0,
   population: null,
   config: null,
+  hof: [],
+  rng: null,
 };
 
 /**
@@ -38,6 +41,7 @@ export async function startEvolution(opts = {}, onUpdate = null) {
 
   const cfg = { ...EVO_DEFAULTS, ...(opts || {}) };
   state.config = cfg;
+  state.rng = makeXorShift32(Number(cfg.evoSeed ?? 1337) | 0);
 
   // Load saved best if exists
   const saved = loadBest();
@@ -56,6 +60,9 @@ export async function startEvolution(opts = {}, onUpdate = null) {
     state.generation = 0;
     state.lastSavedAt = 0;
   }
+
+  // Load Hall of Fame (past best opponents)
+  state.hof = loadHof();
 
   // Init population around best
   const base = state.bestGenome || defaultGenome();
@@ -76,13 +83,16 @@ export async function startEvolution(opts = {}, onUpdate = null) {
 
       const res = evolveOneGeneration(state.population, {
         seeds: cfg.trainSeeds,
-        opponentGenome: baselineOpp,
+        opponentGenomes: buildOpponentPool(baselineOpp, state.bestGenome, state.hof, cfg.hofSize),
+        rng: state.rng,
         eliteFraction: cfg.eliteFraction,
         mutationRate: cfg.mutationRate,
         mutationSigma: cfg.mutationSigma,
         winningScore: cfg.winningScore,
         maxFrames: cfg.maxFrames,
         decisionInterval: cfg.decisionInterval,
+        splitSeedsAcrossOpponents: !!cfg.splitSeedsAcrossOpponents,
+        rng: state.rng,
         // JSDoc inference may widen config.initialServeMode to string; cast to the intended union.
         initialServeMode: /** @type {'alternate'|'p1'|'p2'} */ (cfg.initialServeMode || 'alternate'),
       });
@@ -99,10 +109,11 @@ export async function startEvolution(opts = {}, onUpdate = null) {
       if (cfg.evalSeeds && cfg.evalSeeds.length && ((state.generation % Math.max(1, (cfg.evalEveryGenerations ?? 1) | 0)) === 0)) {
         const evalRes = evaluateGenome(res.best.genome, {
           seeds: cfg.evalSeeds,
-          opponentGenome: baselineOpp,
+          opponentGenomes: buildOpponentPool(baselineOpp, state.bestGenome, state.hof, cfg.hofSize),
           winningScore: cfg.winningScore,
           maxFrames: cfg.maxFrames,
           decisionInterval: cfg.decisionInterval,
+          splitSeedsAcrossOpponents: !!cfg.splitSeedsAcrossOpponents,
           // Cast for the same reason as above.
           initialServeMode: /** @type {'alternate'|'p1'|'p2'} */ (cfg.initialServeMode || 'alternate'),
         });
@@ -127,6 +138,17 @@ export async function startEvolution(opts = {}, onUpdate = null) {
           generation: state.generation,
           savedAt: state.lastSavedAt,
         });
+
+        // Update Hall of Fame with this new best (for stronger, less exploitable evolution).
+        state.hof = updateHof(state.hof, {
+          genome: state.bestGenome,
+          bestWinRate: state.bestWinRate,
+          bestEvalWinRate: state.bestEvalWinRate,
+          bestFitness: state.bestFitness,
+          generation: state.generation,
+          savedAt: state.lastSavedAt,
+        }, Math.max(1, (cfg.hofSize ?? 8) | 0));
+        saveHof(state.hof);
         savedNow = true;
       }
 
@@ -155,6 +177,71 @@ export async function startEvolution(opts = {}, onUpdate = null) {
   } finally {
     state.running = false;
     emit(onUpdate, { ...state, event: 'stopped' });
+  }
+}
+
+/**
+ * Build opponent pool for evaluation.
+ * Order matters a bit: baseline first, then current best, then HOF.
+ * @param {any} baseline
+ * @param {any} best
+ * @param {Array<{genome:any}>} hof
+ * @param {number} maxHof
+ * @returns {any[]}
+ */
+function buildOpponentPool(baseline, best, hof, maxHof) {
+  /** @type {any[]} */
+  const out = [];
+  if (baseline) out.push(baseline);
+  if (best) out.push(best);
+
+  const lim = Math.max(0, (maxHof ?? 0) | 0);
+  if (lim > 0 && Array.isArray(hof) && hof.length) {
+    for (let i = 0; i < hof.length && out.length < (2 + lim); i++) {
+      const g = hof[i]?.genome;
+      if (g) out.push(g);
+    }
+  }
+  return out;
+}
+
+/**
+ * Insert a new best into the Hall of Fame, keeping list small and de-duplicated.
+ * @param {Array<any>} list
+ * @param {any} entry
+ * @param {number} maxSize
+ */
+function updateHof(list, entry, maxSize) {
+  const maxN = Math.max(1, maxSize | 0);
+  const arr = Array.isArray(list) ? [...list] : [];
+  const key = safeKey(entry?.genome);
+
+  // de-dup by genome JSON
+  for (let i = arr.length - 1; i >= 0; i--) {
+    if (safeKey(arr[i]?.genome) === key) {
+      arr.splice(i, 1);
+    }
+  }
+  arr.unshift(entry);
+
+  // sort by eval-winrate (desc), then by fitness
+  arr.sort((a, b) => {
+    const aw = Number(a?.bestEvalWinRate ?? a?.bestWinRate ?? 0);
+    const bw = Number(b?.bestEvalWinRate ?? b?.bestWinRate ?? 0);
+    if (bw !== aw) return bw - aw;
+    return Number(b?.bestFitness ?? 0) - Number(a?.bestFitness ?? 0);
+  });
+
+  // trim
+  if (arr.length > maxN) arr.length = maxN;
+  return arr;
+}
+
+function safeKey(genome) {
+  try {
+    return JSON.stringify(genome);
+  } catch {
+    return String(genome);
   }
 }
 

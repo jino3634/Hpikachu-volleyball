@@ -15,36 +15,65 @@ import { defaultGenome } from './policy_weighted.js';
  * @param {{
  *   seeds?:(number[]|readonly number[]),
  *   opponentGenome?:any,
+ *   opponentGenomes?:any[],
  *   winningScore?:number,
  *   maxFrames?:number,
  *   decisionInterval?:number,
- *   initialServeMode?:('alternate'|'p1'|'p2')
+ *   initialServeMode?:('alternate'|'p1'|'p2'),
+ *   splitSeedsAcrossOpponents?:boolean
  * }} [opts]
  */
 export function evaluateGenome(genome, opts = {}) {
   const seeds = opts.seeds || TRAIN_SEEDS;
-  const opp = opts.opponentGenome || genome;
+  const splitSeedsAcrossOpponents = (opts.splitSeedsAcrossOpponents !== undefined)
+    ? !!opts.splitSeedsAcrossOpponents
+    : true;
+  /** @type {any[]} */
+  const opps = Array.isArray(opts.opponentGenomes) ? opts.opponentGenomes.filter(Boolean) : [];
+  if (!opps.length) opps.push(opts.opponentGenome || genome);
   const winningScore = Math.max(1, (opts.winningScore ?? 11) | 0);
   const maxFrames = Math.max(60, (opts.maxFrames ?? (60 * 30)) | 0);
   const decisionInterval = Math.max(1, (opts.decisionInterval ?? 3) | 0);
   const initialServeMode = /** @type {'alternate'|'p1'|'p2'} */ (opts.initialServeMode || 'alternate');
   const agg = { wins: 0, losses: 0, draws: 0, scoreDiff: 0 };
 
-  for (const seed of seeds) {
-    const r = runMatch({
-      seed,
-      genomeP1: genome,
-      genomeP2: opp,
-      winningScore,
-      maxFrames,
-      decisionInterval,
-      initialServeMode,
-    });
-    const diff = (r.scoreP1 - r.scoreP2) | 0;
-    agg.scoreDiff += diff;
-    if (diff > 0) agg.wins++;
-    else if (diff < 0) agg.losses++;
-    else agg.draws++;
+  // To keep evaluation cost bounded when using multiple opponents,
+  // optionally split the seed list across opponents.
+  const seedArr = Array.isArray(seeds) ? seeds : Array.from(seeds);
+  const m = Math.max(1, opps.length);
+  for (let oi = 0; oi < m; oi++) {
+    const opp = opps[oi];
+    let start = 0;
+    let end = seedArr.length;
+    if (splitSeedsAcrossOpponents && m > 1) {
+      const chunk = Math.floor(seedArr.length / m);
+      const rem = seedArr.length - chunk * m;
+      // distribute remainder to earlier chunks
+      start = oi * chunk + Math.min(oi, rem);
+      end = start + chunk + (oi < rem ? 1 : 0);
+      if (end <= start) {
+        // if we have fewer seeds than opponents, fall back to a single seed
+        start = Math.min(seedArr.length - 1, 0);
+        end = start + 1;
+      }
+    }
+    for (let si = start; si < end; si++) {
+      const seed = seedArr[si];
+      const r = runMatch({
+        seed,
+        genomeP1: genome,
+        genomeP2: opp,
+        winningScore,
+        maxFrames,
+        decisionInterval,
+        initialServeMode,
+      });
+      const diff = (r.scoreP1 - r.scoreP2) | 0;
+      agg.scoreDiff += diff;
+      if (diff > 0) agg.wins++;
+      else if (diff < 0) agg.losses++;
+      else agg.draws++;
+    }
   }
 
   return {
@@ -82,21 +111,30 @@ export function initPopulation(size, opts = {}) {
  * @param {{
  *   seeds?:(number[]|readonly number[]),
  *   opponentGenome?:any,
+ *   opponentGenomes?:any[],
  *   eliteFraction?:number,
  *   mutationRate?:number,
  *   mutationSigma?:number,
+ *   rng?:() => number,
  *   winningScore?:number,
  *   maxFrames?:number,
  *   decisionInterval?:number,
- *   initialServeMode?:('alternate'|'p1'|'p2')
+ *   initialServeMode?:('alternate'|'p1'|'p2'),
+ *   splitSeedsAcrossOpponents?:boolean
  * }} opts
  */
 export function evolveOneGeneration(population, opts = {}) {
   const seeds = opts.seeds || TRAIN_SEEDS;
   const opponentGenome = opts.opponentGenome;
+  const opponentGenomes = Array.isArray(opts.opponentGenomes) ? opts.opponentGenomes : null;
   const eliteFraction = clamp01(Number(opts.eliteFraction ?? 0.15));
   const mutationRate = clamp01(Number(opts.mutationRate ?? 0.9));
   const mutationSigma = Math.max(0, Number(opts.mutationSigma ?? 0.18));
+  const rng = (typeof opts.rng === 'function') ? opts.rng : Math.random;
+
+  const splitSeedsAcrossOpponents = (opts.splitSeedsAcrossOpponents !== undefined)
+    ? !!opts.splitSeedsAcrossOpponents
+    : true;
 
   const initialServeMode = /** @type {'alternate'|'p1'|'p2'} */ (opts.initialServeMode || 'alternate');
 
@@ -105,10 +143,12 @@ export function evolveOneGeneration(population, opts = {}) {
     ind.eval = evaluateGenome(ind.genome, {
       seeds,
       opponentGenome,
+      opponentGenomes,
       winningScore: opts.winningScore,
       maxFrames: opts.maxFrames,
       decisionInterval: opts.decisionInterval,
       initialServeMode,
+      splitSeedsAcrossOpponents,
     });
   }
 
@@ -134,8 +174,8 @@ export function evolveOneGeneration(population, opts = {}) {
     nextPop.push({ genome: cloneGenome(ranked[i].genome), eval: null });
   }
   while (nextPop.length < ranked.length) {
-    const parent = ranked[(Math.random() * eliteCount) | 0].genome;
-    const child = mutateGenome(parent, { sigma: mutationSigma, rate: mutationRate });
+    const parent = ranked[(rng() * eliteCount) | 0].genome;
+    const child = mutateGenome(parent, { sigma: mutationSigma, rate: mutationRate, rng });
     nextPop.push({ genome: child, eval: null });
   }
 
@@ -156,17 +196,18 @@ function cloneGenome(g) {
 /**
  * Mutate numeric fields in a genome.
  * @param {any} genome
- * @param {{sigma:number, rate:number}} opts
+ * @param {{sigma:number, rate:number, rng?:() => number}} opts
  */
 export function mutateGenome(genome, opts) {
   const sigma = Math.max(0, Number(opts?.sigma ?? 0.18));
   const rate = clamp01(Number(opts?.rate ?? 0.9));
+  const rng = (typeof opts?.rng === 'function') ? opts.rng : Math.random;
   const out = cloneGenome(genome);
   for (const k of Object.keys(out)) {
     const v = out[k];
     if (typeof v !== 'number' || !Number.isFinite(v)) continue;
-    if (Math.random() > rate) continue;
-    const n = v + randn() * sigma;
+    if (rng() > rate) continue;
+    const n = v + randn(rng) * sigma;
     out[k] = sanitizeParam(k, n);
   }
   return out;
@@ -178,12 +219,12 @@ function clamp01(x) {
   return x;
 }
 
-function randn() {
+function randn(rng) {
   // Box-Muller
   let u = 0;
   let v = 0;
-  while (u === 0) u = Math.random();
-  while (v === 0) v = Math.random();
+  while (u === 0) u = rng();
+  while (v === 0) v = rng();
   return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
 }
 

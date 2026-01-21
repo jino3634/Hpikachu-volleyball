@@ -26,6 +26,7 @@ export function loadJson(key, fallback = null) {
 // ---------------------------------------------
 
 const BEST_KEY = 'best';
+const HOF_KEY = 'hof';
 
 /**
  * @param {{
@@ -46,4 +47,25 @@ export function saveBest(payload) {
  */
 export function loadBest() {
   return loadJson(BEST_KEY, null);
+}
+
+// -------------------------------------------------------------
+// Hall of Fame (opponent pool)
+// -------------------------------------------------------------
+
+/**
+ * Load Hall of Fame list.
+ * @returns {Array<{genome:any, bestWinRate:number, bestEvalWinRate?:number, bestFitness:number, generation:number, savedAt:number}>}
+ */
+export function loadHof() {
+  const v = loadJson(HOF_KEY, []);
+  return Array.isArray(v) ? v : [];
+}
+
+/**
+ * Save Hall of Fame list.
+ * @param {Array<{genome:any, bestWinRate:number, bestEvalWinRate?:number, bestFitness:number, generation:number, savedAt:number}>} list
+ */
+export function saveHof(list) {
+  return saveJson(HOF_KEY, Array.isArray(list) ? list : []);
 }

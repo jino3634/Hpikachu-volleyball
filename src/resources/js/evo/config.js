@@ -19,6 +19,12 @@ export const EVO_DEFAULTS = {
   mutationRate: 0.9,
   mutationSigma: 0.18,
 
+  // Opponent pool (Hall of Fame)
+  // Keep a small list of past best genomes and evaluate against them.
+  hofSize: 8,
+  // When true, evaluation seeds are split across opponents so total match count stays similar.
+  splitSeedsAcrossOpponents: true,
+
   // Match settings
   winningScore: 11,
   maxFrames: 60 * 30,
@@ -27,4 +33,7 @@ export const EVO_DEFAULTS = {
 
   // Runner
   yieldEveryGenerationMs: 0,
+
+  // Deterministic evolution randomness (selection/mutation) for reproducibility.
+  evoSeed: 1337,
 };
