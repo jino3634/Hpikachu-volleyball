@@ -245,42 +245,45 @@ function applyExternalBestVsBaseline(pikaVolley, genomeP1, genomeP2, decisionInt
   const g1 = genomeP1 || defaultGenome();
   const g2 = genomeP2 || defaultGenome();
 
-  // Hold last decision so inputs persist on non-decision frames.
-  let heldP1 = { xDirection: 0, yDirection: 0, powerHit: 0 };
-  let heldP2 = { xDirection: 0, yDirection: 0, powerHit: 0 };
-
   // Ensure both are computer players so physics will accept external control.
   physics.player1.isComputer = true;
   physics.player2.isComputer = true;
 
-  // External controller hook: called before physicsEngine() each frame.
-  physics.aiController = (frameCounter, p1, p2, ball, userInputArray) => {
-    const frame = (frameCounter | 0);
-    const isDecision = (decisionInterval <= 1) ? true : ((frame % decisionInterval) === 0);
+  // Let physics schedule decision frames and hold inputs on non-decision frames.
+  physics.decisionInterval = Math.max(1, (decisionInterval | 0));
+  physics._aiFrameCounter = 0;
 
-    if (isDecision) {
-      const obs1 = makeObservation(physics, 1);
-      const obs2 = makeObservation(physics, 2);
-      if (obs1) heldP1 = chooseAction(obs1, g1);
-      if (obs2) heldP2 = chooseAction(obs2, g2);
+  // ✅ Must match Physics.aiController signature:
+  // (playerIndex, me, ball, other, userInputForPlayer, meta)
+  physics.aiController = (playerIndex, me, ball, other, userInput, meta) => {
+    const ui = userInput;
+    if (!ui) return;
+
+    // We only want to decide on decision frames (physics will call us only then,
+    // but keep this guard to be safe across versions).
+    if (meta && meta.decisionFrame === false) return;
+
+    const genome = (playerIndex === 1) ? g1 : g2;
+
+    // Build observation from current physics state.
+    const obs = makeObservation((meta && meta.physics) ? meta.physics : physics, playerIndex);
+    if (!obs) {
+      ui.xDirection = 0;
+      ui.yDirection = 0;
+      ui.powerHit = 0;
+      return;
     }
 
-    const u1 = userInputArray && userInputArray[0];
-    const u2 = userInputArray && userInputArray[1];
-    if (u1) {
-      u1.xDirection = heldP1.xDirection | 0;
-      u1.yDirection = heldP1.yDirection | 0;
-      u1.powerHit = heldP1.powerHit ? 1 : 0;
-    }
-    if (u2) {
-      u2.xDirection = heldP2.xDirection | 0;
-      u2.yDirection = heldP2.yDirection | 0;
-      u2.powerHit = heldP2.powerHit ? 1 : 0;
-    }
+    const act = chooseAction(obs, genome);
+
+    ui.xDirection = act.xDirection | 0;
+    ui.yDirection = act.yDirection | 0;
+    ui.powerHit = act.powerHit ? 1 : 0;
   };
 
   return true;
 }
+
 
 function setUpEvoStatusOnLoad() {
   const s = getEvolutionState();
