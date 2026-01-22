@@ -142,12 +142,8 @@ export async function saveHof(list) {
  * @returns {Promise<any[]>}
  */
 export async function listHof(limit = 200) {
-  await ensureInit();
-  const st = __storage;
-  if (st && typeof st.listHof === 'function') {
-    return st.listHof(limit);
-  }
-  const v = await loadHof();
+  // HOF는 "best-first" 성격이라 row-store(createdAt) 정렬을 소스로 쓰면 안 됨.
+  const v = await loadHof(); // HOF_KEY JSON 배열(이미 runner가 정렬해 저장함)
   const lim = Math.max(0, Number(limit ?? 200) | 0);
   return (lim > 0) ? v.slice(0, lim) : [];
 }
@@ -158,19 +154,16 @@ export async function listHof(limit = 200) {
  * @returns {Promise<number>}
  */
 export async function pruneHof(maxKeep) {
-  await ensureInit();
-  const st = __storage;
-  if (st && typeof st.pruneHof === 'function') {
-    return st.pruneHof(maxKeep);
-  }
-  // fallback: prune array storage
+  // HOF는 newest가 아니라 best를 유지해야 함.
   const v = await loadHof();
   const keep = Math.max(0, Number(maxKeep ?? 0) | 0);
+
   if (keep <= 0) {
-    await saveHof([]);
+    await saveHof([]);       // saveHof가 row 미러링까지 같이 처리
     return v.length;
   }
   if (v.length <= keep) return 0;
+
   await saveHof(v.slice(0, keep));
   return v.length - keep;
 }
