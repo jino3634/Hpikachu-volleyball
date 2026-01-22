@@ -1,6 +1,7 @@
 'use strict';
 
-import { expectedLandingPointXWhenPowerHit } from '../physics.js';
+import { expectedLandingPointXWhenPowerHit, GROUND_WIDTH } from '../physics.js';
+import { evoLogger } from './logger.js';
 
 /**
  * Build a stable observation object from current physics state.
@@ -45,7 +46,69 @@ export function makeObservation(physics, playerIndex) {
     }
   }
 
-  return {
+  
+  // ---- Stage A3: observation validity checks (true bounds + spam limit; log only on anomalies) ----
+  try {
+    // Avoid any work if obs/WARN would be filtered out.
+    if (!evoLogger.wouldLog('obs', 'WARN')) {
+      // no-op
+    } else {
+      const bw = (typeof GROUND_WIDTH === 'number' && Number.isFinite(GROUND_WIDTH)) ? GROUND_WIDTH : 432;
+      // True coordinate range is [0..GROUND_WIDTH]. Allow a modest margin for transient/internals.
+      const margin = Math.max(40, Math.round(bw * 0.2));
+      const xMin = -margin;
+      const xMax = bw + margin;
+      const bad = (v) => !Number.isFinite(Number(v));
+      const badX = (v) => bad(v) || Number(v) < xMin || Number(v) > xMax;
+
+      /** @type {string[]} */
+      const reasons = [];
+      if (bad(me.x) || bad(me.y) || bad(opp.x) || bad(opp.y)) reasons.push('player_nan');
+      if (bad(b.x) || bad(b.y) || bad(b.xVelocity) || bad(b.yVelocity)) reasons.push('ball_nan');
+      if (badX(b.expectedLandingPointX)) reasons.push('expectedLandingX_oob');
+
+      if (powerLandingX) {
+        for (let i = 0; i < powerLandingX.length; i++) {
+          const v = powerLandingX[i];
+          if (badX(v)) { reasons.push('powerLandingX_oob'); break; }
+        }
+      }
+
+      if (reasons.length) {
+        // Per-match spam limit (best-effort). evaluator_headless sets these fields.
+        const physAny = /** @type {any} */ (physics);
+        const mId = String(physAny.__evoMatchId || '');
+        const s = (physAny.__evoSeed | 0) || 0;
+        if (physAny.__evoObsWarnMatchId !== mId) {
+          physAny.__evoObsWarnMatchId = mId;
+          physAny.__evoObsWarnCount = 0;
+        }
+        const k = (physAny.__evoObsWarnCount = ((physAny.__evoObsWarnCount | 0) + 1) | 0);
+        if (k <= 5) {
+          evoLogger.log('obs', 'WARN', {
+            matchId: mId || undefined,
+            seed: s || undefined,
+            reason: reasons.join('|'),
+            p: playerIndex,
+            meX: me.x, meY: me.y,
+            oppX: opp.x, oppY: opp.y,
+            bx: b.x, by: b.y,
+            bVX: b.xVelocity, bVY: b.yVelocity,
+            expectedLandingX: b.expectedLandingPointX,
+            canPower,
+          });
+        } else if (k === 6) {
+          evoLogger.log('obs', 'WARN', {
+            matchId: mId || undefined,
+            seed: s || undefined,
+            note: 'obs_anomaly_suppressed',
+            suppressedAfter: 5,
+          });
+        }
+      }
+    }
+  } catch {}
+return {
     me: {
       x: me.x,
       y: me.y,

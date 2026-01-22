@@ -44,10 +44,17 @@ export function evaluateGenome(genome, opts = {}) {
   /** @type {number[]|null} */
   const outcomes = collectOutcomes ? [] : null;
   const agg = { wins: 0, losses: 0, draws: 0, scoreDiff: 0 };
+  /** @type {{wins:number, losses:number, draws:number, scoreDiff:number, matches:number, oppIndex:number}[]} */
+  const perOpp = [];
+  /** @type {{start:number,end:number,seedCount:number}[]} */
+  const seedRanges = [];
 
   // To keep evaluation cost bounded when using multiple opponents,
   // optionally split the seed list across opponents.
-  const seedArr = Array.isArray(seeds) ? seeds : Array.from(seeds);
+    const seedArr0 = Array.isArray(seeds) ? seeds : Array.from(seeds);
+  // Defensive: empty seed list breaks split logic (would produce -1 index). Use a single deterministic seed.
+  const seedArr = (Array.isArray(seedArr0) && seedArr0.length) ? seedArr0 : [0];
+  const seedCountOriginal = Array.isArray(seedArr0) ? (seedArr0.length | 0) : 0;
   const m = Math.max(1, opps.length);
   for (let oi = 0; oi < m; oi++) {
     const opp = opps[oi];
@@ -65,6 +72,10 @@ export function evaluateGenome(genome, opts = {}) {
         end = start + 1;
       }
     }
+    const oppAgg = { wins: 0, losses: 0, draws: 0, scoreDiff: 0, matches: 0, oppIndex: oi };
+    perOpp.push(oppAgg);
+    seedRanges.push({ start, end, seedCount: Math.max(0, end - start) });
+
     for (let si = start; si < end; si++) {
       const seed = seedArr[si];
       const r = runMatch({
@@ -83,11 +94,13 @@ export function evaluateGenome(genome, opts = {}) {
       }
       const diff = (r.scoreP1 - r.scoreP2) | 0;
       agg.scoreDiff += diff;
+      oppAgg.scoreDiff += diff;
+      oppAgg.matches += 1;
       const outc = diff > 0 ? 1 : (diff < 0 ? -1 : 0);
       if (outcomes) outcomes.push(outc);
-      if (diff > 0) agg.wins++;
-      else if (diff < 0) agg.losses++;
-      else agg.draws++;
+      if (diff > 0) { agg.wins++; oppAgg.wins++; }
+      else if (diff < 0) { agg.losses++; oppAgg.losses++; }
+      else { agg.draws++; oppAgg.draws++; }
     }
   }
 
@@ -96,6 +109,23 @@ export function evaluateGenome(genome, opts = {}) {
     fitness: computeFitness(agg),
     winRate: agg.wins / Math.max(1, agg.wins + agg.losses + agg.draws),
     outcomes: outcomes || undefined,
+    perOpp: perOpp.map((o) => ({
+      oppIndex: o.oppIndex,
+      matches: o.matches,
+      wins: o.wins,
+      losses: o.losses,
+      draws: o.draws,
+      scoreDiff: o.scoreDiff,
+      winRate: o.wins / Math.max(1, o.wins + o.losses + o.draws),
+    })),
+    meta: {
+      seedCount: seedArr.length,
+      seedCountOriginal,
+      oppCount: m,
+      splitSeedsAcrossOpponents: !!splitSeedsAcrossOpponents,
+      seedRanges,
+      totalMatches: perOpp.reduce((s, o) => s + (o.matches | 0), 0),
+    },
   };
 }
 
@@ -182,6 +212,22 @@ export function evolveOneGeneration(population, opts = {}) {
   }
   const avgWinRate = sumWin / Math.max(1, ranked.length);
   const avgFitness = sumFit / Math.max(1, ranked.length);
+  // Standard deviations for diagnostics (population diversity / collapse).
+  let varWin = 0;
+  let varFit = 0;
+  for (const ind of ranked) {
+    const w = Number(ind.eval?.winRate ?? 0);
+    const f = Number(ind.eval?.fitness ?? 0);
+    const dw = w - avgWinRate;
+    const df = f - avgFitness;
+    varWin += dw * dw;
+    varFit += df * df;
+  }
+  const stdWinRate0 = Math.sqrt(varWin / Math.max(1, ranked.length));
+  const stdFitness0 = Math.sqrt(varFit / Math.max(1, ranked.length));
+  const stdWinRate = Number.isFinite(stdWinRate0) ? stdWinRate0 : 0;
+  const stdFitness = Number.isFinite(stdFitness0) ? stdFitness0 : 0;
+
 
   // 4) next population
   const eliteCount = Math.max(1, Math.floor(ranked.length * eliteFraction));
@@ -202,6 +248,8 @@ export function evolveOneGeneration(population, opts = {}) {
     best: { genome: best.genome, eval: best.eval },
     avgWinRate,
     avgFitness,
+    stdWinRate,
+    stdFitness,
     eliteCount,
   };
 }

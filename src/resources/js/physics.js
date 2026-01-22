@@ -29,8 +29,42 @@
 'use strict';
 import { rand } from './rand.js';
 
+
+// ---- Evo logger bridge (used only for anomaly logs; safe no-op when absent) ----
+// Notes:
+// - Attach best-effort match context (matchId/seed) if evaluator sets window.__evoLogCtx.
+// - Apply a small per-session cap to avoid log spam from rare physics edge cases.
+const __evoAnomCounts = Object.create(null);
+function _evoLog(cat, lvl, obj) {
+  try {
+    // @ts-ignore
+    const lg = (typeof window !== 'undefined') ? window.__evoLogger : null;
+    if (!lg || typeof lg.log !== 'function') return;
+
+    const c = String(cat || 'misc');
+    const lv = String(lvl || 'INFO').toUpperCase();
+
+    // Best-effort cap (per session, per category/level)
+    const key = `${c}|${lv}`;
+    const k = (__evoAnomCounts[key] = ((__evoAnomCounts[key] || 0) + 1) | 0);
+    if (k > 50) return;
+
+    /** @type {any} */
+    const rec = (obj && typeof obj === 'object') ? { ...obj } : { msg: obj };
+
+    // @ts-ignore
+    const ctx = (typeof window !== 'undefined') ? window.__evoLogCtx : null;
+    if (ctx && typeof ctx === 'object') {
+      if (rec.matchId == null && ctx.matchId != null) rec.matchId = ctx.matchId;
+      if (rec.seed == null && ctx.seed != null) rec.seed = ctx.seed;
+    }
+
+    lg.log(c, /** @type {any} */ (lv), rec);
+  } catch {}
+}
+
 /** @constant @type {number} ground width */
-const GROUND_WIDTH = 432;
+export const GROUND_WIDTH = 432;
 /** @constant @type {number} ground half-width, it is also the net pillar x coordinate */
 export const GROUND_HALF_WIDTH = (GROUND_WIDTH / 2) | 0; // integer division
 /** @constant @type {number} player (Pikachu) length: width = height = 64 */
@@ -1190,7 +1224,24 @@ function expectedLandingPointXWhenPowerHit(
       copyBall.y > BALL_TOUCHING_GROUND_Y_COORD ||
       loopCounter >= INFINITE_LOOP_LIMIT
     ) {
-      return copyBall.x;
+      const resX = copyBall.x;
+      // Anomaly log only (true bounds + modest margin)
+      const margin = Math.max(40, Math.round(GROUND_WIDTH * 0.2));
+      if (!Number.isFinite(resX) || resX < -margin || resX > (GROUND_WIDTH + margin)) {
+        _evoLog('obs', 'WARN', {
+          where: 'expectedLandingPointXWhenPowerHit',
+          resX,
+          margin,
+          userInputXDirection,
+          userInputYDirection,
+          bx: ball.x,
+          by: ball.y,
+          bVX: ball.xVelocity,
+          bVY: ball.yVelocity,
+          loopCounter,
+        });
+      }
+      return resX;
     }
     copyBall.x = copyBall.x + copyBall.xVelocity;
     copyBall.yVelocity += 1;

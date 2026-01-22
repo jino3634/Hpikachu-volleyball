@@ -1,7 +1,7 @@
 /**
  * Always-on Evolution panel (static UI in Step 2; Step 3 wires Start/Stop/Apply best).
  */
-'use strict';
+import { evoLogger } from './logger.js';
 
 /**
  * @typedef {{
@@ -319,10 +319,255 @@ export class EvoPanel {
     histList.textContent = '(History list will appear here)';
 
     histBox.append(histTitle, histRow, histList);
+    // ---- Logs (Stage 4: level/category/sample/buffer controls) ----
+    const LOG_ENABLED_KEY = 'EVO_LOG_ENABLED';
+    const LOG_LEVEL_KEY = 'EVO_LOG_LEVEL';
+    const LOG_MAXLINES_KEY = 'EVO_LOG_MAXLINES';
+    const LOG_MAXBYTES_KEY = 'EVO_LOG_MAXBYTES';
+    const LOG_SAMPLE_INPUT_KEY = 'EVO_LOG_SAMPLE_INPUT';
+    const LOG_SAMPLE_OBS_KEY = 'EVO_LOG_SAMPLE_OBS';
+    const LOG_CATS_KEY = 'EVO_LOG_CATS';
+
+    const logBox = el('div');
+    const logTitle = el('div', null, 'Logs');
+    logTitle.style.fontWeight = '700';
+    logTitle.style.marginBottom = '6px';
+
+    const logRow1 = el('div');
+    logRow1.style.display = 'flex';
+    logRow1.style.alignItems = 'center';
+    logRow1.style.gap = '8px';
+    logRow1.style.flexWrap = 'wrap';
+
+    const logEnableWrap = el('label');
+    logEnableWrap.style.display = 'inline-flex';
+    logEnableWrap.style.alignItems = 'center';
+    logEnableWrap.style.gap = '6px';
+    logEnableWrap.style.cursor = 'pointer';
+
+    const logEnable = /** @type {HTMLInputElement} */ (document.createElement('input'));
+    logEnable.type = 'checkbox';
+    logEnable.checked = (_lsGet(LOG_ENABLED_KEY) === '1');
+
+    const logEnableText = el('span', null, 'Enable');
+    logEnableText.style.fontSize = '12px';
+    logEnableText.style.opacity = '0.95';
+    logEnableWrap.append(logEnable, logEnableText);
+
+    const levelSel = /** @type {HTMLSelectElement} */ (document.createElement('select'));
+    ['ERROR','WARN','INFO','DEBUG'].forEach((s) => {
+      const o = document.createElement('option');
+      o.value = s; o.textContent = s;
+      levelSel.appendChild(o);
+    });
+    levelSel.style.padding = '4px 6px';
+    levelSel.style.borderRadius = '8px';
+    levelSel.style.border = '1px solid rgba(255,255,255,0.22)';
+    levelSel.style.background = 'rgba(0,0,0,0.25)';
+    levelSel.style.color = '#fff';
+    levelSel.style.fontSize = '12px';
+
+    const levelLab = el('span', null, 'Level');
+    levelLab.style.opacity = '0.8';
+    levelLab.style.fontSize = '12px';
+
+    const maxLinesLab = el('span', null, 'MaxLines');
+    maxLinesLab.style.opacity = '0.8';
+    maxLinesLab.style.fontSize = '12px';
+    const maxLinesInput = mkNumInput(5000);
+    maxLinesInput.style.width = '90px';
+
+    const maxKbLab = el('span', null, 'MaxKB');
+    maxKbLab.style.opacity = '0.8';
+    maxKbLab.style.fontSize = '12px';
+    const maxKbInput = mkNumInput(2048);
+    maxKbInput.style.width = '84px';
+
+    const logRefresh = mkBtn('Refresh');
+    const logDownload = mkBtn('Download');
+    const logClear = mkBtn('Clear');
+
+    logRow1.append(logEnableWrap, levelLab, levelSel, maxLinesLab, maxLinesInput, maxKbLab, maxKbInput, logRefresh, logDownload, logClear);
+
+    // Categories row
+    const logRow2 = el('div');
+    logRow2.style.display = 'flex';
+    logRow2.style.alignItems = 'center';
+    logRow2.style.gap = '10px';
+    logRow2.style.flexWrap = 'wrap';
+    logRow2.style.marginTop = '6px';
+
+    const catLab = el('span', null, 'Cats');
+    catLab.style.opacity = '0.8';
+    catLab.style.fontSize = '12px';
+
+    const mkCat = (key, label) => {
+      const wrap = el('label');
+      wrap.style.display = 'inline-flex';
+      wrap.style.alignItems = 'center';
+      wrap.style.gap = '6px';
+      wrap.style.cursor = 'pointer';
+      wrap.style.userSelect = 'none';
+      const cb = /** @type {HTMLInputElement} */ (document.createElement('input'));
+      cb.type = 'checkbox';
+      cb.dataset.cat = key;
+      const t = el('span', null, label);
+      t.style.fontSize = '12px';
+      t.style.opacity = '0.95';
+      wrap.append(cb, t);
+      return { wrap, cb };
+    };
+
+    const cats = [
+      mkCat('meta', 'meta'),
+      mkCat('match', 'match'),
+      mkCat('match_anomaly', 'anomaly'),
+      mkCat('physics_route', 'physics'),
+      mkCat('input', 'input'),
+      mkCat('obs', 'obs'),
+      mkCat('generation', 'gen'),
+      mkCat('storage', 'storage'),
+    ];
+
+    logRow2.append(catLab, ...cats.map((x) => x.wrap));
+
+    // Sampling row
+    const logRow3 = el('div');
+    logRow3.style.display = 'flex';
+    logRow3.style.alignItems = 'center';
+    logRow3.style.gap = '10px';
+    logRow3.style.flexWrap = 'wrap';
+    logRow3.style.marginTop = '6px';
+
+    const sampLab = el('span', null, 'Sample');
+    sampLab.style.opacity = '0.8';
+    sampLab.style.fontSize = '12px';
+
+    const sampInputLab = el('span', null, 'input/DEBUG every');
+    sampInputLab.style.opacity = '0.8';
+    sampInputLab.style.fontSize = '12px';
+    const sampInput = mkNumInput(20);
+    sampInput.style.width = '72px';
+
+    const sampObsLab = el('span', null, 'obs/DEBUG every');
+    sampObsLab.style.opacity = '0.8';
+    sampObsLab.style.fontSize = '12px';
+    const sampObs = mkNumInput(20);
+    sampObs.style.width = '72px';
+
+    logRow3.append(sampLab, sampInputLab, sampInput, sampObsLab, sampObs);
+
+    const logTail = /** @type {HTMLTextAreaElement} */ (document.createElement('textarea'));
+    logTail.readOnly = true;
+    logTail.rows = 8;
+    logTail.placeholder = 'Logs will appear here (JSONL)...';
+    logTail.style.width = '100%';
+    logTail.style.marginTop = '6px';
+    logTail.style.padding = '6px';
+    logTail.style.borderRadius = '10px';
+    logTail.style.border = '1px solid rgba(255,255,255,0.18)';
+    logTail.style.background = 'rgba(0,0,0,0.25)';
+    logTail.style.color = '#fff';
+    logTail.style.fontSize = '11px';
+    logTail.style.opacity = '0.92';
+    logTail.style.resize = 'vertical';
+
+    const refreshTail = () => {
+      try {
+        const lines = evoLogger.getTail(200);
+        logTail.value = lines.join('\n');
+        logTail.scrollTop = logTail.scrollHeight;
+      } catch (e) {
+        try { logTail.value = String(e); } catch {}
+      }
+    };
+
+    const applyLogSettingsFromUI = () => {
+      const on = !!logEnable.checked;
+      evoLogger.setEnabled(on);
+      _lsSet(LOG_ENABLED_KEY, on ? '1' : '0');
+
+      const lvl = String(levelSel.value || 'INFO');
+      evoLogger.setLevel(/** @type {any} */ (lvl));
+      _lsSet(LOG_LEVEL_KEY, lvl);
+
+      const ml = Number(maxLinesInput.value);
+      evoLogger.setMaxLines(Number.isFinite(ml) ? (ml | 0) : 5000);
+      _lsSet(LOG_MAXLINES_KEY, String(evoLogger.maxLines | 0));
+
+      const kb = Number(maxKbInput.value);
+      const bytes = (Number.isFinite(kb) ? (kb | 0) : 2048) * 1024;
+      evoLogger.setMaxBytes(bytes);
+      _lsSet(LOG_MAXBYTES_KEY, String(evoLogger.maxBytes | 0));
+
+      const si = Number(sampInput.value);
+      const so = Number(sampObs.value);
+      evoLogger.setSampleEvery({ input: (Number.isFinite(si) ? (si | 0) : 20), obs: (Number.isFinite(so) ? (so | 0) : 20) });
+      _lsSet(LOG_SAMPLE_INPUT_KEY, String(evoLogger.sampleEvery.input | 0));
+      _lsSet(LOG_SAMPLE_OBS_KEY, String(evoLogger.sampleEvery.obs | 0));
+
+      const enabledCats = cats.filter((x) => x.cb.checked).map((x) => x.cb.dataset.cat || '').filter(Boolean);
+      // If none checked => allow all (null)
+      evoLogger.setCategories(enabledCats.length ? enabledCats : null);
+      _lsSet(LOG_CATS_KEY, enabledCats.join(','));
+    };
+
+    const initLogUIFromStorage = () => {
+      // enabled
+      logEnable.checked = (_lsGet(LOG_ENABLED_KEY) === '1');
+
+      // level
+      const savedLvl = String(_lsGet(LOG_LEVEL_KEY) || 'INFO').toUpperCase();
+      levelSel.value = (savedLvl === 'ERROR' || savedLvl === 'WARN' || savedLvl === 'INFO' || savedLvl === 'DEBUG') ? savedLvl : 'INFO';
+
+      // max lines
+      const savedML = Number(_lsGet(LOG_MAXLINES_KEY));
+      maxLinesInput.value = String(Number.isFinite(savedML) && savedML > 0 ? (savedML | 0) : 5000);
+
+      // max bytes (KB shown)
+      const savedMB = Number(_lsGet(LOG_MAXBYTES_KEY));
+      const mb = (Number.isFinite(savedMB) && savedMB > 0) ? (savedMB | 0) : (2 * 1024 * 1024);
+      maxKbInput.value = String(Math.max(32, (mb / 1024) | 0));
+
+      // sampling
+      const sIn = Number(_lsGet(LOG_SAMPLE_INPUT_KEY));
+      const sOb = Number(_lsGet(LOG_SAMPLE_OBS_KEY));
+      sampInput.value = String(Number.isFinite(sIn) && sIn > 0 ? (sIn | 0) : 20);
+      sampObs.value = String(Number.isFinite(sOb) && sOb > 0 ? (sOb | 0) : 20);
+
+      // cats
+      const catStr = String(_lsGet(LOG_CATS_KEY) || '').trim();
+      const set = new Set(catStr ? catStr.split(',').map(s => s.trim()).filter(Boolean) : []);
+      if (set.size === 0) {
+        // default: enable common categories
+        ['match','match_anomaly','physics_route','generation','storage'].forEach((k) => set.add(k));
+      }
+      cats.forEach((x) => { x.cb.checked = set.has(String(x.cb.dataset.cat || '')); });
+    };
+
+    initLogUIFromStorage();
+    applyLogSettingsFromUI();
+
+    // Wire events
+    [logEnable, levelSel, maxLinesInput, maxKbInput, sampInput, sampObs, ...cats.map(x=>x.cb)].forEach((node) => {
+      node.addEventListener('change', () => {
+        applyLogSettingsFromUI();
+        refreshTail();
+      });
+    });
+
+    logRefresh.addEventListener('click', () => refreshTail());
+    logDownload.addEventListener('click', () => { try { evoLogger.download(); } catch {} refreshTail(); });
+    logClear.addEventListener('click', () => { try { evoLogger.clear(); } catch {} refreshTail(); });
+
+    logBox.append(logTitle, logRow1, logRow2, logRow3, logTail);
+// Initial fill
+    refreshTail();
+
 
     panel.appendChild(importFile);
 
-    panel.append(header, row1, hr(), oppBox, hr(), hofBox, hr(), histBox);
+    panel.append(header, row1, hr(), oppBox, hr(), hofBox, hr(), histBox, hr(), logBox);
 
     mount.appendChild(panel);
 

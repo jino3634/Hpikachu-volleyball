@@ -6,6 +6,7 @@ import { evolveOneGeneration, initPopulation } from './evolver_ga.js';
 import { evaluateGenome } from './evolver_ga.js';
 import { initStorage, loadBest, saveBest, loadHof, saveHof, appendHistory, loadOppStats, saveOppStats, loadReplays, saveReplays } from './storage.js';
 import { makeXorShift32 } from './prng.js';
+import { evoLogger } from './logger.js';
 
 
 const PHYSICS_OPPONENT = Object.freeze({ __opp: 'physics' });
@@ -92,6 +93,32 @@ export async function startEvolution(opts = {}, onUpdate = null) {
 
   // Opponent mode selected by UI.
     const opponentMode = normalizeOpponentMode(cfg.opponentMode);
+
+  // Emit a single meta/header line for diagnostics (best-effort).
+  try {
+    evoLogger.emitMetaOnce({
+      app: 'Hpikachu-volleyball',
+      mode: 'evo',
+      t: Date.now(),
+      ua: (typeof navigator !== 'undefined' ? navigator.userAgent : ''),
+      href: (typeof location !== 'undefined' ? location.href : ''),
+      cfg: {
+        populationSize: cfg.populationSize,
+        eliteFraction: cfg.eliteFraction,
+        mutationRate: cfg.mutationRate,
+        mutationSigma: cfg.mutationSigma,
+        winningScore: cfg.winningScore,
+        maxFrames: cfg.maxFrames,
+        decisionInterval: cfg.decisionInterval,
+        opponentMode,
+        trainSeeds: Array.isArray(cfg.trainSeeds) ? cfg.trainSeeds.length : undefined,
+        evalSeeds: Array.isArray(cfg.evalSeeds) ? cfg.evalSeeds.length : undefined,
+        splitSeedsAcrossOpponents: !!cfg.splitSeedsAcrossOpponents,
+        initialServeMode: cfg.initialServeMode,
+        hofSize: cfg.hofSize,
+      },
+    });
+  } catch {}
 
   // Load saved best if exists
   const saved = await loadBest();
@@ -271,6 +298,46 @@ export async function startEvolution(opts = {}, onUpdate = null) {
 
 
       const elapsedMs = Date.now() - t0;
+
+      // Stage 1 diagnostic: generation summary (enable via window.__evoLogger.setEnabled(true)).
+      try {
+        const oppPool = buildOpponentPool(baselineOpp, null, state.hof, cfg.hofSize);
+        const oppPoolPhysics = oppPool.filter((g) => (g && g.__opp === 'physics')).length;
+        const bestMeta = res.best?.eval?.meta || null;
+        const bestPerOpp = res.best?.eval?.perOpp || null;
+        evoLogger.log('generation', 'INFO', {
+          generation: state.generation,
+          opponentMode,
+          savedNow: !!savedNow,
+
+          // Best of this generation (train/eval)
+          bestWinRate: Number(bestWin ?? 0),
+          bestEvalWinRate: Number(bestEvalWinRate ?? 0),
+          bestFitness: Number(bestFit ?? 0),
+
+          // Population stats (diversity/collapse diagnostics)
+          avgWinRate: Number(res.avgWinRate ?? 0),
+          stdWinRate: Number(res.stdWinRate ?? 0),
+          avgFitness: Number(res.avgFitness ?? 0),
+          stdFitness: Number(res.stdFitness ?? 0),
+          eliteCount: Number(res.eliteCount ?? 0),
+
+          // Opponent pool / seed split diagnostics
+          oppPoolSize: oppPool.length,
+          oppPoolPhysics,
+          splitSeedsAcrossOpponents: !!cfg.splitSeedsAcrossOpponents,
+          trainSeedCount: Array.isArray(cfg.trainSeeds) ? (cfg.trainSeeds.length | 0) : 0,
+          evalSeedCount: Array.isArray(cfg.evalSeeds) ? (cfg.evalSeeds.length | 0) : 0,
+          bestEvalMeta: bestMeta,
+          bestPerOpp,
+
+          // Recent opponent-mode last-N (for UI later)
+          oppStatsSummary: state.oppStatsSummary,
+
+          elapsedMs: Number(elapsedMs ?? 0),
+        });
+      } catch {}
+
       emit(onUpdate, {
         ...state,
         event: 'generation',

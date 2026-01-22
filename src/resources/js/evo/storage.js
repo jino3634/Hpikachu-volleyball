@@ -2,6 +2,7 @@
 
 import { LocalStorageStorage } from '../storage/storage_localstorage.js';
 import { IndexedDBStorage } from '../storage/storage_indexeddb.js';
+import { evoLogger } from './logger.js';
 
 const KEY_PREFIX = 'evo_';
 
@@ -40,18 +41,46 @@ export async function initStorage() {
   return __storage;
 }
 
+
+function _approxBytesOfJson(value) {
+  try {
+    const s = JSON.stringify(value);
+    if (typeof TextEncoder !== 'undefined') {
+      return (new TextEncoder().encode(s)).length;
+    }
+    return s.length;
+  } catch {
+    return -1;
+  }
+}
+
 async function ensureInit() {
   if (!__storage) await initStorage();
 }
 
 export async function saveJson(key, value) {
   await ensureInit();
-  return __storage.saveJson(key, value);
+  try {
+    const ok = await __storage.saveJson(key, value);
+    const bytes = evoLogger.wouldLog('storage', 'INFO') ? _approxBytesOfJson(value) : undefined;
+    evoLogger.log('storage', 'INFO', { op: 'saveJson', key: String(key||''), ok: !!ok, bytes });
+    return ok;
+  } catch (e) {
+    evoLogger.log('storage', 'WARN', { op: 'saveJson', key: String(key||''), err: String(e) });
+    throw e;
+  }
 }
 
 export async function loadJson(key, fallback = null) {
   await ensureInit();
-  return __storage.loadJson(key, fallback);
+  try {
+    const v = await __storage.loadJson(key, fallback);
+    evoLogger.log('storage', 'INFO', { op: 'loadJson', key: String(key||''), hit: v != null });
+    return v;
+  } catch (e) {
+    evoLogger.log('storage', 'WARN', { op: 'loadJson', key: String(key||''), err: String(e) });
+    return fallback;
+  }
 }
 
 // ---------------------------------------------
