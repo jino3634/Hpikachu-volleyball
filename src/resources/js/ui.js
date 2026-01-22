@@ -217,14 +217,6 @@ export function setUpUI(pikaVolley, ticker) {
   // ------------------------------------------------------------
   // EvoPanel (always-on skeleton) + remove old Evo dropdown toggle
   // ------------------------------------------------------------
-  try {
-    const evoBtn = document.getElementById('evo-dropdown-btn');
-    if (evoBtn && evoBtn.parentNode) evoBtn.parentNode.removeChild(evoBtn);
-    const evoDd = document.getElementById('evo-dropdown');
-    if (evoDd) evoDd.style.display = 'none';
-  } catch (e) {
-    // ignore
-  }
 
   try {
     evoPanelAlways = new EvoPanel({
@@ -372,6 +364,17 @@ export function setUpUI(pikaVolley, ticker) {
     });
     evoPanelAlways.show();
     evoPanelAlways.setRunning(isEvolutionRunning());
+
+    // If EvoPanel is successfully mounted, hide/remove the legacy Evo dropdown UI.
+    // (If EvoPanel fails to init, we keep legacy UI intact so the page still works.)
+    try {
+      const evoBtn = document.getElementById('evo-dropdown-btn');
+      if (evoBtn && evoBtn.parentNode) evoBtn.parentNode.removeChild(evoBtn);
+      const evoDd = document.getElementById('evo-dropdown');
+      if (evoDd) evoDd.style.display = 'none';
+    } catch (e) {
+      // ignore
+    }
 
     // Step 5: initial list render
     (async () => {
@@ -1227,6 +1230,19 @@ function setSelectedOptionsBtn(options) {
     const HIST_LIMIT_KEY = 'evo_hist_list_limit';
     const HIST_MAXKEEP_KEY = 'evo_hist_maxkeep';
 
+    // Auto refresh lists when Evo dropdown is opened
+    const dropdownEl = document.getElementById('evo-dropdown');
+    const hofRefreshBtn = /** @type {HTMLButtonElement|null} */ (document.getElementById('evo-hof-refresh-btn'));
+
+    if (dropdownEl) {
+      dropdownEl.addEventListener('dropdown:open', () => {
+        try { hofRefreshBtn?.click(); } catch {}
+        try { histRefreshBtn?.click(); } catch {}
+      });
+    }
+
+
+
     /** @returns {number} */
     function getHistLimit() {
       const v = histLimitEl ? Number(histLimitEl.value) : readNumSetting(HIST_LIMIT_KEY, 50);
@@ -1497,6 +1513,9 @@ function toggleDropdown(dropdownID, pikaVolley) {
   const willShow = document.getElementById(dropdownID).classList.toggle('show');
   if (willShow) {
     pauseResumeManager.pause(pikaVolley, PauseResumePrecedence.dropdown);
+    try {
+      document.getElementById(dropdownID)?.dispatchEvent(new CustomEvent('dropdown:open'));
+    } catch {}
   } else {
     pauseResumeManager.resume(pikaVolley, PauseResumePrecedence.dropdown);
   }

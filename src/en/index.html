@@ -200,7 +200,63 @@
           </div>
         </div>
         <div class="btn-container right">
-          
+          <div class="relative-container">
+            <button type="button" id="evo-dropdown-btn" class="btn dropdown-btn">
+              Evo
+            </button>
+            <div id="evo-dropdown" class="dropdown">
+              <button type="button" id="evo-start-btn" class="btn">
+                Start evolution
+              </button>
+              <button type="button" id="evo-stop-btn" class="btn">
+                Stop
+              </button>
+                            <button type="button" id="evo-apply-btn" class="btn">
+                Apply best (vs baseline)
+              </button>
+              <button type="button" id="evo-export-btn" class="btn">
+                Export/Backup
+              </button>
+              <button type="button" id="evo-import-btn" class="btn">
+                Import/Restore
+              </button>
+              <input type="file" id="evo-import-file" accept="application/json" style="display:none" />
+              <div class="evo-opp-mode" style="display:inline-block; margin-left:8px; font-size: 0.95em;">
+                <label style="margin-right:8px;"><input type="radio" name="evo-opp-mode" value="self" checked> Self-play</label>
+                <label><input type="radio" name="evo-opp-mode" value="baseline"> Baseline genome</label>
+                        <label style="margin-left:10px;"><input type="radio" name="evo-opp-mode" value="physics"> physics.js AI</label>
+              </div>
+
+              
+              <div id="evo-hof-panel" style="margin-top:8px; padding-top:6px; border-top:1px solid rgba(255,255,255,0.15);">
+                <div style="font-size:0.95em; margin-bottom:6px;">
+                  <label style="margin-right:10px;">HOF list limit
+                    <input id="evo-hof-limit" type="number" min="1" max="1000" value="30" style="width:70px;">
+                  </label>
+                  <label style="margin-right:10px;">HOF maxKeep
+                    <input id="evo-hof-maxkeep" type="number" min="1" max="5000" value="200" style="width:80px;">
+                  </label>
+                </div>
+                <div style="margin-bottom:6px;">
+                  <button type="button" id="evo-hof-refresh-btn" class="btn">Refresh HOF</button>
+                  <button type="button" id="evo-hof-prune-btn" class="btn">Prune</button>
+                </div>
+                <div id="evo-hof-list" style="max-height:220px; overflow:auto; font-size:0.9em; line-height:1.25;"></div>
+              <div id="evo-hist-panel" style="margin-top:8px; padding-top:6px; border-top:1px solid rgba(255,255,255,0.15);">
+                <div style="font-size:0.95em; margin-bottom:6px;">
+                  <label style="margin-right:10px;">History list limit
+                    <input id="evo-hist-limit" type="number" min="1" max="5000" value="50" style="width:70px;">
+                  </label>
+                  <label style="margin-right:10px;">History maxKeep
+                    <input id="evo-hist-maxkeep" type="number" min="1" max="200000" value="2000" style="width:90px;">
+                  </label>
+                </div>
+                <div style="margin-bottom:6px;">
+                  <button type="button" id="evo-hist-refresh-btn" class="btn">Refresh history</button>
+                  <button type="button" id="evo-hist-prune-btn" class="btn">Prune</button>
+                </div>
+                <div id="evo-hist-list" style="max-height:180px; overflow:auto; font-family:monospace; font-size:0.92em; white-space:pre; background:rgba(0,0,0,0.25); padding:6px; border-radius:6px;"></div>
+              </div>
 
               </div>
 <button type="button" id="evo-save-btn" class="btn">
