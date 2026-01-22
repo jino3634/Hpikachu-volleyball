@@ -50,6 +50,11 @@ export class PikachuVolleyball {
       ),
     ];
 
+    // Replay playback mode (used by evo replay feature)
+    /** @type {{active:boolean, packed:Int8Array, frame:number, meta?:any}|null} */
+    this.replayMode = null;
+
+
     /** @type {number} game fps */
     this.normalFPS = 25;
     /** @type {number} fps for slow motion */
@@ -134,8 +139,12 @@ export class PikachuVolleyball {
       this.slowMotionNumOfSkippedFrames = 0;
     }
     // catch keyboard input and freeze it
-    this.keyboardArray[0].getInput();
-    this.keyboardArray[1].getInput();
+    if (this.replayMode && this.replayMode.active) {
+      this._applyReplayInputs();
+    } else {
+      this.keyboardArray[0].getInput();
+      this.keyboardArray[1].getInput();
+    }
     this.state();
   }
 
@@ -501,6 +510,82 @@ export class PikachuVolleyball {
   /**
    * Called if restart button clicked
    */
+
+
+  /**
+   * Start replay playback by injecting recorded inputs each frame.
+   * @param {{packed?:Int8Array, replay?:{packed:Int8Array}, seed?:number, meta?:any}} replayData
+   */
+  startReplay(replayData) {
+    try {
+      const packed =
+        (replayData && replayData.packed) ||
+        (replayData && replayData.replay && replayData.replay.packed);
+      if (!packed || packed.length < 6) {
+        return;
+      }
+      this.replayMode = {
+        active: true,
+        packed: packed,
+        frame: 0,
+        meta: replayData,
+      };
+
+      // Restart to a clean game state and jump into a new game.
+      this.paused = false;
+      this.frameCounter = 0;
+      this.noInputFrameCounter = 0;
+      this.slowMotionFramesLeft = 0;
+      this.slowMotionNumOfSkippedFrames = 0;
+      this.view.menu.visible = false;
+      // startOfNewGame() will show game view on frameCounter===0
+      this.state = this.startOfNewGame;
+    } catch {
+      // ignore
+    }
+  }
+
+  /** Stop replay playback and return control to keyboard. */
+  stopReplay() {
+    if (this.replayMode) {
+      this.replayMode.active = false;
+      this.replayMode = null;
+    }
+    try {
+      this.keyboardArray[0].xDirection = 0;
+      this.keyboardArray[0].yDirection = 0;
+      this.keyboardArray[0].powerHit = 0;
+      this.keyboardArray[1].xDirection = 0;
+      this.keyboardArray[1].yDirection = 0;
+      this.keyboardArray[1].powerHit = 0;
+    } catch {
+      // ignore
+    }
+  }
+
+  /** @private */
+  _applyReplayInputs() {
+    const rm = this.replayMode;
+    if (!rm || !rm.active) return;
+    const packed = rm.packed;
+    const base = rm.frame * 6;
+    if (!packed || base + 5 >= packed.length) {
+      this.stopReplay();
+      return;
+    }
+    const k1 = this.keyboardArray[0];
+    const k2 = this.keyboardArray[1];
+
+    k1.xDirection = packed[base + 0];
+    k1.yDirection = packed[base + 1];
+    k1.powerHit = packed[base + 2];
+    k2.xDirection = packed[base + 3];
+    k2.yDirection = packed[base + 4];
+    k2.powerHit = packed[base + 5];
+
+    rm.frame++;
+  }
+
   restart() {
     this.frameCounter = 0;
     this.noInputFrameCounter = 0;

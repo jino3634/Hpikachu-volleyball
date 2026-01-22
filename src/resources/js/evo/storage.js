@@ -61,6 +61,7 @@ export async function loadJson(key, fallback = null) {
 const BEST_KEY = 'best';
 const HOF_KEY = 'hof';
 const OPP_STATS_KEY = 'oppstats';
+const REPLAYS_KEY = 'replays_v1';
 
 /**
  * @param {{
@@ -98,6 +99,127 @@ export async function saveOppStats(payload) {
 export async function loadOppStats() {
   return loadJson(OPP_STATS_KEY, null);
 }
+
+// -------------------------------------------------------------
+// Replays (recent 10 games / recent 3 wins)
+// Stored as JSON with base64-packed int8 arrays.
+// -------------------------------------------------------------
+
+function _u8ToB64(u8) {
+  try {
+    if (!u8 || !u8.length) return '';
+    let s = '';
+    const CHUNK = 0x8000; // 32k
+    for (let i = 0; i < u8.length; i += CHUNK) {
+      const sub = u8.subarray(i, i + CHUNK);
+      // Convert to binary string in chunks.
+      let part = '';
+      for (let j = 0; j < sub.length; j++) part += String.fromCharCode(sub[j]);
+      s += part;
+    }
+    return btoa(s);
+  } catch {
+    return '';
+  }
+}
+
+function _b64ToI8(b64) {
+  try {
+    if (!b64) return new Int8Array(0);
+    const bin = atob(String(b64));
+    const len = bin.length;
+    const u8 = new Uint8Array(len);
+    for (let i = 0; i < len; i++) u8[i] = bin.charCodeAt(i) & 255;
+    return new Int8Array(u8.buffer);
+  } catch {
+    return new Int8Array(0);
+  }
+}
+
+function _serializeReplayItem(item) {
+  try {
+    const r = item && item.replay ? item.replay : null;
+    const packed = r && r.packed ? r.packed : null;
+    const u8 = packed ? new Uint8Array(packed.buffer, packed.byteOffset, packed.byteLength) : null;
+    return {
+      t: item.t,
+      mode: item.mode,
+      seed: item.seed,
+      winner: item.winner,
+      scoreP1: item.scoreP1,
+      scoreP2: item.scoreP2,
+      frames: item.frames,
+      replay: r ? {
+        frames: r.frames,
+        packedB64: u8 ? _u8ToB64(u8) : '',
+      } : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function _deserializeReplayItem(obj) {
+  try {
+    if (!obj || !obj.replay) return null;
+    const packedI8 = _b64ToI8(obj.replay.packedB64);
+    return {
+      t: Number(obj.t || 0),
+      mode: obj.mode || 'self',
+      seed: Number(obj.seed || 0),
+      winner: Number(obj.winner || 0),
+      scoreP1: Number(obj.scoreP1 || 0),
+      scoreP2: Number(obj.scoreP2 || 0),
+      frames: Number(obj.frames || obj.replay.frames || 0),
+      replay: {
+        frames: Number(obj.replay.frames || 0),
+        packed: packedI8,
+      },
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Save recent replays (ring buffers).
+ * @param {{recentGames:any[], recentWins:any[]}} payload
+ * @returns {Promise<boolean>}
+ */
+export async function saveReplays(payload) {
+  try {
+    const recentGames = Array.isArray(payload?.recentGames) ? payload.recentGames : [];
+    const recentWins = Array.isArray(payload?.recentWins) ? payload.recentWins : [];
+    const ser = {
+      v: 1,
+      savedAt: Date.now(),
+      recentGames: recentGames.map(_serializeReplayItem).filter(Boolean),
+      recentWins: recentWins.map(_serializeReplayItem).filter(Boolean),
+    };
+    await saveJson(REPLAYS_KEY, ser);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Load recent replays (ring buffers).
+ * @returns {Promise<{recentGames:any[], recentWins:any[]} | null>}
+ */
+export async function loadReplays() {
+  try {
+    const data = await loadJson(REPLAYS_KEY, null);
+    if (!data || (!Array.isArray(data.recentGames) && !Array.isArray(data.recentWins))) return null;
+    const recentGames = Array.isArray(data.recentGames) ? data.recentGames.map(_deserializeReplayItem).filter(Boolean) : [];
+    const recentWins = Array.isArray(data.recentWins) ? data.recentWins.map(_deserializeReplayItem).filter(Boolean) : [];
+    return { recentGames, recentWins };
+  } catch {
+    return null;
+  }
+}
+
+
 
 
 // -------------------------------------------------------------

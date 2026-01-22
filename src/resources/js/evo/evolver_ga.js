@@ -21,7 +21,9 @@ import { defaultGenome } from './policy_weighted.js';
  *   decisionInterval?:number,
  *   initialServeMode?:('alternate'|'p1'|'p2'),
  *   splitSeedsAcrossOpponents?:boolean,
- *   collectOutcomes?:boolean
+ *   collectOutcomes?:boolean,
+ *   collectReplay?:boolean,
+ *   onMatch?:(matchResult:any)=>void
  * }} [opts]
  */
 export function evaluateGenome(genome, opts = {}) {
@@ -37,6 +39,8 @@ export function evaluateGenome(genome, opts = {}) {
   const decisionInterval = Math.max(1, (opts.decisionInterval ?? 3) | 0);
   const initialServeMode = /** @type {'alternate'|'p1'|'p2'} */ (opts.initialServeMode || 'alternate');
   const collectOutcomes = !!opts.collectOutcomes;
+  const collectReplay = !!opts.collectReplay;
+  const onMatch = (typeof opts.onMatch === 'function') ? opts.onMatch : null;
   /** @type {number[]|null} */
   const outcomes = collectOutcomes ? [] : null;
   const agg = { wins: 0, losses: 0, draws: 0, scoreDiff: 0 };
@@ -71,7 +75,12 @@ export function evaluateGenome(genome, opts = {}) {
         maxFrames,
         decisionInterval,
         initialServeMode,
+        collectReplay,
       });
+
+      if (onMatch) {
+        try { onMatch(r); } catch {}
+      }
       const diff = (r.scoreP1 - r.scoreP2) | 0;
       agg.scoreDiff += diff;
       const outc = diff > 0 ? 1 : (diff < 0 ? -1 : 0);

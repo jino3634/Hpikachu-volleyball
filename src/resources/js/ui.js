@@ -9,14 +9,17 @@ import {
   stopEvolution,
   getEvolutionState,
   isEvolutionRunning,
+  getRecentReplays,
 } from './evo/runner.js';
 import { loadBest, saveBest, exportEvoData, importEvoData, listHof, pruneHof, listHistory, pruneHistory } from './evo/storage.js';
 import { chooseAction, defaultGenome } from './evo/policy_weighted.js';
 import { makeObservation } from './evo/observation.js';
 import { decidePhysicsAI } from './physics_ai.js';
 import { EvoPanel } from './evo/panel.js';
+import { ReplayPanel } from './evo/replay_panel.js';
 
 let evoPanelAlways = null;
+let replayPanelAlways = null;
 
 
 /** @typedef {import('./pikavolley.js').PikachuVolleyball} PikachuVolleyball */
@@ -400,6 +403,56 @@ export function setUpUI(pikaVolley, ticker) {
         console.error(e);
       }
     })();
+    // ------------------------------------------------------------
+    // ReplayPanel (bottom-left): Recent 3 Wins + Recent 10 Games
+    // ------------------------------------------------------------
+    try {
+      replayPanelAlways = new ReplayPanel({
+        mount: document.body,
+        onPlay: (item) => {
+          try {
+            // Pause the running game while replay plays (optional, low precedence).
+            pauseResumeManager.pause(pikaVolley, PauseResumePrecedence.dropdown);
+          } catch {}
+          try {
+            const rep = item && item.replay ? item.replay : item;
+            if (rep && typeof pikaVolley.startReplay === 'function') {
+              pikaVolley.startReplay(rep);
+            }
+          } catch (e) {
+            console.error(e);
+            alert('Replay play failed: ' + (e?.message ?? String(e)));
+          }
+        },
+        onStop: () => {
+          try {
+            if (typeof pikaVolley.stopReplay === 'function') pikaVolley.stopReplay();
+          } catch (e) {
+            console.error(e);
+          }
+          try { pauseResumeManager.resume(pikaVolley, PauseResumePrecedence.dropdown); } catch {}
+        },
+      });
+
+      const refreshReplayPanel = () => {
+        try {
+          if (!replayPanelAlways) return;
+          const data = getRecentReplays ? getRecentReplays() : { recentWins: [], recentGames: [] };
+          replayPanelAlways.setData(data || { recentWins: [], recentGames: [] });
+        } catch (e) {
+          console.error(e);
+        }
+      };
+
+      refreshReplayPanel();
+      // lightweight polling; later we can switch to event-driven updates
+      const replayPanelTimer = setInterval(refreshReplayPanel, 1000);
+      // @ts-ignore
+      window.__replayPanelTimer = replayPanelTimer;
+    } catch (e) {
+      console.error(e);
+    }
+
 
   } catch (e) {
     // ignore

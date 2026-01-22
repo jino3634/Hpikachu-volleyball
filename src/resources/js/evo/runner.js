@@ -4,11 +4,26 @@ import { EVO_DEFAULTS } from './config.js';
 import { defaultGenome } from './policy_weighted.js';
 import { evolveOneGeneration, initPopulation } from './evolver_ga.js';
 import { evaluateGenome } from './evolver_ga.js';
-import { initStorage, loadBest, saveBest, loadHof, saveHof, appendHistory, loadOppStats, saveOppStats } from './storage.js';
+import { initStorage, loadBest, saveBest, loadHof, saveHof, appendHistory, loadOppStats, saveOppStats, loadReplays, saveReplays } from './storage.js';
 import { makeXorShift32 } from './prng.js';
 
 
 const PHYSICS_OPPONENT = Object.freeze({ __opp: 'physics' });
+const REPLAY_RECENT_GAMES_N = 10;
+const REPLAY_RECENT_WINS_N = 3;
+
+let __saveReplaysTimer = null;
+function _scheduleSaveReplays() {
+  try {
+    if (__saveReplaysTimer) clearTimeout(__saveReplaysTimer);
+    __saveReplaysTimer = setTimeout(() => {
+      __saveReplaysTimer = null;
+      try { saveReplays(state.replays); } catch {}
+    }, 250);
+  } catch {}
+}
+
+
 
 /**
  * Evolution runner state (single instance).
@@ -37,6 +52,11 @@ const state = {
     baseline: { n: 0, winRate: 0 },
     physics: { n: 0, winRate: 0 },
   },
+  // Recent replays captured during opponent-mode evaluation (memory only).
+  replays: {
+    recentGames: [],
+    recentWins: [],
+  }
 };
 
 /**
@@ -56,6 +76,15 @@ export async function startEvolution(opts = {}, onUpdate = null) {
 
   // Ensure storage is ready (IndexedDB open, etc.)
   await initStorage();
+
+  // Load persisted replays (recent lists) if available.
+  try {
+    const rep = await loadReplays();
+    if (rep) {
+      state.replays.recentGames = Array.isArray(rep.recentGames) ? rep.recentGames : [];
+      state.replays.recentWins = Array.isArray(rep.recentWins) ? rep.recentWins : [];
+    }
+  } catch {}
 
   const cfg = { ...EVO_DEFAULTS, ...(opts || {}) };
   state.config = cfg;
@@ -199,6 +228,7 @@ export async function startEvolution(opts = {}, onUpdate = null) {
 
       // Update opponent-mode recent-100 stats (internal only; UI will display later).
       try {
+        const replayMatches = [];
         const statsEval = evaluateGenome(res.best.genome, {
           seeds: cfg.trainSeeds,
           opponentGenomes: [baselineOpp],
@@ -208,7 +238,10 @@ export async function startEvolution(opts = {}, onUpdate = null) {
           splitSeedsAcrossOpponents: false,
           initialServeMode: /** @type {'alternate'|'p1'|'p2'} */ (cfg.initialServeMode || 'alternate'),
           collectOutcomes: true,
+          collectReplay: true,
+          onMatch: (r) => { try { replayMatches.push(r); } catch {} },
         });
+        _pushReplays(opponentMode, replayMatches);
         _pushOutcomes(opponentMode, statsEval.outcomes, state.oppStatsN);
         try { await saveOppStats(state.oppStats); } catch {}
       } catch {}
@@ -335,6 +368,51 @@ function _pushOutcomes(mode, outcomes, maxN) {
   for (let i = 0; i < buf.length; i++) if (buf[i] > 0) w++;
   const n = buf.length;
   state.oppStatsSummary[key] = { n, winRate: n ? (w / n) : 0 };
+}
+
+/**
+ * Push replay items into recent ring buffers.
+ * Keeps:
+ *  - recentGames: last N games (all outcomes)
+ *  - recentWins: last N wins by P1 (training AI)
+ */
+function _pushReplays(mode, matchResults) {
+  if (!matchResults || !matchResults.length) return;
+  const key = (mode === 'baseline' || mode === 'physics') ? mode : 'self';
+  const gamesBuf = state.replays.recentGames;
+  const winsBuf = state.replays.recentWins;
+  let changed = false;
+
+  for (let i = 0; i < matchResults.length; i++) {
+    const r = matchResults[i];
+    if (!r || !r.replay) continue;
+    const item = {
+      t: Date.now(),
+      mode: key,
+      seed: r.seed,
+      winner: r.winner,
+      scoreP1: r.scoreP1,
+      scoreP2: r.scoreP2,
+      frames: r.frames,
+      replay: r.replay,
+    };
+    gamesBuf.push(item);
+    changed = true;
+    if (gamesBuf.length > REPLAY_RECENT_GAMES_N) gamesBuf.splice(0, gamesBuf.length - REPLAY_RECENT_GAMES_N);
+
+    if ((r.winner | 0) === 1) {
+      winsBuf.push(item);
+      if (winsBuf.length > REPLAY_RECENT_WINS_N) winsBuf.splice(0, winsBuf.length - REPLAY_RECENT_WINS_N);
+    }
+  }
+  if (changed) _scheduleSaveReplays();
+}
+
+/**
+ * @returns {{recentGames:any[], recentWins:any[]}}
+ */
+export function getRecentReplays() {
+  return state.replays;
 }
 
 /**

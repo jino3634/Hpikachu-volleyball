@@ -30,7 +30,8 @@ function isPhysicsGenome(g) {
  *  decisionInterval?:number,
  *  servePlayer2First?:boolean,
  *  initialServeMode?:('alternate'|'p1'|'p2'),
- *  deterministic?:boolean
+ *  deterministic?:boolean,
+ *  collectReplay?:boolean
  * }} opts
  */
 export function runMatch(opts) {
@@ -42,6 +43,10 @@ export function runMatch(opts) {
   const servePlayer2First = (typeof opts?.servePlayer2First === 'boolean')
     ? !!opts.servePlayer2First
     : (initialServeMode === 'p2');
+
+  const collectReplay = !!opts?.collectReplay;
+  /** @type {number[]|null} */
+  const replayArr = collectReplay ? [] : null;
 
   // Deterministic RNG for this match
   setCustomRng(makeXorShift32(seed));
@@ -84,6 +89,21 @@ export function runMatch(opts) {
   for (frames = 0; frames < maxFrames; frames++) {
     const touchingGround = physics.runEngineForNextFrame(inputs);
 
+    // Record the *actual* inputs used by the physics engine for this frame.
+    // (Both AIs write into `inputs` via physics.setAIController.)
+    if (replayArr) {
+      const p1 = inputs[0];
+      const p2 = inputs[1];
+      replayArr.push(
+        (p1.xDirection | 0),
+        (p1.yDirection | 0),
+        (p1.powerHit ? 1 : 0),
+        (p2.xDirection | 0),
+        (p2.yDirection | 0),
+        (p2.powerHit ? 1 : 0)
+      );
+    }
+
     if (touchingGround) {
       rounds++;
       // scoring rule mirrors pikavolley.js:
@@ -119,6 +139,24 @@ export function runMatch(opts) {
     frames: (frames | 0),
     reason,
   };
+
+  if (replayArr) {
+    // Fixed-size packed input stream: 6 int8s per frame.
+    // [p1.x, p1.y, p1.power, p2.x, p2.y, p2.power]
+    const packed = Int8Array.from(replayArr);
+    // NOTE: We intentionally keep this as a typed array here (no base64 yet).
+    // Stage 2/4 will decide the best UI/storage representation.
+    result.replay = {
+      seed,
+      winningScore,
+      maxFrames,
+      decisionInterval,
+      initialServeMode,
+      servePlayer2First,
+      frames: (frames | 0),
+      packed,
+    };
+  }
   return result;
 }
 
