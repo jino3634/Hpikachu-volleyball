@@ -14,6 +14,9 @@ import { loadBest, saveBest, exportEvoData, importEvoData, listHof, pruneHof, li
 import { chooseAction, defaultGenome } from './evo/policy_weighted.js';
 import { makeObservation } from './evo/observation.js';
 import { decidePhysicsAI } from './physics_ai.js';
+import { EvoPanel } from './evo/panel.js';
+
+let evoPanelAlways = null;
 
 
 /** @typedef {import('./pikavolley.js').PikachuVolleyball} PikachuVolleyball */
@@ -28,6 +31,7 @@ import { decidePhysicsAI } from './physics_ai.js';
  * @enum {number}
  */
 const PauseResumePrecedence = {
+  evo: 4,
   pauseBtn: 3,
   messageBox: 2,
   dropdown: 1,
@@ -209,6 +213,185 @@ export function setUpUI(pikaVolley, ticker) {
       pikaVolley.audio.muteAll();
     }
   });
+
+  // ------------------------------------------------------------
+  // EvoPanel (always-on skeleton) + remove old Evo dropdown toggle
+  // ------------------------------------------------------------
+  try {
+    const evoBtn = document.getElementById('evo-dropdown-btn');
+    if (evoBtn && evoBtn.parentNode) evoBtn.parentNode.removeChild(evoBtn);
+    const evoDd = document.getElementById('evo-dropdown');
+    if (evoDd) evoDd.style.display = 'none';
+  } catch (e) {
+    // ignore
+  }
+
+  try {
+    evoPanelAlways = new EvoPanel({
+      mount: document.body,
+      onStart: async () => {
+        try {
+          // Evolution is headless; keep the game paused to avoid confusion.
+          const pauseBtn = document.getElementById('pause-btn');
+          if (pauseBtn && !pauseBtn.classList.contains('selected')) {
+            pauseBtn.classList.add('selected');
+            pauseResumeManager.pause(pikaVolley, PauseResumePrecedence.pauseBtn);
+          }
+        } catch {}
+
+        // Pause game while evolving (panel is always visible, so pause is tied to running state, not UI visibility)
+        try { pauseResumeManager.pause(pikaVolley, PauseResumePrecedence.evo); } catch {}
+
+        evoPanelAlways && evoPanelAlways.setRunning(true);
+        evoPanelAlways && evoPanelAlways.setStatus('Status: running...');
+
+        await startEvolution({}, (s) => {
+          // Update legacy (no-op if elements removed)
+          try { updateEvoStatus(s); } catch {}
+          if (evoPanelAlways) {
+            const gen = (s && s.generation != null) ? s.generation : 0;
+            const best = (s && (s.bestEvalWinRate ?? s.bestWinRate)) ?? 0;
+            evoPanelAlways.setStatus(`Status: gen ${gen} | best ${(best*100).toFixed(1)}%`);
+            evoPanelAlways.setRunning(!!s.running);
+          }
+        });
+      },
+      onStop: () => {
+        stopEvolution();
+        try { pauseResumeManager.resume(pikaVolley, PauseResumePrecedence.evo); } catch {}
+        evoPanelAlways && evoPanelAlways.setRunning(false);
+        evoPanelAlways && evoPanelAlways.setStatus('Status: stopped');
+      },
+      onApplyBest: async () => {
+        const s = getEvolutionState();
+        const loaded = await loadBest();
+        const gBest = (s && s.bestGenome) ? s.bestGenome : (loaded ? loaded.genome : null);
+        if (!gBest) {
+          alert('No best genome yet. Run evolution or load a saved best first.');
+          return;
+        }
+        const di = Number((s && s.config && s.config.decisionInterval) ? s.config.decisionInterval : 3);
+        const di2 = Math.max(1, di | 0);
+
+        const oppMode = evoPanelAlways ? evoPanelAlways.getOpponentMode() : 'self';
+        let ok = false;
+        if (oppMode === 'physics') {
+          ok = applyExternalBestVsPhysicsAI(pikaVolley, gBest, di2);
+        } else {
+          const g2 = (oppMode === 'baseline') ? defaultGenome() : null;
+          ok = applyExternalBestVsBaseline(pikaVolley, gBest, g2, di2);
+        }
+        if (!ok) {
+          alert('Apply failed (physics not ready).');
+          return;
+        }
+        try { pikaVolley.restart(); } catch {}
+      },
+      onExport: async () => {
+        try {
+          const payload = await exportEvoData();
+          const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `evo_storage_export_${Date.now()}.json`;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          URL.revokeObjectURL(url);
+        } catch (e) {
+          console.error(e);
+          alert('Export failed: ' + (e?.message ?? String(e)));
+        }
+      },
+      onImportFile: async (file) => {
+        try {
+          const text = await file.text();
+          const payload = JSON.parse(text);
+          const ok = await importEvoData(payload, { clearBefore: true });
+          if (!ok) {
+            alert('Import failed (storage rejected payload).');
+            return;
+          }
+          alert('Import succeeded. The page will reload to apply loaded data.');
+          window.location.reload();
+        } catch (e) {
+          console.error(e);
+          alert('Import failed: ' + (e?.message ?? String(e)));
+        }
+      },
+      onRefreshHof: async () => {
+        try {
+          if (!evoPanelAlways) return;
+          const { hofLimit } = evoPanelAlways.getListSettings();
+          const list = await listHof(hofLimit);
+          evoPanelAlways.renderHof(list);
+        } catch (e) {
+          console.error(e);
+          alert('HOF refresh failed: ' + (e?.message ?? String(e)));
+        }
+      },
+      onPruneHof: async () => {
+        try {
+          if (!evoPanelAlways) return;
+          const { hofMaxKeep, hofLimit } = evoPanelAlways.getListSettings();
+          const removed = await pruneHof(hofMaxKeep);
+          const list = await listHof(hofLimit);
+          evoPanelAlways.renderHof(list);
+          evoPanelAlways.setStatus(`Status: HOF pruned -${removed}`);
+        } catch (e) {
+          console.error(e);
+          alert('HOF prune failed: ' + (e?.message ?? String(e)));
+        }
+      },
+      onRefreshHist: async () => {
+        try {
+          if (!evoPanelAlways) return;
+          const { histLimit } = evoPanelAlways.getListSettings();
+          const list = await listHistory(histLimit);
+          evoPanelAlways.renderHistory(list);
+        } catch (e) {
+          console.error(e);
+          alert('History refresh failed: ' + (e?.message ?? String(e)));
+        }
+      },
+      onPruneHist: async () => {
+        try {
+          if (!evoPanelAlways) return;
+          const { histMaxKeep, histLimit } = evoPanelAlways.getListSettings();
+          const removed = await pruneHistory(histMaxKeep);
+          const list = await listHistory(histLimit);
+          evoPanelAlways.renderHistory(list);
+          evoPanelAlways.setStatus(`Status: History pruned -${removed}`);
+        } catch (e) {
+          console.error(e);
+          alert('History prune failed: ' + (e?.message ?? String(e)));
+        }
+      },
+
+    });
+    evoPanelAlways.show();
+    evoPanelAlways.setRunning(isEvolutionRunning());
+
+    // Step 5: initial list render
+    (async () => {
+      try {
+        if (!evoPanelAlways) return;
+        const { hofLimit, histLimit } = evoPanelAlways.getListSettings();
+        const [hof, hist] = await Promise.all([
+          listHof(hofLimit),
+          listHistory(histLimit),
+        ]);
+        evoPanelAlways.renderHof(hof);
+        evoPanelAlways.renderHistory(hist);
+      } catch (e) {
+        console.error(e);
+      }
+    })();
+
+  } catch (e) {
+    // ignore
+  }
 }
 
 function setText(id, text) {
