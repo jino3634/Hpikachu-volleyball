@@ -237,7 +237,11 @@ export function setUpUI(pikaVolley, ticker) {
         evoPanelAlways && evoPanelAlways.setRunning(true);
         evoPanelAlways && evoPanelAlways.setStatus('Status: running...');
 
-        await startEvolution({}, (s) => {
+        const oppMode = (evoPanelAlways && typeof evoPanelAlways.getOpponentMode === 'function')
+          ? evoPanelAlways.getOpponentMode()
+          : 'self';
+
+        await startEvolution({ opponentMode: oppMode }, (s) => {
           // Update legacy (no-op if elements removed)
           try { updateEvoStatus(s); } catch {}
           if (evoPanelAlways) {
@@ -245,6 +249,11 @@ export function setUpUI(pikaVolley, ticker) {
             const best = (s && (s.bestEvalWinRate ?? s.bestWinRate)) ?? 0;
             evoPanelAlways.setStatus(`Status: gen ${gen} | best ${(best*100).toFixed(1)}%`);
             evoPanelAlways.setRunning(!!s.running);
+            try {
+              if (typeof evoPanelAlways.setOpponentWinrates === 'function') {
+                evoPanelAlways.setOpponentWinrates(s && s.oppStatsSummary);
+              }
+            } catch {}
           }
         });
       },
@@ -898,7 +907,11 @@ function setUpBtns(pikaVolley, applyAndSaveOptions) {
         pauseResumeManager.pause(pikaVolley, PauseResumePrecedence.pauseBtn);
       }
 
-      await startEvolution({}, (s) => {
+      const oppMode = (evoPanelAlways && typeof evoPanelAlways.getOpponentMode === 'function')
+        ? evoPanelAlways.getOpponentMode()
+        : getEvoOpponentMode();
+
+      await startEvolution({ opponentMode: oppMode }, (s) => {
         updateEvoStatus(s);
       });
     });

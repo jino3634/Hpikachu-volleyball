@@ -60,6 +60,7 @@ export async function loadJson(key, fallback = null) {
 
 const BEST_KEY = 'best';
 const HOF_KEY = 'hof';
+const OPP_STATS_KEY = 'oppstats';
 
 /**
  * @param {{
@@ -81,6 +82,23 @@ export async function saveBest(payload) {
 export async function loadBest() {
   return loadJson(BEST_KEY, null);
 }
+
+/**
+ * Save opponent-mode recent outcomes (for winrate last-N).
+ * @param {{self:number[], baseline:number[], physics:number[]}} payload
+ */
+export async function saveOppStats(payload) {
+  return saveJson(OPP_STATS_KEY, payload);
+}
+
+/**
+ * Load opponent-mode recent outcomes (for winrate last-N).
+ * @returns {Promise<{self:number[], baseline:number[], physics:number[]} | null>}
+ */
+export async function loadOppStats() {
+  return loadJson(OPP_STATS_KEY, null);
+}
+
 
 // -------------------------------------------------------------
 // Hall of Fame (opponent pool)

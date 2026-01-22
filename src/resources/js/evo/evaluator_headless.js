@@ -5,6 +5,15 @@ import { setCustomRng } from '../rand.js';
 import { makeXorShift32 } from './prng.js';
 import { makeObservation } from './observation.js';
 import { chooseAction } from './policy_weighted.js';
+import { decidePhysicsAI } from '../physics_ai.js';
+
+/**
+ * @param {any} g
+ * @returns {boolean}
+ */
+function isPhysicsGenome(g) {
+  return !!(g && typeof g === 'object' && g.__opp === 'physics');
+}
 
 /**
  * Run a headless match (no rendering) and return diagnostics.
@@ -46,10 +55,15 @@ export function runMatch(opts) {
   physics.setAIController((playerIndex, player, ball, otherPlayer, userInput, frameCtx) => {
     const obs = makeObservation(physics, playerIndex);
     const genome = (playerIndex === 1) ? opts.genomeP1 : opts.genomeP2;
-    const act = chooseAction(obs, genome);
-    userInput.xDirection = act.xDirection | 0;
-    userInput.yDirection = act.yDirection | 0;
-    userInput.powerHit = act.powerHit ? 1 : 0;
+    if (isPhysicsGenome(genome)) {
+      // Scripted physics opponent
+      decidePhysicsAI(playerIndex, player, ball, otherPlayer, userInput, frameCtx);
+    } else {
+      const act = chooseAction(obs, genome);
+      userInput.xDirection = act.xDirection | 0;
+      userInput.yDirection = act.yDirection | 0;
+      userInput.powerHit = act.powerHit ? 1 : 0;
+    }
   });
 
   const inputs = [new PikaUserInput(), new PikaUserInput()];

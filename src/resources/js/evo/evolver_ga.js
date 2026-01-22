@@ -20,7 +20,8 @@ import { defaultGenome } from './policy_weighted.js';
  *   maxFrames?:number,
  *   decisionInterval?:number,
  *   initialServeMode?:('alternate'|'p1'|'p2'),
- *   splitSeedsAcrossOpponents?:boolean
+ *   splitSeedsAcrossOpponents?:boolean,
+ *   collectOutcomes?:boolean
  * }} [opts]
  */
 export function evaluateGenome(genome, opts = {}) {
@@ -35,6 +36,9 @@ export function evaluateGenome(genome, opts = {}) {
   const maxFrames = Math.max(60, (opts.maxFrames ?? (60 * 30)) | 0);
   const decisionInterval = Math.max(1, (opts.decisionInterval ?? 3) | 0);
   const initialServeMode = /** @type {'alternate'|'p1'|'p2'} */ (opts.initialServeMode || 'alternate');
+  const collectOutcomes = !!opts.collectOutcomes;
+  /** @type {number[]|null} */
+  const outcomes = collectOutcomes ? [] : null;
   const agg = { wins: 0, losses: 0, draws: 0, scoreDiff: 0 };
 
   // To keep evaluation cost bounded when using multiple opponents,
@@ -70,6 +74,8 @@ export function evaluateGenome(genome, opts = {}) {
       });
       const diff = (r.scoreP1 - r.scoreP2) | 0;
       agg.scoreDiff += diff;
+      const outc = diff > 0 ? 1 : (diff < 0 ? -1 : 0);
+      if (outcomes) outcomes.push(outc);
       if (diff > 0) agg.wins++;
       else if (diff < 0) agg.losses++;
       else agg.draws++;
@@ -80,6 +86,7 @@ export function evaluateGenome(genome, opts = {}) {
     ...agg,
     fitness: computeFitness(agg),
     winRate: agg.wins / Math.max(1, agg.wins + agg.losses + agg.draws),
+    outcomes: outcomes || undefined,
   };
 }
 
@@ -120,7 +127,8 @@ export function initPopulation(size, opts = {}) {
  *   maxFrames?:number,
  *   decisionInterval?:number,
  *   initialServeMode?:('alternate'|'p1'|'p2'),
- *   splitSeedsAcrossOpponents?:boolean
+ *   splitSeedsAcrossOpponents?:boolean,
+ *   collectOutcomes?:boolean
  * }} opts
  */
 export function evolveOneGeneration(population, opts = {}) {

@@ -7,6 +7,12 @@ import { TRAIN_SEEDS, EVAL_SEEDS } from './scenarios.js';
  * You can override any field when calling startEvolution().
  */
 export const EVO_DEFAULTS = {
+  // Training opponent mode.
+  // - 'self': self-play vs previous best snapshot (default)
+  // - 'baseline': vs default baseline genome
+  // - 'physics': (reserved) vs physics/rule-based opponent (wired in later)
+  opponentMode: 'self',
+
   // Fair evaluation: fixed seed sets
   trainSeeds: TRAIN_SEEDS,
   evalSeeds: EVAL_SEEDS,

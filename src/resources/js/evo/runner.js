@@ -4,8 +4,11 @@ import { EVO_DEFAULTS } from './config.js';
 import { defaultGenome } from './policy_weighted.js';
 import { evolveOneGeneration, initPopulation } from './evolver_ga.js';
 import { evaluateGenome } from './evolver_ga.js';
-import { initStorage, loadBest, saveBest, loadHof, saveHof, appendHistory } from './storage.js';
+import { initStorage, loadBest, saveBest, loadHof, saveHof, appendHistory, loadOppStats, saveOppStats } from './storage.js';
 import { makeXorShift32 } from './prng.js';
+
+
+const PHYSICS_OPPONENT = Object.freeze({ __opp: 'physics' });
 
 /**
  * Evolution runner state (single instance).
@@ -22,6 +25,18 @@ const state = {
   config: null,
   hof: [],
   rng: null,
+  // Opponent-mode recent outcomes (for winrate last-N).
+  oppStats: {
+    self: [],
+    baseline: [],
+    physics: [],
+  },
+  oppStatsN: 100,
+  oppStatsSummary: {
+    self: { n: 0, winRate: 0 },
+    baseline: { n: 0, winRate: 0 },
+    physics: { n: 0, winRate: 0 },
+  },
 };
 
 /**
@@ -46,6 +61,9 @@ export async function startEvolution(opts = {}, onUpdate = null) {
   state.config = cfg;
   state.rng = makeXorShift32(Number(cfg.evoSeed ?? 1337) | 0);
 
+  // Opponent mode selected by UI.
+    const opponentMode = normalizeOpponentMode(cfg.opponentMode);
+
   // Load saved best if exists
   const saved = await loadBest();
   if (saved?.genome) {
@@ -67,6 +85,28 @@ export async function startEvolution(opts = {}, onUpdate = null) {
   // Load Hall of Fame (past best opponents)
   state.hof = await loadHof();
 
+  // Load opponent-mode recent outcomes (for winrate last-N)
+  try {
+    const loadedOpp = await loadOppStats();
+    if (loadedOpp && typeof loadedOpp === 'object') {
+      for (const k of ['self','baseline','physics']) {
+        const arr = loadedOpp[k];
+        if (Array.isArray(arr)) {
+          state.oppStats[k] = arr.map((v) => (v | 0));
+          if (state.oppStats[k].length > state.oppStatsN) state.oppStats[k].splice(0, state.oppStats[k].length - state.oppStatsN);
+        }
+      }
+    }
+  } catch {}
+  // Recompute summaries
+  for (const k of ['self','baseline','physics']) {
+    const buf = state.oppStats[k];
+    let w = 0;
+    for (let i = 0; i < buf.length; i++) if (buf[i] > 0) w++;
+    const n = buf.length;
+    state.oppStatsSummary[k] = { n, winRate: n ? (w / n) : 0 };
+  }
+
   // Init population around best
   const base = state.bestGenome || defaultGenome();
   state.population = initPopulation(cfg.populationSize, {
@@ -77,8 +117,11 @@ export async function startEvolution(opts = {}, onUpdate = null) {
   state.running = true;
   emit(onUpdate, { ...state, event: 'started' });
 
-  // Baseline opponent for evaluation/training. Default: self-play vs previous best snapshot.
-  let baselineOpp = cloneGenome(state.bestGenome || defaultGenome());
+  // Fixed opponent snapshot used for evaluation/training.
+  // - self: previous best snapshot (updated each generation)
+  // - baseline: default baseline genome (fixed)
+  // - physics: (reserved) fallback to baseline for now
+  let baselineOpp = resolveOpponent(opponentMode, state.bestGenome);
 
   try {
     while (state.running) {
@@ -154,8 +197,30 @@ export async function startEvolution(opts = {}, onUpdate = null) {
         savedNow = true;
       }
 
+      // Update opponent-mode recent-100 stats (internal only; UI will display later).
+      try {
+        const statsEval = evaluateGenome(res.best.genome, {
+          seeds: cfg.trainSeeds,
+          opponentGenomes: [baselineOpp],
+          winningScore: cfg.winningScore,
+          maxFrames: cfg.maxFrames,
+          decisionInterval: cfg.decisionInterval,
+          splitSeedsAcrossOpponents: false,
+          initialServeMode: /** @type {'alternate'|'p1'|'p2'} */ (cfg.initialServeMode || 'alternate'),
+          collectOutcomes: true,
+        });
+        _pushOutcomes(opponentMode, statsEval.outcomes, state.oppStatsN);
+        try { await saveOppStats(state.oppStats); } catch {}
+      } catch {}
+
       // ✅ Self-play: for next generation, use the latest best as the fixed opponent snapshot.
-      baselineOpp = cloneGenome(state.bestGenome);
+      // Baseline mode keeps using the fixed default opponent.
+      // Physics mode keeps using the physics marker.
+      if (opponentMode === 'self') {
+        baselineOpp = cloneGenome(state.bestGenome);
+      } else if (opponentMode === 'physics') {
+        baselineOpp = PHYSICS_OPPONENT;
+      }
 
       // (B-4) History row: record generation metrics (newest-first list via IndexedDB index)
       try {
@@ -201,6 +266,33 @@ export async function startEvolution(opts = {}, onUpdate = null) {
 }
 
 /**
+ * @param {any} mode
+ * @returns {'self'|'baseline'|'physics'}
+ */
+function normalizeOpponentMode(mode) {
+  const v = String(mode || '').toLowerCase();
+  if (v === 'baseline') return 'baseline';
+  if (v === 'physics') return 'physics';
+  return 'self';
+}
+
+/**
+ * @param {'self'|'baseline'|'physics'} mode
+ * @param {any} bestGenome
+ * @returns {any}
+ */
+function resolveOpponent(mode, bestGenome) {
+  if (mode === 'baseline') {
+    return cloneGenome(defaultGenome());
+  }
+  if (mode === 'physics') {
+    return PHYSICS_OPPONENT;
+  }
+  // self
+  return cloneGenome(bestGenome || defaultGenome());
+}
+
+/**
  * Build opponent pool for evaluation.
  * Order matters a bit: baseline first, then current best, then HOF.
  * @param {any} baseline
@@ -223,6 +315,26 @@ function buildOpponentPool(baseline, best, hof, maxHof) {
     }
   }
   return out;
+}
+
+/**
+ * Push match outcomes into ring buffer for the selected opponent mode.
+ * outcome: 1 win, -1 loss, 0 draw.
+ */
+function _pushOutcomes(mode, outcomes, maxN) {
+  if (!outcomes || !outcomes.length) return;
+  const key = (mode === 'baseline' || mode === 'physics') ? mode : 'self';
+  const buf = state.oppStats[key];
+  const lim = Math.max(1, (maxN ?? state.oppStatsN ?? 100) | 0);
+  for (let i = 0; i < outcomes.length; i++) {
+    buf.push((outcomes[i] | 0));
+  }
+  if (buf.length > lim) buf.splice(0, buf.length - lim);
+  // recompute summary
+  let w = 0;
+  for (let i = 0; i < buf.length; i++) if (buf[i] > 0) w++;
+  const n = buf.length;
+  state.oppStatsSummary[key] = { n, winRate: n ? (w / n) : 0 };
 }
 
 /**
@@ -293,9 +405,8 @@ function emit(cb, payload) {
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
+
 // Self-play baseline opponent: deep-clone to avoid mutation side-effects.
 function cloneGenome(g) {
   return g ? JSON.parse(JSON.stringify(g)) : g;
 }
-
-

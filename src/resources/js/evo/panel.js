@@ -198,8 +198,37 @@ export class EvoPanel {
     const rPhys = mkRadio('evo-opp-mode-panel', 'physics', 'Physics', false);
 
     oppRow.append(rSelf.wrap, rBase.wrap, rPhys.wrap);
+    // Persist opponent mode selection (so refresh keeps your choice)
+    const OPP_MODE_KEY = 'evo_opp_mode';
+    const savedOppMode = _lsGet(OPP_MODE_KEY);
+    if (savedOppMode === 'self' || savedOppMode === 'baseline' || savedOppMode === 'physics') {
+      rSelf.input.checked = (savedOppMode === 'self');
+      rBase.input.checked = (savedOppMode === 'baseline');
+      rPhys.input.checked = (savedOppMode === 'physics');
+    }
+    [rSelf.input, rBase.input, rPhys.input].forEach((r) => {
+      r.addEventListener('change', () => {
+        if (r.checked) _lsSet(OPP_MODE_KEY, r.value);
+      });
+    });
 
-    oppBox.append(oppTitle, oppRow);
+
+    // Opponent winrate (last 100) display (filled by runner updates)
+    const wrRow = el('div');
+    wrRow.style.marginTop = '4px';
+    wrRow.style.fontSize = '12px';
+    wrRow.style.opacity = '0.9';
+    wrRow.style.display = 'flex';
+    wrRow.style.flexWrap = 'wrap';
+    wrRow.style.gap = '8px';
+
+    const wrSelf = el('span', null, 'Self: —');
+    const wrBase = el('span', null, 'Baseline: —');
+    const wrPhys = el('span', null, 'Physics: —');
+
+    wrRow.append(el('span', null, 'WR100'), wrSelf, wrBase, wrPhys);
+
+    oppBox.append(oppTitle, oppRow, wrRow);
 
     // HOF section (static)
     const hofBox = el('div');
@@ -307,6 +336,9 @@ export class EvoPanel {
     this._btnImport = btnImport;
     this._importFile = importFile;
     this._oppRadios = [rSelf.input, rBase.input, rPhys.input];
+    this._oppWrSelf = wrSelf;
+    this._oppWrBase = wrBase;
+    this._oppWrPhys = wrPhys;
     this._hofLimit = hofLimit;
     this._hofMaxKeep = hofMaxKeep;
     this._hofRefresh = hofRefresh;
@@ -368,6 +400,23 @@ export class EvoPanel {
   /** @param {string} text */
   setStatus(text) {
     if (this._statusEl) this._statusEl.textContent = String(text || '');
+  }
+
+
+  /**
+   * Update opponent winrates display.
+   * @param {{self?:{n?:number, winRate?:number}, baseline?:{n?:number, winRate?:number}, physics?:{n?:number, winRate?:number}}} summary
+   */
+  setOpponentWinrates(summary) {
+    const fmt = (label, obj) => {
+      const n = obj && Number.isFinite(obj.n) ? (obj.n | 0) : 0;
+      const wr = obj && Number.isFinite(obj.winRate) ? obj.winRate : null;
+      if (!n || wr == null) return `${label}: —`;
+      return `${label}: ${(wr * 100).toFixed(1)}% (n=${n})`;
+    };
+    if (this._oppWrSelf) this._oppWrSelf.textContent = fmt('Self', summary && summary.self);
+    if (this._oppWrBase) this._oppWrBase.textContent = fmt('Baseline', summary && summary.baseline);
+    if (this._oppWrPhys) this._oppWrPhys.textContent = fmt('Physics', summary && summary.physics);
   }
 
   /** @param {boolean} running */
