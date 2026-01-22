@@ -10,7 +10,7 @@ import {
   getEvolutionState,
   isEvolutionRunning,
 } from './evo/runner.js';
-import { loadBest, saveBest } from './evo/storage.js';
+import { loadBest, saveBest, exportEvoData, importEvoData, listHof, pruneHof, listHistory, pruneHistory } from './evo/storage.js';
 import { chooseAction, defaultGenome } from './evo/policy_weighted.js';
 import { makeObservation } from './evo/observation.js';
 import { decidePhysicsAI } from './physics_ai.js';
@@ -730,7 +730,9 @@ function setUpBtns(pikaVolley, applyAndSaveOptions) {
     // - self: best vs best (P2 = P1)
     // - baseline: best vs default baseline genome (P2 = defaultGenome())
     function getEvoOpponentMode() {
-      const el = document.querySelector('input[name="evo-opp-mode"]:checked');
+      const el = /** @type {HTMLInputElement|null} */ (
+        document.querySelector('input[name="evo-opp-mode"]:checked')
+      );
       const v = el ? String(el.value || '') : '';
       if (v === 'baseline') return 'baseline';
       if (v === 'builtin') return 'builtin';
@@ -742,11 +744,14 @@ function setUpBtns(pikaVolley, applyAndSaveOptions) {
     const evoApplyBtn = document.getElementById('evo-apply-btn');
     const evoSaveBtn = document.getElementById('evo-save-btn');
     const evoLoadBtn = document.getElementById('evo-load-btn');
+    const evoExportBtn = document.getElementById('evo-export-btn');
+    const evoImportBtn = document.getElementById('evo-import-btn');
+    const evoImportFile = /** @type {HTMLInputElement|null} */ (document.getElementById('evo-import-file'));
 
     if (evoApplyBtn) {
-      evoApplyBtn.addEventListener('click', () => {
+      evoApplyBtn.addEventListener('click', async () => {
         const s = getEvolutionState();
-        const loaded = loadBest();
+        const loaded = await loadBest();
         const gBest = (s && s.bestGenome) ? s.bestGenome : (loaded ? loaded.genome : null);
         if (!gBest) {
           alert('No best genome yet. Run evolution or load a saved best first.');
@@ -774,14 +779,14 @@ function setUpBtns(pikaVolley, applyAndSaveOptions) {
     }
 
     if (evoSaveBtn) {
-      evoSaveBtn.addEventListener('click', () => {
+      evoSaveBtn.addEventListener('click', async () => {
         const s = getEvolutionState();
         if (!s || !s.bestGenome) {
           alert('No best genome to save yet.');
           return;
         }
         const savedAt = Date.now();
-        const ok = saveBest({
+        const ok = await saveBest({
           genome: s.bestGenome,
           bestWinRate: Number(s.bestWinRate ?? 0),
           bestEvalWinRate: Number(s.bestEvalWinRate ?? 0),
@@ -795,8 +800,8 @@ function setUpBtns(pikaVolley, applyAndSaveOptions) {
     }
 
     if (evoLoadBtn) {
-      evoLoadBtn.addEventListener('click', () => {
-        const b = loadBest();
+      evoLoadBtn.addEventListener('click', async () => {
+        const b = await loadBest();
         if (!b || !b.genome) {
           alert('No saved best found.');
           return;
@@ -826,6 +831,168 @@ function setUpBtns(pikaVolley, applyAndSaveOptions) {
       });
     }
 
+    // Export/Import (backup/restore) for evo storage
+    if (evoExportBtn) {
+      evoExportBtn.addEventListener('click', async () => {
+        try {
+          const payload = await exportEvoData();
+          const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `evo_storage_export_${Date.now()}.json`;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          URL.revokeObjectURL(url);
+        } catch (e) {
+          console.error(e);
+          alert('Export failed: ' + (e?.message ?? String(e)));
+        }
+      });
+    }
+
+    if (evoImportBtn && evoImportFile) {
+      evoImportBtn.addEventListener('click', () => {
+        try {
+          evoImportFile.value = '';
+          evoImportFile.click();
+        } catch (e) {
+          console.error(e);
+          alert('Import failed: ' + (e?.message ?? String(e)));
+        }
+      });
+
+      evoImportFile.addEventListener('change', async () => {
+        const file = evoImportFile.files && evoImportFile.files[0];
+        if (!file) return;
+        try {
+          const text = await file.text();
+          const payload = JSON.parse(text);
+          const ok = await importEvoData(payload, { clearBefore: true });
+          if (!ok) {
+            alert('Import failed (storage rejected payload).');
+            return;
+          }
+          alert('Import succeeded. The page will reload to apply loaded data.');
+          window.location.reload();
+        } catch (e) {
+          console.error(e);
+          alert('Import failed: ' + (e?.message ?? String(e)));
+        }
+      });
+    }
+
+    // --------------------
+    // HOF list/prune UI (DB-backed via listHof/pruneHof)
+    // --------------------
+    const hofLimitEl   = /** @type {HTMLInputElement|null} */ (document.getElementById('evo-hof-limit'));
+    const hofMaxKeepEl = /** @type {HTMLInputElement|null} */ (document.getElementById('evo-hof-maxkeep'));
+    const hofRefreshBtn = document.getElementById('evo-hof-refresh-btn');
+    const hofPruneBtn = document.getElementById('evo-hof-prune-btn');
+    const hofListEl = document.getElementById('evo-hof-list');
+
+    const HOF_LIMIT_KEY = 'evo_hof_list_limit';
+    const HOF_MAXKEEP_KEY = 'evo_hof_maxkeep';
+
+    function readNumSetting(key, defV) {
+      try {
+        const vRaw = localStorageWrapper.getItem(key);
+        const v = Number(vRaw);
+        return Number.isFinite(v) && v > 0 ? v : defV;
+      } catch {
+        return defV;
+      }
+    }
+
+    function writeNumSetting(key, v) {
+      try {
+        localStorageWrapper.setItem(key, String(v));
+      } catch {}
+    }
+
+    /** @returns {number} */
+    function getHofLimit() {
+      const v = hofLimitEl ? Number(hofLimitEl.value) : readNumSetting(HOF_LIMIT_KEY, 30);
+      const n = Number.isFinite(v) ? (v | 0) : 30;
+      return Math.max(1, n);
+    }
+
+    /** @returns {number} */
+    function getHofMaxKeep() {
+      const v = hofMaxKeepEl ? Number(hofMaxKeepEl.value) : readNumSetting(HOF_MAXKEEP_KEY, 200);
+      const n = Number.isFinite(v) ? (v | 0) : 200;
+      return Math.max(1, n);
+    }
+
+    function fmtHofLine(it, idx) {
+      const w = Number(it?.bestEvalWinRate ?? it?.bestWinRate ?? 0);
+      const fit = Number(it?.bestFitness ?? 0);
+      const created = Number(it?.__createdAt ?? it?.createdAt ?? it?.savedAt ?? 0);
+      const when = created > 0 ? new Date(created).toLocaleString() : '-';
+      const label = it?.tag ? String(it.tag) : '';
+      return `${idx + 1}. win=${fmtPct(w)} fit=${fmtNum(fit)} ${label ? '[' + label + '] ' : ''}${when}`;
+    }
+
+    function renderHofList(items, limit) {
+      if (!hofListEl) return;
+      const arr = Array.isArray(items) ? items : [];
+      const lim = Math.max(0, Number(limit ?? arr.length) | 0);
+      hofListEl.innerHTML = '';
+      if (arr.length === 0) {
+        hofListEl.textContent = '(empty)';
+        return;
+      }
+      const show = arr.slice(0, lim);
+      for (let i = 0; i < show.length; i++) {
+        const row = document.createElement('div');
+        row.textContent = fmtHofLine(show[i], i);
+        hofListEl.appendChild(row);
+      }
+    }
+
+    if (hofLimitEl) {
+      const v = readNumSetting(HOF_LIMIT_KEY, Number(hofLimitEl.value || 30));
+      hofLimitEl.value = String(v | 0);
+      hofLimitEl.addEventListener('change', () => writeNumSetting(HOF_LIMIT_KEY, getHofLimit()));
+    }
+    if (hofMaxKeepEl) {
+      const v = readNumSetting(HOF_MAXKEEP_KEY, Number(hofMaxKeepEl.value || 200));
+      hofMaxKeepEl.value = String(v | 0);
+      hofMaxKeepEl.addEventListener('change', () => writeNumSetting(HOF_MAXKEEP_KEY, getHofMaxKeep()));
+    }
+
+    if (hofRefreshBtn) {
+      hofRefreshBtn.addEventListener('click', async () => {
+        try {
+          const lim = getHofLimit();
+          const items = await listHof(lim);
+          renderHofList(items, lim);
+        } catch (e) {
+          console.error(e);
+          alert('Refresh HOF failed: ' + (e?.message ?? String(e)));
+        }
+      });
+    }
+
+    if (hofPruneBtn) {
+      hofPruneBtn.addEventListener('click', async () => {
+        try {
+          const maxKeep = getHofMaxKeep();
+          const deleted = await pruneHof(maxKeep);
+          const lim = getHofLimit();
+          const items = await listHof(lim);
+          renderHofList(items, lim);
+          alert(`Pruned HOF: deleted ${deleted} rows (kept newest ${maxKeep}).`);
+        } catch (e) {
+          console.error(e);
+          alert('Prune HOF failed: ' + (e?.message ?? String(e)));
+        }
+      });
+    }
+
+
+
   }
 }
 
@@ -849,7 +1016,116 @@ function setSelectedOptionsBtn(options) {
     }
   }
   if (options.bgm) {
-    const bgmOnBtn = document.getElementById('bgm-on-btn');
+    // --------------------
+    // History list/prune UI (DB-backed via listHistory/pruneHistory)
+    // --------------------
+    function readNumSetting(key, defV) {
+      try {
+        const vRaw = localStorageWrapper.getItem(key);
+        const v = Number(vRaw);
+        return Number.isFinite(v) && v > 0 ? v : defV;
+      } catch {
+        return defV;
+      }
+    }
+
+    function writeNumSetting(key, v) {
+      try {
+        localStorageWrapper.setItem(key, String(v));
+      } catch {}
+    }
+
+    const histLimitEl = /** @type {HTMLInputElement|null} */ (document.getElementById('evo-hist-limit'));
+    const histMaxKeepEl = /** @type {HTMLInputElement|null} */ (document.getElementById('evo-hist-maxkeep'));
+    const histRefreshBtn = document.getElementById('evo-hist-refresh-btn');
+    const histPruneBtn = document.getElementById('evo-hist-prune-btn');
+    const histListEl = document.getElementById('evo-hist-list');
+
+    const HIST_LIMIT_KEY = 'evo_hist_list_limit';
+    const HIST_MAXKEEP_KEY = 'evo_hist_maxkeep';
+
+    /** @returns {number} */
+    function getHistLimit() {
+      const v = histLimitEl ? Number(histLimitEl.value) : readNumSetting(HIST_LIMIT_KEY, 50);
+      const n = Number.isFinite(v) ? (v | 0) : 50;
+      return Math.max(1, n);
+    }
+
+    /** @returns {number} */
+    function getHistMaxKeep() {
+      const v = histMaxKeepEl ? Number(histMaxKeepEl.value) : readNumSetting(HIST_MAXKEEP_KEY, 2000);
+      const n = Number.isFinite(v) ? (v | 0) : 2000;
+      return Math.max(1, n);
+    }
+
+    function fmtHistLine(it, idx) {
+      const gen = Number(it?.generation ?? it?.gen ?? 0);
+      const bw = Number(it?.bestWinRate ?? it?.generationBestWinRate ?? 0);
+      const be = Number(it?.bestEvalWinRate ?? it?.generationBestEvalWinRate ?? 0);
+      const fit = Number(it?.bestFitness ?? it?.fitness ?? 0);
+      const created = Number(it?.__createdAt ?? it?.createdAt ?? it?.savedAt ?? 0);
+      const when = created > 0 ? new Date(created).toLocaleString() : '-';
+      return `${idx + 1}. gen=${gen} win=${fmtPct(bw)} eval=${fmtPct(be)} fit=${fmtNum(fit)} ${when}`;
+    }
+
+    function renderHistList(items, limit) {
+      if (!histListEl) return;
+      const arr = Array.isArray(items) ? items : [];
+      const lim = Math.max(0, Number(limit ?? arr.length) | 0);
+      histListEl.innerHTML = '';
+      if (arr.length === 0) {
+        histListEl.textContent = '(empty)';
+        return;
+      }
+      const show = arr.slice(0, lim);
+      for (let i = 0; i < show.length; i++) {
+        const row = document.createElement('div');
+        row.textContent = fmtHistLine(show[i], i);
+        histListEl.appendChild(row);
+      }
+    }
+
+    if (histLimitEl) {
+      const v = readNumSetting(HIST_LIMIT_KEY, 50);
+      histLimitEl.value = String(v);
+      histLimitEl.addEventListener('change', () => writeNumSetting(HIST_LIMIT_KEY, getHistLimit()));
+    }
+    if (histMaxKeepEl) {
+      const v = readNumSetting(HIST_MAXKEEP_KEY, 2000);
+      histMaxKeepEl.value = String(v);
+      histMaxKeepEl.addEventListener('change', () => writeNumSetting(HIST_MAXKEEP_KEY, getHistMaxKeep()));
+    }
+
+    if (histRefreshBtn) {
+      histRefreshBtn.addEventListener('click', async () => {
+        try {
+          const lim = getHistLimit();
+          const items = await listHistory(lim);
+          renderHistList(items, lim);
+        } catch (e) {
+          console.error(e);
+          alert('Refresh history failed: ' + (e?.message ?? String(e)));
+        }
+      });
+    }
+
+    if (histPruneBtn) {
+      histPruneBtn.addEventListener('click', async () => {
+        try {
+          const maxKeep = getHistMaxKeep();
+          const deleted = await pruneHistory(maxKeep);
+          const lim = getHistLimit();
+          const items = await listHistory(lim);
+          renderHistList(items, lim);
+          alert(`Pruned history: deleted ${deleted} rows (kept newest ${maxKeep}).`);
+        } catch (e) {
+          console.error(e);
+          alert('Prune history failed: ' + (e?.message ?? String(e)));
+        }
+      });
+    }
+
+const bgmOnBtn = document.getElementById('bgm-on-btn');
     const bgmOffBtn = document.getElementById('bgm-off-btn');
     switch (options.bgm) {
       case 'on':

@@ -4,7 +4,7 @@ import { EVO_DEFAULTS } from './config.js';
 import { defaultGenome } from './policy_weighted.js';
 import { evolveOneGeneration, initPopulation } from './evolver_ga.js';
 import { evaluateGenome } from './evolver_ga.js';
-import { loadBest, saveBest, loadHof, saveHof } from './storage.js';
+import { initStorage, loadBest, saveBest, loadHof, saveHof, appendHistory } from './storage.js';
 import { makeXorShift32 } from './prng.js';
 
 /**
@@ -39,12 +39,15 @@ export function isEvolutionRunning() {
 export async function startEvolution(opts = {}, onUpdate = null) {
   if (state.running) return;
 
+  // Ensure storage is ready (IndexedDB open, etc.)
+  await initStorage();
+
   const cfg = { ...EVO_DEFAULTS, ...(opts || {}) };
   state.config = cfg;
   state.rng = makeXorShift32(Number(cfg.evoSeed ?? 1337) | 0);
 
   // Load saved best if exists
-  const saved = loadBest();
+  const saved = await loadBest();
   if (saved?.genome) {
     state.bestGenome = saved.genome;
     state.bestWinRate = Number(saved.bestWinRate ?? 0);
@@ -62,7 +65,7 @@ export async function startEvolution(opts = {}, onUpdate = null) {
   }
 
   // Load Hall of Fame (past best opponents)
-  state.hof = loadHof();
+  state.hof = await loadHof();
 
   // Init population around best
   const base = state.bestGenome || defaultGenome();
@@ -92,7 +95,6 @@ export async function startEvolution(opts = {}, onUpdate = null) {
         maxFrames: cfg.maxFrames,
         decisionInterval: cfg.decisionInterval,
         splitSeedsAcrossOpponents: !!cfg.splitSeedsAcrossOpponents,
-        rng: state.rng,
         // JSDoc inference may widen config.initialServeMode to string; cast to the intended union.
         initialServeMode: /** @type {'alternate'|'p1'|'p2'} */ (cfg.initialServeMode || 'alternate'),
       });
@@ -130,7 +132,7 @@ export async function startEvolution(opts = {}, onUpdate = null) {
         state.bestEvalWinRate = bestEvalWinRate;
         state.bestFitness = bestFit;
         state.lastSavedAt = Date.now();
-        saveBest({
+        await saveBest({
           genome: state.bestGenome,
           bestWinRate: state.bestWinRate,
           bestEvalWinRate: state.bestEvalWinRate,
@@ -148,12 +150,27 @@ export async function startEvolution(opts = {}, onUpdate = null) {
           generation: state.generation,
           savedAt: state.lastSavedAt,
         }, Math.max(1, (cfg.hofSize ?? 8) | 0));
-        saveHof(state.hof);
+        await saveHof(state.hof);
         savedNow = true;
       }
 
       // ✅ Self-play: for next generation, use the latest best as the fixed opponent snapshot.
       baselineOpp = cloneGenome(state.bestGenome);
+
+      // (B-4) History row: record generation metrics (newest-first list via IndexedDB index)
+      try {
+        await appendHistory({
+          createdAt: Date.now(),
+          generation: state.generation,
+          bestWinRate: Number(bestWin ?? 0),
+          bestEvalWinRate: Number(bestEval ?? bestWin ?? 0),
+          bestFitness: Number(state.bestFitness ?? 0),
+          savedNow: !!savedNow,
+        });
+      } catch {
+        // ignore
+      }
+
 
       const elapsedMs = Date.now() - t0;
       emit(onUpdate, {
